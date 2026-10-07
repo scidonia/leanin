@@ -43,9 +43,15 @@ Both name the same release. The nix path pins the release **tarball** rather tha
 run may not do. This is the same convention `../SpecAMQP` and `../TemperMint` use.
 
 ```sh
-nix develop -c lake build     # library + harness
-nix develop -c lake exe spike # measure Lean's current scheduler
+nix develop -c lake build          # the library, the theory, and every harness below
+
+nix develop -c lake exe spike      # measure Lean's current scheduler
+nix develop -c lake exe wakerspike # the Task-as-waker bridge
+nix develop -c lake exe controls   # runtime controls for the bridge axioms
 ```
+
+`lake build` also prints the `#print axioms` audit from `LeanIn/Theory/Bridge.lean`, which reports
+what the model's theorems rest on — currently only Lean's built-in `propext` and `Quot.sound`.
 
 The shell runs `lake` and `lean` under `nice -n 19` by default, so elaborating `Std` yields to
 anything interactive. `LEANIN_LEAN_NICE=0 nix develop` opts out.

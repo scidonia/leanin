@@ -171,8 +171,11 @@ Critical path to something usable: **M1 → M2 → M3**. M4 is forced by D2 and 
   every hypothesis is inhabited and every predicate distinguishes. **No sorries.**
 - `LeanIn/Theory/Bridge.lean` — the seven axioms, each with its citation, plus the `#print axioms`
   audit, which reports that the model's theorems depend only on `propext` and `Quot.sound`.
+- `LeanIn/Test/Control.lean` — the runtime controls, one per testable axiom (A1, A2, A4, A5, A7), with
+  their observations in [`evidence.md`](docs/evidence.md) §6. A3 and A4 are documented as *not*
+  testable rather than skipped quietly.
 
-**Still to do** — the interface signatures, and the runtime controls.
+**Still to do** — the interface signatures, and the refinement obligation stated against them.
 
 **Build** — `LeanIn/Theory/`, then `docs/interface.md` realised as Lean signatures
 - the machine `M`: engine state, locks, condvar waiter sets, clock;

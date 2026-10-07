@@ -1,6 +1,6 @@
 name = "leanin"
 version = "0.1.0"
-defaultTargets = ["LeanIn", "spike", "wakerspike"]
+defaultTargets = ["LeanIn", "spike", "wakerspike", "controls"]
 
 [[lean_lib]]
 name = "LeanIn"
@@ -12,3 +12,7 @@ root = "Spike"
 [[lean_exe]]
 name = "wakerspike"
 root = "WakerSpike"
+
+[[lean_exe]]
+name = "controls"
+root = "Controls"

@@ -204,7 +204,59 @@ source (`object.cpp:792` → `spawn_dedicated_worker`), not on this harness.
 
 ---
 
-## 6. Reported: what is *not* proven anywhere
+## 6. Measured: the runtime controls
+
+Harness: `LeanIn/Test/Control.lean`, run as `nix develop -c lake exe controls`. One control per bridge
+axiom, so that `LeanIn/Theory/Bridge.lean`'s claims are not assertions.
+
+```
+$ ./controls
+controls for the bridge axioms
+  A3 (release without ownership) and A6 (thread creation) are not tested — see the header.
+
+  A7  10000 reads, 0 regressions, 10000 advances : monotone = true
+  A2  tryLock while held → false : true
+  A2  tryLock while free → true  : true
+  A2  the evidence for `true` is that it *returned* while the lock was held; the 209344 ns
+      it took is mostly the thread round-trip and proves nothing on its own
+  A5  after a lost notify + 200ms, waiter is : running
+      (`running` here means started-and-not-finished, i.e. still parked — a parked task
+       reports as `running` because its closure has been taken; see `object.cpp:1080`)
+  A5  after notifyAll + 200ms, waiter is        : finished
+  A4  after a wake with the predicate false : running  (re-parked = correct)
+  A4  after the predicate becomes true      : finished
+  A1  4 threads x 500000 increments = 2000000 expected
+  A1  unguarded → 1828304  (171696 lost)
+  A1  guarded   → 2000000  exact = true  (affirmative control)
+```
+
+Readings **[M]**:
+
+1. **A1 — mutual exclusion is load-bearing.** Without a lock, 4 threads × 500 000 increments lost
+   between 171 696 and 536 621 updates across runs (a quarter of them); with a `Std.Mutex` the total is
+   exactly 2 000 000. The guarded half is the **affirmative control**: it shows the counter and the
+   threads are real, so the loss is attributable to the missing lock.
+2. **A2 — `tryLock` observes a held lock and returns.** The `tryLock` is issued from a *second* thread,
+   because `std::mutex::try_lock` on a mutex already held by the calling thread is undefined behaviour
+   — the naive control would have been the defect it is meant to detect.
+3. **A5 — a notification with no waiter is lost.** `notifyOne` before anyone parks leaves the waiter
+   parked indefinitely (after 200 ms it is still not `finished`); `notifyAll` then resumes it. This is
+   the runtime counterpart of the proved `notifyOne_no_waiters`.
+4. **A4 — a `waitUntil` shape tolerates a wakeup it did not ask for.** Woken with the predicate false,
+   the waiter re-parks; when the predicate becomes true, it finishes. This is a *tolerance* test, not an
+   observation of a spurious wakeup.
+5. **A7 — the clock never went backwards** across 10 000 reads, and advanced on every one.
+
+⚠️ **Limits of these controls.** A1 is a **race**: loss is expected but not guaranteed on any given
+run, and the count is printed rather than asserted. **A3 and A4 cannot be tested as claimed** — A3
+because violating it is undefined behaviour, so the test *is* the defect; A4 because the implementation
+is permitted to wake spuriously, not obliged to, so a spurious wakeup cannot be forced. Both are
+discharged by reading `mutex.cpp` against the standard, and A3 additionally by the model having no
+transition for it (`unlock_without_ownership_has_no_transition`). **A6** is absent from v1.
+
+---
+
+## 7. Reported: what is *not* proven anywhere
 
 Checked deliberately, because a negative here is a research contribution:
 
