@@ -47,8 +47,10 @@ structure Ring (α : Type) (cap : Nat) where
   size  : Nat := 0
 deriving Inhabited, Repr
 
-/-- The all-empty ring, written out so examples reduce. -/
-def emptyRing (α : Type) (cap : Nat) : Ring α cap := { slots := [], head := 0, size := 0 }
+/-- The all-empty ring: a store of `cap` empty slots. Written out so examples reduce — and note that
+`slots` must have length `cap`, which the vacuity checks below are what caught. -/
+def emptyRing (α : Type) (cap : Nat) : Ring α cap :=
+  { slots := List.replicate cap none, head := 0, size := 0 }
 
 variable {α : Type} [Inhabited α]
 
@@ -229,16 +231,37 @@ theorem pop_wf (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).2.WF 
         simp only [List.getElem?_set_ne hne]
         exact hw.2.2 (i + 1) (by omega)
 
+/-! ### Vacuity and the audit
+
+`WF` must be shown to **distinguish**, or the laws above could be true of nothing. The checks below
+use defeq coercion rather than `simp`: `(emptyRing Nat 4).size` reduces to `0` definitionally, but it
+is not a `simp` target, which is what defeated three earlier attempts. -/
+
+/-- A fresh ring is well-formed. -/
+example : (emptyRing Nat 4).WF := by
+  refine ⟨by simp [emptyRing], by simp [emptyRing], ?_⟩
+  intro i hi
+  exact (Nat.not_lt_zero i hi).elim
+
+/-- …and a ring whose live count exceeds its capacity is **not**, so `WF` is not true of everything. -/
+example : ¬ (Ring.WF (α := Nat) (cap := 4) ⟨List.replicate 4 none, 0, 5⟩) := by
+  intro h
+  have hle := h.2.1
+  have h5 : (5 : Nat) ≤ 4 := hle
+  omega
+
+/-- The laws compose: a push preserves `WF`, and a pop of it can always proceed. -/
+example : (Ring.pop (Ring.push (emptyRing Nat 4) 7)).1.isSome := by
+  have hw : (emptyRing Nat 4).WF := by
+    refine ⟨by simp [emptyRing], by simp [emptyRing], ?_⟩
+    intro i hi
+    exact (Nat.not_lt_zero i hi).elim
+  have hroom : (emptyRing Nat 4).size < 4 := by simp [emptyRing]
+  exact pop_isSome _ (push_wf _ _ hw hroom) (by simp [Ring.push, emptyRing])
+
 /-! ### The audit
 
-**Outstanding, and recorded rather than hidden:** the vacuity checks for `Ring` are not written.
-`emptyRing` witnesses that `WF` is inhabited and a ring with `size > cap` witnesses that it
-distinguishes, but three `example`s attempting exactly that were withdrawn — `simp`'s handling of the
-`emptyRing` projection fought harder than the theorems did. Tracked in `PLAN.md` M2b.
-
-The laws themselves are checked:
-
-`#print axioms` reports what each rests on. -/
+`#print axioms` reports what each law rests on. -/
 
 #print axioms LeanIn.slot_ne
 #print axioms LeanIn.push_toList

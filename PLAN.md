@@ -293,14 +293,21 @@ condition** out with it. `Nat` subtraction saturates, so a bare `m % cap = m - c
 equation contradicted. A second, quieter trap: `hw : r.WF` is opaque to `omega`, so `hw.2.1` has to be
 extracted into a local before any bound on `r.size` is visible.
 
-**⚠️ Outstanding, recorded rather than hidden:** the vacuity checks for `Ring` are not written.
-`emptyRing` witnesses that `WF` is inhabited and a ring with `size > cap` witnesses that it
-distinguishes — but the three `example`s attempting exactly that were withdrawn, because `simp`'s
-handling of the `emptyRing` projection fought harder than the theorems did. The file says so where the
-examples would have been.
+**Vacuity checks are in — and they earned their keep.** Three checks: `emptyRing Nat 4` is
+well-formed; a ring whose live count exceeds its capacity is *not*, so `WF` distinguishes rather than
+holding of everything; and a push followed by a pop can always proceed.
 
-**Exit criteria** — the laws hold, and the ghost view is the only representation any downstream proof
-mentions.
+The first one **found a real defect**. `emptyRing` was defined with `slots := []`, but `WF` requires
+`slots.length = cap` — so `emptyRing Nat 4` was never well-formed and every law instantiating it was
+about nothing. It is now `List.replicate cap none`. A gap I nearly left as "outstanding" turned out to
+be hiding a bug in the very definition the checks existed to validate.
+
+Getting the checks to typecheck also needed a technique worth recording: **use defeq coercion, not
+`simp`**. `(emptyRing Nat 4).size` reduces to `0` definitionally but is not a `simp` target, so
+`have : i < 0 := hi` works where `simp [emptyRing] at hi` leaves a goal behind.
+
+**Exit criteria** — the laws hold, the checks distinguish, and the ghost view is the only representation
+any downstream proof mentions.
 
 ---
 
