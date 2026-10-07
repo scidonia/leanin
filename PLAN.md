@@ -162,6 +162,18 @@ Critical path to something usable: **M1 → M2 → M3**. M4 is forced by D2 and 
 
 **Goal:** the axioms exist as Lean declarations, and the interface is frozen against them.
 
+**Landed so far.** The machine, its theorems, and the bridge:
+- `LeanIn/Theory/World.lean` — `World`, `Act`, `step`/`Step`, and proofs of mutual exclusion
+  (`lock_has_one_owner`, `lock_gives_ownership`), A3's impossibility
+  (`unlock_without_ownership_has_no_transition`), A5's loss of notification
+  (`notifyOne_no_waiters`, with affirmative controls), A4's `spurious_wakeup_permitted`, and no
+  fairness (`both_orders_permitted`, `reacquisition_while_others_wait`). Plus vacuity checks showing
+  every hypothesis is inhabited and every predicate distinguishes. **No sorries.**
+- `LeanIn/Theory/Bridge.lean` — the seven axioms, each with its citation, plus the `#print axioms`
+  audit, which reports that the model's theorems depend only on `propext` and `Quot.sound`.
+
+**Still to do** — the interface signatures, and the runtime controls.
+
 **Build** — `LeanIn/Theory/`, then `docs/interface.md` realised as Lean signatures
 - the machine `M`: engine state, locks, condvar waiter sets, clock;
 - `⟦·⟧` for the primitive fragment;

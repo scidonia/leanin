@@ -67,6 +67,23 @@ Sources: A1–A3 `mutex.cpp:27–39` → `std::mutex`, ISO C++ `[thread.mutex.re
 `mutex.cpp:55–69` → `std::condition_variable`, `[thread.condition.condvar]`; A6 `object.cpp:792` →
 `thread.cpp:120–137`; A7 `object.cpp:421`.
 
+### Which of these turned out to be theorems
+
+Building the model (`LeanIn/Theory/World.lean`) changed the accounting, and for the better. A1's mutual
+exclusion, A3's precondition impossibility, A4's permission for spurious wakeups, and A5's absence of
+memory are all **proved as theorems about the model** — none of them is assumed. `#print axioms`
+confirms it, so the claim is mechanical rather than a promise:
+
+```
+'LeanIn.notifyOne_no_waiters' depends on axioms: [propext]
+'LeanIn.reacquisition_while_others_wait' depends on axioms: [propext, Quot.sound]
+```
+
+Lean's built-in axioms only — no bridge axioms. What remains axiomatic is the connection between the
+model and the running program (`LeanIn/Theory/Bridge.lean`, seven axioms), each citing the C++ or the
+standard clause it claims the runtime honours. **The TCB is therefore smaller than this document
+originally claimed**, and the audit is a build step rather than an intention.
+
 ### The absences
 
 These are the load-bearing half, because each one *forces* a design constraint rather than being a
