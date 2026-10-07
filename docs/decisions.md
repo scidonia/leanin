@@ -179,6 +179,50 @@ they are suggestive rather than conclusive. The reliable check is the first one 
 distinct. The claim "dedicated priority implies its own OS thread" rests on the runtime source
 (`object.cpp:792` → `spawn_dedicated_worker`), not on this spike.
 
+### D11 — One reactor, and I/O concurrency comes from the blocking pool.
+
+**Rust does not have multi-threaded I/O polling either.** In a `multi_thread` runtime there is exactly
+**one** driver, shared by every worker: `Parker` holds `Arc<Shared> { driver: TryLock<Driver> }`, and
+the source comment says "Shared across multiple Parker handles", "Only one thread at a time can use
+this" (`park.rs:52–53`). Workers `try_lock` it — the winner polls, the losers park on a condvar and
+report `HadDriver::No` (`park.rs:89–94`). So Tokio's multi-threading is about *running tasks*
+concurrently; **polling is single-threaded.**
+
+Rust gets I/O *concurrency* from elsewhere: `spawn_blocking`, which is how `tokio::fs` is built
+(`fs/file.rs:29,407`) — regular files have no readiness notification, so a thread is the only option.
+Parallel reactors come from running **multiple runtimes** (thread-per-core), and from io_uring, which
+is unstable (`--cfg tokio_unstable`, `io-uring` feature, `runtime/io/driver/uring.rs`).
+
+**Lean is the same shape but stricter.** One process-global loop: `extern event_loop_t global_ev`
+(`event_loop.h:32`), initialised once (`initialize_libuv_loop() = event_loop_init(&global_ev)`,
+`uv/event_loop.cpp:137`), polled by one thread (`libuv.cpp:26`). There is **no `uv_loop_init` anywhere**
+in the runtime, and `Std.Internal.UV.Loop` exposes only `Options`, `configure` and `alive` — 43 lines,
+with no way to create a loop. DNS goes to `uv_getaddrinfo(global_ev.loop, …)` (`uv/dns.cpp:73`), and
+Lean binds no general threadpool API (`uv_queue_work` appears nowhere in the bindings or the runtime).
+
+**"Multi-threaded I/O" means three different things, and only one is ours:**
+
+| Meaning | Available? |
+|---|---|
+| **N I/O operations in flight concurrently** | **yes — this is M4.** The blocking pool. No new primitives. |
+| N threads *polling* readiness (parallel reactors) | no — needs per-thread-loop externs, and every `lean_uv_*` call goes through `global_ev`, so it bypasses the leaf layer D3 reuses |
+| io_uring (multiple queues, multishot) | no — a new extern for the ring; unstable even in Rust |
+
+**Decision:** the blocking pool (M4), with its remit extended to cover **blocking I/O and blocking CPU**,
+not just `IO.sleep`. The other two are out of scope.
+
+**Why the first is sufficient.** For *sockets*, one reactor is normally not the bottleneck: epoll
+handles very large connection counts on a single loop, and the per-event work is already parallel
+because that is the scheduler's job. Multiple reactors are a latency and CPU-locality optimisation
+(Seastar, glommio, Monoio), not a scalability requirement. For *files*, a thread pool is not an
+optimisation at all — there is no readiness event to wait on, which is precisely why `tokio::fs` is
+`spawn_blocking`.
+
+**Note on A6.** M4 needs threads, but they come from `Task.Priority.dedicated` — i.e. from `Task`,
+which D3 already places in the TCB. So A6 as a raw `pthread_create` axiom is *still* not needed in v1.
+That holds only as long as the blocking pool is built on `Task` rather than spawning threads itself;
+if it ever spawns its own, A6 joins v1's axiom set.
+
 ---
 
 ## Open

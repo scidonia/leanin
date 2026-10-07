@@ -230,14 +230,17 @@ before, which is a scheduler whose behaviour is *specified*.
 
 ### M4 — The blocking pool
 
-**Goal:** stop a blocking task from stopping everything.
+**Goal:** stop blocking work from stopping everything — blocking **I/O and CPU**, not just `IO.sleep`
+(D11).
 
 **Why here.** D2 forces it: with one carrier, `IO.sleep` on the executor blocks the executor. This is
 the 801 ms pathology from [`evidence.md`](evidence.md), and under a single carrier it is *worse* than
-under the stock pool, which at least has 8 workers.
+under the stock pool, which at least has 8 workers. It is also the only place `leanin` gets I/O
+concurrency: polling stays single-threaded (D11), and for files a thread is the only option.
 
 **Build** — `LeanIn/Runtime/Blocking.lean`: a bounded pool of carrier threads, off the executor's
-queue, with its own queue and its own shutdown.
+queue, with its own queue and its own shutdown. Threads come from `Task.Priority.dedicated`, so no new
+primitive and no A6.
 
 **Test** — the two measured cases, as regression guards: `N` blocking jobs must not stall the
 executor, and the stock pool must be left untouched.
