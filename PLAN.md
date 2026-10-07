@@ -203,6 +203,22 @@ every axiom has a control that has been observed to distinguish "holds" from "do
 - the worker shape: bounded ring, one-slot LIFO, `lifoPolls` capped at 3, overflow to inject;
 - `Scheduler`: workers, inject, idle set, `stopping`.
 
+**Landed so far** — `LeanIn/Model/Pool.lean`, the worker shape:
+- `Pool` with the ring, LIFO slot, per-tick allowance, inject queue, and the `pushed`/`taken`
+  bookkeeping Tokio lacks. **No sorries.**
+- **`Consistent`** — no lost work, as an equation: `inFlight + taken = pushed`. Preserved by
+  `submit`, `take`, `steal` and `tick`; Tokio asserts this at runtime (`queue.rs:571`).
+- **`take_returns_if_present`** — `take` never reports nothing while work is present. This is the
+  theorem the LIFO *flush* exists for: without it the per-tick allowance could strand work while
+  `Consistent` still held.
+- **`submit_bounded`** — the ring stays within capacity through overflow.
+- Vacuity checks for every predicate, including the control that work held *only* in the LIFO slot is
+  genuinely not stealable while the owner can still reach it.
+- **The audit**: `#print axioms` on four of these reports only `propext` and `Quot.sound` — none of
+  the bridge axioms. The model is not circular; it does not assume the primitives it is about.
+
+**Still to do** — `Scheduler` (workers, inject, idle set, `stopping`) and the no-lost-wakeup theorem.
+
 **Prove**
 - queue invariants 1–5 (no lost work, well-defined reads, uniqueness, existence, bounded capacity);
 - **no lost wakeup**: if work exists and a worker is parked, one is woken;

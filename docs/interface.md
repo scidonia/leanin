@@ -69,6 +69,11 @@ array has no reclamation problem, which is the entire reason Tokio abandoned Cha
 
 ### Invariants the model must state
 
+**Realised** as `LeanIn.Model.Pool` (`LeanIn/Model/Pool.lean`): the worker shape sketched above, as
+Lean. Invariants 1 and 5 are proved there — `Pool.Consistent` for no-lost-work, `submit_bounded` for
+capacity, and `take_returns_if_present` for the LIFO allowance not stranding work. Invariants 2–4
+(well-defined reads, uniqueness, existence) are stated over the pool as a whole and still to do.
+
 Taken from the deque literature (Lê et al.'s four properties) and from Tokio's own assertion that a
 queue is empty when dropped (`queue.rs:571`):
 
