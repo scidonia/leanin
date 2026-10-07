@@ -74,6 +74,11 @@ Lean. Invariants 1 and 5 are proved there — `Pool.Consistent` for no-lost-work
 capacity, and `take_returns_if_present` for the LIFO allowance not stranding work. Invariants 2–4
 (well-defined reads, uniqueness, existence) are stated over the pool as a whole and still to do.
 
+⚠️ **`ring` here is the specification, not the container** (D12). It is the ghost view; a `Ring`
+container — fixed store plus a head index and a live count — refines it, with `Ring.toList` as the
+view and `Ring.WF` (including density: the live range has no holes) as the invariant. Lean's own
+`Std.DHashMap` does exactly this: Array implementation, `List` model, laws in a separate file.
+
 Taken from the deque literature (Lê et al.'s four properties) and from Tokio's own assertion that a
 queue is empty when dropped (`queue.rs:571`):
 

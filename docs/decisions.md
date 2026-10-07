@@ -238,6 +238,41 @@ if it ever spawns its own, A6 joins v1's axiom set.
 
 ---
 
+### D12 — `List` is the *specification*; a ring buffer is the *container*.
+
+The model's `ring : List α` is not an implementation and must not be read as one. It is the ghost
+view, and a separate `Ring` container refines it.
+
+**The container.** `Ring` is a fixed store plus the index of the oldest live element and a live count,
+with:
+
+- `Ring.toList` — the ghost view, oldest first, so every proof is about a list;
+- `Ring.WF` — the store's length is `cap`, the live count fits, and the live range is **dense** (no
+  holes), so `toList` yields real elements rather than defaults;
+- `push` / `pop`, with `push_toList` and `pop_toList` as the laws tying it to the spec.
+
+**Precedent: Lean's own containers already do exactly this.** `Std.DHashMap` is an Array-of-buckets
+implementation carrying a bundled well-formedness invariant, and `Std/Data/DHashMap/Lemmas.lean`
+proves its operations against a **`List` model**. Array container, list ghost view, laws in a separate
+file — the pattern is the house one, not an invention.
+
+**The check that the spec is faithful, not accidentally quadratic.** The model's operations are
+push-back, pop-front, and "drain the front half into `inject`". All three are what a ring does
+natively — the drain is `O(cap/2)`, bounded, and is exactly what `push_overflow` does (`queue.rs:253`).
+**Nothing in the model requires arbitrary list surgery**, so the list model is a faithful
+specification of a ring, and the `O(n)` list operations are spec-level convenience, not a performance
+claim about the implementation.
+
+**Where the new difficulty is, stated honestly.** A faithful array model makes push and pop turn on
+index arithmetic modulo `cap`. That is a different kind of proof work from the pool's permutation and
+chunk reasoning, and it is *isolated*: one lemma (distinct live indices occupy distinct slots) carries
+all of it, and the ghost view means nothing downstream ever sees an index.
+
+**Consequence for the plan.** `Ring` is a pure, provable obligation and belongs *before* M3's
+concurrency, since the concurrent queue is a `Ring` under a mutex. It is scheduled as **M2b**.
+
+---
+
 ## Open
 
 None. All decisions are closed; D9 should be revisited once the interface has seen use.

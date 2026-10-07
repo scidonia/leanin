@@ -248,6 +248,37 @@ be inhabited by some reachable state and not by others, so the theorems are not 
 
 ---
 
+### M2b — The ring buffer container (D12)
+
+**Goal:** the container the spec describes, and the laws tying it to the spec.
+
+`Pool.ring : List α` is the ghost view, not an implementation. The container is a fixed store plus the
+index of the oldest live element plus a live count.
+
+**Build** — `LeanIn/Data/Ring.lean`
+- `Ring` with `slots`, `head`, `size`;
+- `Ring.toList` — the ghost view, oldest first, so every downstream proof is about a list;
+- `Ring.WF` — the store's length is `cap`, the live count fits, **and the live range is dense** (no
+  holes), so `toList` yields real elements rather than defaults;
+- `push` / `pop`.
+
+**Prove**
+- `push_toList` and `pop_toList` — the laws that make `Ring` an implementation of the spec's queue;
+- the one lemma where the arithmetic lives: distinct live indices occupy distinct slots. Everything
+  modular is isolated there, and no proof downstream of the ghost view ever sees an index.
+
+**Why before M3:** the concurrent queue is a `Ring` under a mutex. This is the implementation's core,
+and it is pure, so it is provable now rather than under a lock.
+
+**Precedent:** `Std.DHashMap` — an Array implementation carrying a bundled well-formedness invariant,
+proved against a `List` model in `Std/Data/DHashMap/Lemmas.lean`. Array container, list ghost view,
+laws in their own file.
+
+**Exit criteria** — the laws hold, and the ghost view is the only representation any downstream proof
+mentions.
+
+---
+
 ### M3 — The single-carrier executor
 
 **Goal:** the first thing a user can run — and the deterministic runtime falls out of it.
