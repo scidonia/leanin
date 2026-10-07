@@ -268,6 +268,14 @@ index arithmetic modulo `cap`. That is a different kind of proof work from the p
 chunk reasoning, and it is *isolated*: one lemma (distinct live indices occupy distinct slots) carries
 all of it, and the ghost view means nothing downstream ever sees an index.
 
+**⚠️ Where it actually bites.** An attempt at the container was withdrawn rather than shipped with a
+`sorry`: **`omega` does not reason through `%`**, so the modular indexing that makes the ring a ring
+turns every law into manual normalisation rather than a proof. Two formulations are open — `%`-indexed
+(as Tokio does) with that discipline throughout, or no-wrap-with-compaction, which has no modular
+arithmetic at all and the same amortised asymptotics. Since D1 is provability-first and the container's
+implementation choice is not part of the spec, compaction is the leaning. See M2b in
+[`PLAN.md`](../PLAN.md).
+
 **Consequence for the plan.** `Ring` is a pure, provable obligation and belongs *before* M3's
 concurrency, since the concurrent queue is a `Ring` under a mutex. It is scheduled as **M2b**.
 

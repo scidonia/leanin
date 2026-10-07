@@ -274,6 +274,31 @@ and it is pure, so it is provable now rather than under a lock.
 proved against a `List` model in `Std/Data/DHashMap/Lemmas.lean`. Array container, list ghost view,
 laws in their own file.
 
+**⚠️ Blocker found, and it is design-determining.** An attempt at the `%`-indexed ring was made and
+withdrawn rather than shipped with a `sorry` or a broken build. The finding:
+
+**`omega` does not reason through `%`.** It treats `(head + i) % cap` as an opaque atom and cannot
+relate it to `head` or `cap`, so every modular step needs manual normalisation
+(`Nat.mod_add_mod`, `Nat.mod_eq_of_lt`, `Nat.add_mul_mod_self_right`) before `omega` is of any use. That
+worked, but it made each of the four laws a chain of fragilities rather than a proof.
+
+Two formulations, and the choice is real:
+
+- **(a) `%`-indexed** — exactly Tokio's scheme (`(head + size) % cap`). More faithful; the proofs
+  carry disciplined modular normalisation throughout.
+- **(b) No wrap, with compaction** — weaken `WF` to `head + size ≤ cap` and compact the live range to
+  the front when the store fills. **No modular arithmetic at all**: the laws become `drop`/`take`/`set`
+  list arithmetic over an invariant `omega` can see. Element movement is amortised (`O(size)` once per
+  `cap` operations, not per operation), so the asymptotics are unchanged; what changes is that the
+  container is not byte-for-byte Tokio's.
+
+**D1 says provability first, and the container's *implementation choice* is not part of the spec** — so
+(b) is the recommendation. The spec (`Pool`) is unaffected either way.
+
+**Lemmas verified present in core**, for whoever picks this up: `List.getElem?_set_self`,
+`List.getElem?_set_ne`, `List.length_set`, `List.map_congr_left`, `List.range_succ`,
+`List.range_succ_eq_map`, `Nat.mod_add_mod`, `Nat.add_mul_mod_self_right`, `Nat.mod_eq_sub_mod`.
+
 **Exit criteria** — the laws hold, and the ghost view is the only representation any downstream proof
 mentions.
 
