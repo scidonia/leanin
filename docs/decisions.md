@@ -218,6 +218,19 @@ because that is the scheduler's job. Multiple reactors are a latency and CPU-loc
 optimisation at all — there is no readiness event to wait on, which is precisely why `tokio::fs` is
 `spawn_blocking`.
 
+**io_uring is not "just another extern".** Its whole design is two ring buffers mapped into user space
+and shared with the kernel, and the ring's head and tail are **atomics shared with the kernel** — the
+man page's own submission snippet ends
+`atomic_store_explicit(sqring->tail, tail, memory_order_release)`. So adopting it presupposes exactly
+the atomics extern and the weak-memory reasoning that D4 and D6 deliberately left out. It is also
+Linux-only (libuv buys us macOS and Windows for free), it is *completion*-based rather than
+*readiness*-based so it replaces the reactor rather than extending it, and it is disabled by default in
+some environments via the `io_uring_disabled` sysctl (kernel 6.6+) and container seccomp profiles.
+
+**The architecture is already agnostic, though.** Whichever way completions are produced, they arrive
+at the same place: the inject queue from D3's seam. So io_uring would change *how* an external event
+is produced, not *how* a task is scheduled — a good sign that the seam is drawn in the right place.
+
 **Note on A6.** M4 needs threads, but they come from `Task.Priority.dedicated` — i.e. from `Task`,
 which D3 already places in the TCB. So A6 as a raw `pthread_create` axiom is *still* not needed in v1.
 That holds only as long as the blocking pool is built on `Task` rather than spawning threads itself;
