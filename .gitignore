@@ -1,0 +1,5 @@
+.lake/
+lake-packages/
+*.olean
+Vendor/tokio/
+Vendor/lean4/
