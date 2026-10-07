@@ -217,7 +217,21 @@ every axiom has a control that has been observed to distinguish "holds" from "do
 - **The audit**: `#print axioms` on four of these reports only `propext` and `Quot.sound` — none of
   the bridge axioms. The model is not circular; it does not assume the primitives it is about.
 
-**Still to do** — `Scheduler` (workers, inject, idle set, `stopping`) and the no-lost-wakeup theorem.
+**Landed** — `LeanIn/Model/Scheduler.lean`, the wake protocol:
+- `Sched` (work, parked, total, stopping) and `Sched.Live`: work implies a worker that is not parked.
+  `Reachable` restricts the claim to states the protocol can produce, because a state with work and
+  every worker parked *is* well-formed and *would* be a lost wakeup — so `Live` is genuinely stronger
+  than `WF`, and the control shows it.
+- **`reachable_live`** — no lost wakeup, from every reachable state.
+- The unpark in `enqueue` is **load-bearing, not decorative**: `enqueueWithoutWaking_breaks_live`
+  exhibits a well-formed, `Live` state that a plausible enqueue destroys. That is A5 in protocol form —
+  the notification has no memory, so the unpark cannot be deferred to a separate step.
+- `park` has no transition unless `work = 0`: the check is structural, not advisory, and the controls
+  show both directions so the refusal is not vacuous.
+- Audit: `reachable_live` depends on `propext`, `Classical.choice` and `Quot.sound` only. No bridge
+  axiom; `Classical.choice` is from `by_cases`, a Lean built-in.
+
+**Still to do** — invariants 2–4 over the pool as a whole: well-defined reads, uniqueness, existence.
 
 **Prove**
 - queue invariants 1–5 (no lost work, well-defined reads, uniqueness, existence, bounded capacity);
