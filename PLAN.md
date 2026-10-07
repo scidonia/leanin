@@ -274,30 +274,30 @@ and it is pure, so it is provable now rather than under a lock.
 proved against a `List` model in `Std/Data/DHashMap/Lemmas.lean`. Array container, list ghost view,
 laws in their own file.
 
-**⚠️ Blocker found, and it is design-determining.** An attempt at the `%`-indexed ring was made and
-withdrawn rather than shipped with a `sorry` or a broken build. The finding:
+**Landed** — `LeanIn/Data/Ring.lean`. The container, with every law proved:
 
-**`omega` does not reason through `%`.** It treats `(head + i) % cap` as an opaque atom and cannot
-relate it to `head` or `cap`, so every modular step needs manual normalisation
-(`Nat.mod_add_mod`, `Nat.mod_eq_of_lt`, `Nat.add_mul_mod_self_right`) before `omega` is of any use. That
-worked, but it made each of the four laws a chain of fragilities rather than a proof.
+- `Ring` (fixed store, head index, live count), `Ring.toList` (the ghost view), `Ring.WF` (with the
+  `join`-guarded density conjunct), `push`, `pop`;
+- **`slot_ne`** — distinct live indices occupy distinct slots. Everything modular is here;
+- **`push_toList`**, **`pop_toList`** — the laws tying the container to the spec;
+- **`push_wf`**, **`pop_wf`** — the invariant is preserved, without which the laws would be one-shot;
+- **`pop_isSome`** — density does work: a non-empty ring can always be popped.
 
-Two formulations, and the choice is real:
+Audit: all five depend only on `propext` and `Quot.sound`.
 
-- **(a) `%`-indexed** — exactly Tokio's scheme (`(head + size) % cap`). More faithful; the proofs
-  carry disciplined modular normalisation throughout.
-- **(b) No wrap, with compaction** — weaken `WF` to `head + size ≤ cap` and compact the live range to
-  the front when the store fills. **No modular arithmetic at all**: the laws become `drop`/`take`/`set`
-  list arithmetic over an invariant `omega` can see. Element movement is amortised (`O(size)` once per
-  `cap` operations, not per operation), so the asymptotics are unchanged; what changes is that the
-  container is not byte-for-byte Tokio's.
+**How the arithmetic is done — the finding that mattered.** `omega` handles `%` only after it is
+*eliminated*, so `slot_ne` normalises with `Nat.mod_add_mod` and then splits on whether each argument is
+below or above `cap`. The step that took the longest to find: that split must carry its **side
+condition** out with it. `Nat` subtraction saturates, so a bare `m % cap = m - cap` is *satisfiable* at
+`m = cap = 0` and refutes nothing — the `cap ≤ m` that `key` now returns alongside it is what makes the
+equation contradicted. A second, quieter trap: `hw : r.WF` is opaque to `omega`, so `hw.2.1` has to be
+extracted into a local before any bound on `r.size` is visible.
 
-**D1 says provability first, and the container's *implementation choice* is not part of the spec** — so
-(b) is the recommendation. The spec (`Pool`) is unaffected either way.
-
-**Lemmas verified present in core**, for whoever picks this up: `List.getElem?_set_self`,
-`List.getElem?_set_ne`, `List.length_set`, `List.map_congr_left`, `List.range_succ`,
-`List.range_succ_eq_map`, `Nat.mod_add_mod`, `Nat.add_mul_mod_self_right`, `Nat.mod_eq_sub_mod`.
+**⚠️ Outstanding, recorded rather than hidden:** the vacuity checks for `Ring` are not written.
+`emptyRing` witnesses that `WF` is inhabited and a ring with `size > cap` witnesses that it
+distinguishes — but the three `example`s attempting exactly that were withdrawn, because `simp`'s
+handling of the `emptyRing` projection fought harder than the theorems did. The file says so where the
+examples would have been.
 
 **Exit criteria** — the laws hold, and the ghost view is the only representation any downstream proof
 mentions.
