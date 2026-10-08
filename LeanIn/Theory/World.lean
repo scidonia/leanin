@@ -29,6 +29,12 @@ obligation could be stated against. See `reacquisition_while_others_wait`.
 
 namespace LeanIn
 
+/-- The actor of a step: a **native** thread.
+
+In v1 that means the scheduler's carrier or a waker thread — `WakerSpike` shows an external completion
+handled on a pool worker, which takes the same mutex the carrier does. It never means a green task: two
+tasks running on one carrier are one native actor, and no green task owns a mutex or parks. When green
+tasks enter this model they need their own identity, distinct from this one. -/
 abbrev Tid := Nat
 abbrev LockId := Nat
 abbrev CondvarId := Nat
@@ -62,8 +68,24 @@ identifiers that are never used simply stay free forever. -/
 structure World where
   locks    : LockId → Lock := fun _ => {}
   condvars : CondvarId → Condvar := fun _ => {}
+  /-- The model's notion of elapsed time, advanced by `tick`. -/
   clock    : Nat := 0
+  /-- The last reading taken from the native clock, kept **apart from** `clock`.
+
+They are different things, and conflating them loses the only property a budget needs. `clock` is model
+time, moved by `tick`; this records what a read returned. Recording it is what makes successive readings
+comparable — with only `n ≥ clock` against a clock that no read moves, two reads are related to nothing,
+and "the clock never goes backwards" stays a property of the runtime that no theorem can use. -/
+  lastSample : Option Nat := none
 deriving Inhabited
+
+/-- Two worlds agree on the clock state: model time, and the last sample taken.
+
+Operations that do not read the clock must leave both alone. Without that, a reading before and a
+reading after any other bridge call are related to nothing — the intervening operation is free to set
+`lastSample` back to `none`, and the next reading's "never behind the previous sample" becomes vacuous.
+Monotonicity across a budget would then be underivable despite each reading being monotone on its own. -/
+def World.SameClock (w w' : World) : Prop := w'.clock = w.clock ∧ w'.lastSample = w.lastSample
 
 /-- An action.
 
