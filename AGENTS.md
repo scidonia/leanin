@@ -119,3 +119,8 @@
   it, too: `LeanIn/Data/Ring.lean` name-extends its definitions
   (`Ring.push`) and leaves its theorems bare (`push_toList`), so
   a use site cannot name one by the other's rule.
+- Anything holding a `Pool` needs `[Inhabited α]` in scope: `Pool`
+  is built on `Ring`, and `Ring`'s operations need it because
+  `toList` falls back to `default`. Carry it with one `variable`, as
+  `Sched/Pool.lean` and `Sched/Executor.lean` do; adding it per
+  declaration produces a page of cascading synthesis failures.
