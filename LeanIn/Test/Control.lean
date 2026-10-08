@@ -388,34 +388,6 @@ def runtimeThreads : IO UInt32 := do
   IO.println s!"exec|runtime|caller={caller}|steps=[{String.intercalate "," ids}]|external={← external.get}|value={v}|remaining={st.1.inFlight}"
   return 0
 
-/-- **A first program on the runtime** — M3's test bullet, "run real work; confirm the executor uses one
-thread and no pool workers", as an observation.
-
-Every identity it prints was read *inside* the computation: the caller's, the one the spawned child's body saw,
-and the one the awaiting continuation resumed on. On a single-carrier runtime all three are the same thread —
-and nothing here starts one, since this mode contains no `IO.asTask` at all, which is the half of the claim a
-thread identity alone cannot make. -/
-def runtimeSmoke : IO UInt32 := do
-  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
-  let caller ← IO.getTID
-  let childTid ← IO.mkRef (0 : UInt64)
-  let awaitTid ← IO.mkRef (0 : UInt64)
-  let child : LeanIn.Task.Async Nat := do
-    let tid ← LeanIn.Task.Async.ofIO IO.getTID
-    let _ ← LeanIn.Task.Async.ofIO (childTid.set tid)
-    return 7
-  let prog : LeanIn.Task.Async (UInt64 × UInt64 × Nat) := do
-    let h ← LeanIn.Task.Async.spawn child
-    let v ← LeanIn.Task.Async.await h
-    let tid ← LeanIn.Task.Async.ofIO IO.getTID
-    let _ ← LeanIn.Task.Async.ofIO (awaitTid.set tid)
-    let c ← LeanIn.Task.Async.ofIO childTid.get
-    let a ← LeanIn.Task.Async.ofIO awaitTid.get
-    return (c, a, v)
-  let (c, a, v) ← Runtime.run e prog
-  IO.println s!"exec|runtime|caller={caller}|child={c}|awaiter={a}|value={v}"
-  return 0
-
 /-- **SC4's scripted input.** The identity each position delivers, decided by the seed and the script name —
 so the same inputs are reproducible from the seed, and the alternate script is a different *input* rather
 than a different answer.
@@ -542,7 +514,6 @@ def main (args : List String) : IO UInt32 := do
   | "--executor-trace" :: _ => return ← executorTrace
   | "--executor-park" :: _ => return ← executorPark 256
   | "--executor-queue" :: _ => return ← executorQueue
-  | "--runtime-smoke" :: _ => return ← runtimeSmoke
   | "--runtime-threads" :: _ => return ← runtimeThreads
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
