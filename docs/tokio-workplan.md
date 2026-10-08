@@ -211,14 +211,22 @@ behaviour contracts with their controls.
 
 ### P1, P2 — Two cross-cutting performance items
 
-**P1, allocation and CPS.** The ~1.5 µs per unit that is not scheduling: the `Join`'s mutex for the internal
-path, the `Item` closure per step, and the bind chain. Acceptance: `--runtime-bench` at parity with the native
-pool on the batch shape.
+**P2 — the burst path, and it comes first.** Enqueuing into a saturated ring costs **1533 ns** against **169 ns**
+steady, and the benchmark's batch shape spawns 10 000 units into a 256-slot ring — so its **1657 ns per task is
+the overflow path almost exactly**. The batch shape is the ring, not the task machinery, which is what the
+earlier attribution got wrong. The fix is a `Ring` primitive that moves the back half without draining the whole
+thing, which the container cannot do today because it can only pop its front. Acceptance: `--runtime-ops` with
+the burst row within about 2× of the steady one, and a benchmark row that *streams* rather than batches, since
+the current one conflates the two and so cannot see this.
 
-**P2, the burst path.** An enqueue into a saturated ring costs 1.6 µs against 232 ns steady, because the ring
-can only pop its front and the overflow drains and refills the whole thing. Acceptance: `--runtime-ops` showing
-the burst row within about 2× of the steady one. This is likely a `Ring` primitive that moves the back half
-without draining.
+**P1 — allocation and CPS, and it is the chain-shape item.** The round trip is **588 ns**, of which ~169 ns is
+the enqueue, so ~420 ns is cell handling, resumption and the bind chain — the part with no counterpart in a
+compiler-generated state machine. Acceptance: the round-trip row, and `--runtime-bench` parity at equal thread
+count on a streaming shape.
+
+**Standing, for orientation.** At the default configuration this runtime is now ahead on both shapes measured:
+16.6 ms against the native pool's 26.4 ms on the batch, and 588 ns against 5093 ns on a chain link. At *equal
+thread count* it is still ~4× behind the native pool on the batch shape — and that gap is what P2 is for.
 
 ## 3. Where to start
 
