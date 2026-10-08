@@ -5,5 +5,5 @@ Vendor/tokio/
 Vendor/lean4/
 
 # editor lock and autosave files
-#*#
+\#*#
 .#*
