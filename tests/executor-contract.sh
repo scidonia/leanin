@@ -943,13 +943,15 @@ check_sc4() {
 
 # --- the queue expectation the SC5 checks read, derived from the pool model ————————————————————————
 # Every number here is the model's, not an invocation's. The script has two phases. Phase one submits
-# 0..256 before taking any, then drains that whole batch. `cap` is 256 (`LeanIn/Model/Pool.lean:47`)
-# and `Pool.submit` keeps the newer half of a full ring while moving the older half to `inject`
-# (`:112-119`), so 257 submissions of 0..256 — split `take (256 / 2)` from `drop (256 / 2)` — leave
-# the ring holding 128..255 and the 256th identity and `inject` holding 0..127. `Pool.take`'s
-# `takeFromRing` serves the ring before `inject` (`:76-85`), so the batch's take receipts are 128..256
-# and then 0..127: that is `fifo`. 300 and 301 are staged only in phase two, after that drain, so
-# neither appears in it.
+# 0..256 before taking any, then drains that whole batch. `cap` is 256 (`LeanIn/Model/Pool.lean:52`)
+# and the placement rule `Pool.submit` uses keeps the older half of a full ring while moving the
+# *newer* half to `inject` (`:119-125`). That direction is Tokio's, and `queue.rs:295` gives the
+# reason: intake places work in the first half, so a task found in the second half is provably not one
+# just intaken from `inject`. So 257 submissions of 0..256 — split `take (256 / 2)` from
+# `drop (256 / 2)` — leave the ring holding 0..127 and the 257th identity 256, and `inject` holding
+# 128..255. `Pool.take`'s `takeFromRing` serves the ring before `inject` (`:81-86`), so the batch's
+# take receipts are 0..127 and then 256, followed by the spilled 128..255: that is `fifo`. 300 and 301
+# are staged only in phase two, after that drain, so neither appears in it.
 # Phase two is a fresh tick: the client stages 300,301 as FIFO queue work and local `spawn`s 400
 # through the public operation, whose body locally `spawn`s 401, and so on to 403. `lifoCap` is 3
 # (`:49`) and `Pool.take` polls the LIFO slot while the tick's allowance lasts and flushes a slot that
@@ -967,9 +969,12 @@ check_sc4() {
 # and the root local spawn — and is read with event_stream_is.
 queue_expectation() {
   local i
+  # The ring's own receipts first — the older half it kept, and the identity that crossed its capacity
+  # — then the newer half the placement rule spilled to `inject`.
   expected_fifo=()
-  for ((i = 128; i <= 256; i++)); do expected_fifo+=("$i"); done
   for ((i = 0; i <= 127; i++)); do expected_fifo+=("$i"); done
+  expected_fifo+=(256)
+  for ((i = 128; i <= 255; i++)); do expected_fifo+=("$i"); done
   expected_lifo=(400 401 402)
   expected_flush=(300 301 403)
   expected_slot=(0:400 1:401 2:402 3:403)
@@ -1054,8 +1059,9 @@ check_queue_receipt_detector() {
   fi
   printf 'SC5 control: rejected a completed set with 0 missing and 256 duplicated\n'
 
-  # The two identities either side of the capacity crossing exchanged: every token is still present,
-  # so only a detector that reads the *order* of the ring's receipts rejects this.
+  # The two identities either side of the capacity crossing exchanged — the 256 the ring served last
+  # and the 128 the spill to `inject` served first: every token is still present, so only a detector
+  # that reads the *order* of the receipts rejects this.
   swapped=("${expected_fifo[@]}")
   i=128
   tmp="${swapped[$i]}"
@@ -1072,7 +1078,7 @@ check_queue_receipt_detector() {
   # The phase boundary: a first-phase `fifo` that carries 300 and 301, which is what a client that
   # staged them before the first batch was drained would record. `Pool.take` serves the ring before
   # `inject`, so those later-phase identities land in the batch's own take receipts ahead of the
-  # remaining `inject` work — `128..256,300,301,0..125` for the batch's 257 receipts — while the same
+  # remaining `inject` work — `0..127,256,300,301,128..253` for the batch's 257 receipts — while the same
   # 263 identities are all still delivered once the drain finishes. Only the phase boundary `fifo`
   # binds rejects this, so the drained multiset alone can never carry the phase claim.
   early_staged=("${expected_fifo[@]:0:129}")
@@ -1194,7 +1200,7 @@ check_sc5() {
   # the `fifo` sequence even though `staged` and `delivered` still hold all 263 identities.
   id_sequence_is "$fifo" "${expected_fifo[@]}" ||
     fail "SC5 Then: queue capacity, LIFO flush or identities missing" \
-      "fifo=$fifo: the phase-one ring receipts are not the modelled 128..256 then 0..127; a 300/301 staged before the drain would appear here"
+      "fifo=$fifo: the phase-one ring receipts are not the modelled 0..127 and 256 then 128..255; a 300/301 staged before the drain would appear here"
   id_sequence_is "$lifo" "${expected_lifo[@]}" ||
     fail "SC5 Then: queue capacity, LIFO flush or identities missing" \
       "lifo=$lifo: the slot's take receipts are not the modelled 400,401,402"

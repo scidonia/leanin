@@ -300,8 +300,8 @@ check reads no private state either: it reads the receipts that client recorded 
 **Given.** A fresh queue, the distinct staged identities `0..256`, `300`, `301` and `400..403`, and
 one ordered script of two phases. In the first phase the client submits all of `0..256` before taking
 any and then drains that whole batch: the 257 submissions fill a 256-slot ring, so the last of them
-crosses its capacity, and the batch's take receipts are the ring's newer half followed by the
-overflow it moved to `inject`. The second phase is a fresh tick that begins only once the first batch
+crosses its capacity, and the batch's take receipts are the older half the ring kept and the identity
+that crossed it, followed by the newer half the overflow moved to `inject`. The second phase is a fresh tick that begins only once the first batch
 has been drained: there the client stages `300` and `301` as FIFO queue work, and the root client
 locally `spawn`s `400` through the public scheduling operation, and each executing body locally
 `spawn`s the next of `401..403`, so those four continuations become ready on the current worker in
@@ -332,21 +332,21 @@ ahead of `batch-drained` — the early staging this assertion exists to catch �
 first batch's `fifo`, the slot observations and the final `staged` and `delivered` sets all look
 right.
 
-`fifo` is exactly `128..256,0..127` — the take receipts of the batch that crossed capacity. That is
-the model's own rule: `cap` is 256 and `Pool.submit` keeps the newer half of a full ring while moving
-the older half to `inject` (`LeanIn/Model/Pool.lean:47,112-119`), so the 257th submission of `0..256`
-leaves the ring holding `128..255` and the new `256` and `inject` holding `0..127`; and `Pool.take`'s
-`takeFromRing` serves the ring before `inject` (`:76-85`), so the receipts run `128..256` and then
-`0..127`. The expected order is read from the model's rule rather than from the implementation's
+`fifo` is exactly `0..127,256,128..255` — the take receipts of the batch that crossed capacity. That
+is the model's own rule: `cap` is 256 and the placement rule `Pool.submit` uses keeps the older half of
+a full ring while moving the *newer* half to `inject` (`LeanIn/Model/Pool.lean:52,119-125`), so the
+257th submission of `0..256` leaves the ring holding `0..127` and the new `256`, and `inject` holding
+`128..255`; and `Pool.take`'s `takeFromRing` serves the ring before `inject` (`:81-86`), so the receipts
+run `0..127` and then `256`, followed by `128..255`. The expected order is read from the model's rule rather than from the implementation's
 output, and it is read as a sequence: those identities in another order fail here. Because `fifo` is
 the first phase's own receipt boundary it carries no `300` and no `301` — the script stages those two
 only in the second phase — so a client that staged either of them before the first batch was drained
 would record it among these receipts and fail here, even though both identities are delivered later
 and `staged` and `delivered` still hold all 263.
 
-`lifo` is exactly `400,401,402` and `flush` is exactly `300,301,403`. `lifoCap` is 3 (`:49`) and
+`lifo` is exactly `400,401,402` and `flush` is exactly `300,301,403`. `lifoCap` is 3 (`:54`) and
 `Pool.take` polls the LIFO slot while the tick's allowance lasts, flushing a slot that is still
-occupied once the allowance is spent (`:89-101`); so the three chained continuations are polled from
+occupied once the allowance is spent (`:94-102`); so the three chained continuations are polled from
 the slot, the pending `403` is flushed to `inject` when the allowance is exhausted, and the ring is
 then served — `300`, `301` — before the flushed `403`. A fourth poll of the slot in place of that
 flush fails here, and because `flush` is the second phase's own receipt boundary it stays separate
@@ -383,7 +383,7 @@ that accepted any near miss, or that rejected the modelled order, has not assert
 **Why.** The queue's promise is that a staged item is held until it is taken, and that the LIFO
 allowance is a policy which can never strand work; local `spawn` is what makes that allowance
 reachable, by placing the spawned continuation in the slot, while the worker's `wake` only un-parks a
-worker and places no work. A ring that drops the oldest half when it overflows, or an allowance that
+worker and places no work. A ring that drops the half it cannot hold when it overflows, or an allowance that
 never saw a populated slot or keeps polling past its cap and leaves the pending continuation behind,
 still reports plausible receipts — while losing exactly the work the caller staged. The two phases
 keep those receipts honest: a first batch that already carried `300` or `301`, or a `flush` reached
