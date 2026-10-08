@@ -586,6 +586,14 @@ def runtimeOps : IO UInt32 := do
     let _ ← IO.wait t
   -- The same round trip for this runtime: the latency figure, whose counterpart is the native row above.
   let roundNs ← roundTripMicros k
+  -- The overflow path in isolation: `Ring.drain` on a full ring, which the overflow calls once per ~128
+  -- enqueues. `drainStep` accumulates with `acc.1 ++ [x]`, which is quadratic in the ring's size, so a full
+  -- ring should cost tens of microseconds per call if that is what the burst row is paying for.
+  let mut full : LeanIn.Ring Nat 256 := LeanIn.emptyRing Nat 256
+  for i in List.range 256 do full := full.push i
+  let drainNs ← best do for _ in List.range k do
+    let d := full.drain
+    if d.1.length = 0 then IO.println "drain returned nothing"
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1
   let item : LeanIn.Task.Item := ⟨pure ()⟩
   let spawnNs ← best do for _ in List.range k do e.spawn item
@@ -601,7 +609,7 @@ def runtimeOps : IO UInt32 := do
     e4.spawn item
     let _ ← e4.tryTake
   IO.println s!"ops: native Task spawn+join {nativeNs}ns | ref set/get {refNs}ns | mutex section {mutexNs}ns | notify (nobody parked) {notifyNs}ns"
-  IO.println s!"ops: leanin spawn+await round trip {roundNs}ns"
+  IO.println s!"ops: leanin Ring.drain (full 256) {drainNs}ns | leanin spawn+await round trip {roundNs}ns"
   IO.println s!"ops: Join.new {joinNs}ns | Executor.spawn {spawnNs}ns | Executor.submit {submitNs}ns | Executor.tryTake {workNs}ns | spawn+take (steady) {steadyNs}ns"
   return 0
 
