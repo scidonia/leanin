@@ -86,6 +86,23 @@ call: one isolated effect and one call interval are different objects, and only 
 against a `do` block. -/
 opaque Runs {α : Type} (r : Rep) (t : Tid) (op : BaseIO α) (w : World) (res : α) (w' : World) : Prop
 
+/-- **A complete call, with its interference named.** `CallExec r t op w res trace w'` means: under
+representation `r`, thread `t` invokes the native operation `op` in world `w`, the execution's steps are
+`trace`, and it returns `res` in `w'`.
+
+A different object from `Runs`, and the difference is the point rather than a naming preference. `Runs`
+relates one **isolated effect**, with no other actor inside it. A call that spans stages — `wait` releases
+and enrols, suspends, wakes, re-acquires — is not an isolated effect, and no pair of worlds can be "the
+effect with interference removed", because *which* wakeup arrives and *which* thread re-acquires is decided
+by the interleaving. So the interference is an **argument** here, not something a reading of `w'` excludes:
+`trace` records the caller's own stages and the environment's steps between them.
+
+The correspondence from `trace` to a model path is not established here; that is the next milestone's work,
+and this declaration exists so that `wait` is no longer written as though it were an isolated effect. What
+a returning `wait` must exhibit in its trace is stated in `wait_spec`. -/
+opaque CallExec {α : Type} (r : Rep) (t : Tid) (op : BaseIO α) (w : World) (res : α)
+    (trace : List Act) (w' : World) : Prop
+
 /-! ### Reading the map -/
 
 /-- `m` stands for model lock `l` under `r`. A definition rather than an axiom, because it must hold
@@ -114,7 +131,7 @@ def Rep.NonAliasingC (r : Rep) (cv₁ cv₂ : Std.Condvar) : Prop := r.condOf cv
 /-! ### A0 — creation
 
 `lean_io_basemutex_new` (`mutex.cpp:20`) and `lean_io_condvar_new` (`mutex.cpp:46`) default-construct a
-`std::mutex` and a `std::condition_variable`. They are two of the eight native operations the scheduler
+`std::mutex` and a `std::condition_variable`. They are two of the nine native operations the scheduler
 uses, and until now the only ones with no contract at all.
 
 What can be stated is the *state* a fresh object is in. What cannot be stated here is that a fresh
@@ -157,13 +174,12 @@ axiom lock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : T
 
 `true` means *the caller* acquired; `false` means it did not, and it must not have blocked.
 
-**Both conjuncts of the `false` case are load-bearing, and preservation is the weaker one.** Ownership
+**Preservation is the load-bearing conjunct of the `false` case; the second follows from it.** Ownership
 unchanged alone does not say the caller failed: a world in which the caller already held the lock and
-`tryLock` returned `false` satisfies it, and that is exactly the case the standard leaves undefined —
-the A2 control in `Test/Control.lean` says so in as many words. So the axiom carries the non-ownership
-precondition the standard requires, and concludes both that the owner is unchanged **and** that it is
-not the caller. Without the second conjunct nothing downstream could use a failed `tryLock` to
-establish anything, which is the whole point of `false`. -/
+`tryLock` returned `false` satisfies it, and that is the case the standard leaves undefined — the A2
+control in `Test/Control.lean` says so in as many words. That is why the axiom carries the non-ownership
+*precondition* the standard requires, and why the conclusion that the owner is not the caller is kept only
+for convenience: it is the precondition rewritten through preservation, not an independent assumption. -/
 axiom tryLock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} {b : Bool} :
     IsLock r m l → (w.locks l).owner ≠ some t →
     Runs r t (Std.BaseMutex.tryLock m) w b w' →
@@ -187,10 +203,21 @@ axiom unlock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t :
 The runtime call is the *whole* park-and-resume: it releases the mutex, blocks, and re-acquires before
 returning. So on return the lock is held again.
 
-**The call spans a path, and the axiom states its endpoints.** To its caller `wait` is one
+**The call spans a path, and the trace is where its stages are named.** To its caller `wait` is one
 operation; in the model it is three steps — park (`afterWait` releases the lock and enrols the waiter),
 resume, re-acquire — which `World.wait_cycle_reachable` exhibits and `World.afterWait_releases` shows
-cannot be collapsed into one, since the model's own `wait` step leaves the lock free.
+cannot be collapsed into one, since the model's own `wait` step leaves the lock free. That is why this
+hypothesis is `CallExec` and not `Runs`: an endpoint pair cannot say which wakeup arrived or which thread
+re-acquired, and `Act.WaitStages tr` says that the stages are there, in order, with environment steps
+permitted between them. The correspondence from the trace to a model path is still owed; the stages being
+present is the precondition for stating it.
+
+**The clock is deliberately not framed here, and this is not an oversight.** `Runs`'s isolated effects
+preserve the clock state, and that is right for a single event. A call interval is not one: another
+carrier may `tick` or read the clock between the stages, and requiring equality across the interval would
+exclude exactly those executions. The converse mistake is worth naming too — preserving the clock in an
+*effect* is not the same claim as the *call* taking no time. Sample evolution across a call belongs to its
+trace, and a `SameClock` conjunct here made the two claims identical.
 
 Both conjuncts are what the *caller* observes on return: it holds the lock again, and it has stopped
 being a waiter. The second is not decoration. Without it nothing downstream could conclude that a
@@ -205,10 +232,10 @@ stand in for it. That obligation belongs to the refinement of the scheduler's wa
 M3, not to the model refinement in M2: M2 closed, and what it delivered was the waiter *list* (enrol and
 de-enrolment), not the cycle. -/
 axiom wait_spec {r : Rep} {cv : Std.Condvar} {m : Std.BaseMutex} {w w' : World} {c : CondvarId}
-    {l : LockId} {t : Tid} :
+    {l : LockId} {t : Tid} {trace : List Act} :
     IsCondvar r cv c → IsLock r m l → (w.locks l).owner = some t →
-    Runs r t (Std.Condvar.wait cv m) w () w' →
-    (w'.locks l).owner = some t ∧ t ∉ (w'.condvars c).waiters ∧ w.SameClock w'
+    CallExec r t (Std.Condvar.wait cv m) w () trace w' →
+    (w'.locks l).owner = some t ∧ t ∉ (w'.condvars c).waiters ∧ Act.WaitStages c l t trace
 
 /-- **A5 — notification, and its absence of memory.** `lean_io_condvar_notify_one`
 (`mutex.cpp:62`) → `std::condition_variable::notify_one`.
@@ -219,8 +246,6 @@ unchanged and at most one entry was lost, so a wakeup that *replaced* the waiter
 the model's own `erase` has no such behaviour. What is stated instead: the list is either **untouched**
 (nothing was woken, which is the lost notification of A5, proved as `notifyOne_no_waiters` in
 `World.lean`) or **exactly one named element is gone**.
-
-`notifyOne_no_additions` is the consequence that the count could not give.
 
 `notifyOne_no_additions` is the consequence the count could not give, and `notifyOne_selects` names the
 selection guarantee itself.
@@ -292,10 +317,10 @@ It needs no non-aliasing condition, and that is worth stating rather than leavin
 mutex index `l` and the condvar index `c` index *different* maps of `World`, so a coincidence between
 the two numbers denotes nothing shared. Only two objects of the *same* kind can be aliased. -/
 theorem lock_wait_unlock_postcondition {r : Rep} {cv : Std.Condvar} {m : Std.BaseMutex} {c : CondvarId} {l : LockId}
-    {t : Tid} {w₁ w₂ w₃ w₄ : World}
+    {t : Tid} {w₁ w₂ w₃ w₄ : World} {trace : List Act}
     (hL : IsLock r m l) (hC : IsCondvar r cv c)
     (h₁ : Runs r t (Std.BaseMutex.lock m) w₁ () w₂)
-    (h₂ : Runs r t (Std.Condvar.wait cv m) w₂ () w₃)
+    (h₂ : CallExec r t (Std.Condvar.wait cv m) w₂ () trace w₃)
     (h₃ : Runs r t (Std.BaseMutex.unlock m) w₃ () w₄) :
     (w₄.locks l).owner = none :=
   (unlock_spec hL (wait_spec hC hL (lock_spec hL h₁).1 h₂).1 h₃).1

@@ -22,9 +22,13 @@ not hold is undefined") a structural fact rather than a checked error.
 
 ## What is deliberately missing
 
-There is **no queue of pending lock requests**. `std::mutex` has none, so neither does the model, and
-that is why fairness is not merely unproven here but *inexpressible*: there is nothing a fairness
-obligation could be stated against. See `reacquisition_while_others_wait`.
+There is **no queue of pending lock requests**, because `std::mutex` has none. What that costs is
+narrower than "fairness is inexpressible": the model has `Step` and can quantify over traces, so fairness
+*over enabled actions* — "if an action is enabled from some point on, it eventually occurs" — is
+expressible, and the model simply assumes none. What has no representation is a **waiting thread**: an
+unsuccessful acquisition is a non-event, so there is no state in which a request is pending, and an
+obligation phrased against queued requesters has nothing to attach to. See
+`reacquisition_while_others_wait`.
 -/
 
 namespace LeanIn
@@ -84,7 +88,13 @@ deriving Inhabited
 Operations that do not read the clock must leave both alone. Without that, a reading before and a
 reading after any other bridge call are related to nothing — the intervening operation is free to set
 `lastSample` back to `none`, and the next reading's "never behind the previous sample" becomes vacuous.
-Monotonicity across a budget would then be underivable despite each reading being monotone on its own. -/
+Monotonicity across a budget would then be underivable despite each reading being monotone on its own.
+
+**A frame for an isolated effect, not for a call interval.** Every primitive that is a single event carries
+it. A call that spans stages — `wait` — deliberately does not: environment steps sit between its stages,
+another carrier's `tick` among them, and requiring equality across the whole interval would exclude them.
+Preserving the clock in an *effect* is also not the same claim as the *call* taking no time. What replaces
+it for a call is a property of the call's trace; see `Bridge.CallExec` and `wait_spec`. -/
 def World.SameClock (w w' : World) : Prop := w'.clock = w.clock ∧ w'.lastSample = w.lastSample
 
 /-- An action.
@@ -97,7 +107,14 @@ inductive Act where
   | unlock    (l : LockId) (t : Tid)
   | wait      (c : CondvarId) (l : LockId) (t : Tid)
   /-- Waking one waiter, **naming it**: the runtime call names no waiter, so the choice is the
-  action's, exactly as for `spurious`. -/
+  action's, exactly as for `spurious`.
+
+  **This is an attempt alphabet, and one attempt is not a runtime behaviour.** `notify_one` always wakes
+  somebody when anybody is waiting, so a *call* that names an absent thread while others are enrolled does
+  not exist. `step` therefore gives that attempt no transition, the way it gives a lock-free `unlock`
+  none, and gives it one exactly when the waiter set is empty — where the notification really is lost, and
+  where `notifyOne_no_waiters` lives. Both halves are proved: `notifyOne_absent_named_while_waiting` and
+  `notifyOne_absent_named_when_none_waiting`. -/
   | notifyOne (c : CondvarId) (t : Tid)
   | notifyAll (c : CondvarId)
   | spurious  (c : CondvarId) (t : Tid)
@@ -105,6 +122,19 @@ inductive Act where
   statement the model can make, and so `tickless` worlds have a reason to differ. -/
   | tick
 deriving DecidableEq, Repr
+
+/-- **The stages a returning `wait` exhibits, in order.** `wait` is not one event: the caller enrols,
+releasing the lock; is then de-enrolled by a notification or a spurious wake; and re-acquires the lock
+before it returns. Environment steps sit between these and are *not* constrained — this says the stages
+occur in that order, not that nothing else happened.
+
+Stated over the model's own action vocabulary, so that a trace is exactly the thing a model path is made
+of, which is what lets a call's trace and a model path be compared at all. -/
+def Act.WaitStages (c : CondvarId) (l : LockId) (t : Tid) (tr : List Act) : Prop :=
+  ∃ pre mid post : List Act, ∃ de : Act,
+    (de = Act.spurious c t ∨ de = Act.notifyOne c t) ∧
+    tr = pre ++ Act.wait c l t :: mid ++ de :: post ∧
+    ∃ pre' post' : List Act, post = pre' ++ Act.lock l t :: post'
 
 /-! ### Post-states, named so the theorems can state them -/
 
@@ -133,14 +163,16 @@ def afterNotifyAll (w : World) (c : CondvarId) : World :=
 
 /-- The resume, from the waiter's side: it stops being a waiter.
 
-`filter` rather than `erase`, because `List.erase` removes only the **first** occurrence and this model
-does not require `waiters` to be duplicate-free — a thread can be enrolled twice by the transitions as
-written (`wait`, `lock`, `wait`). With `erase`, a doubly-enrolled thread that wakes spuriously stays a
-waiter, which is a state no machine can be in. Filtering maps the set-like reading directly, so
-de-enrolment holds unconditionally.
+`filter` rather than `erase`, and the reason is not that duplicates are possible from a reachable world —
+they are not. `World.WaitersNodup` says no thread is enrolled twice, `wait` refuses a caller already
+enrolled, and `step_preserves_nodup` carries it through every transition. It is that these functions are
+applied to **arbitrary** worlds in the lemmas below, not only to reachable ones, and `List.erase` removes
+only the first occurrence: on a doubly-enrolled world, de-enrolment would then depend on the invariant
+being carried into every statement. Filtering maps the set-like reading directly, so de-enrolment holds
+unconditionally.
 
-**Open question, not settled here:** whether to exclude double enrolment at its source instead, by
-giving `wait` the precondition that its caller is not already enrolled. -/
+Excluding duplicate enrolment at its source was the open question here; it is settled, and the answer is
+`wait`'s precondition — `t ∉ (w.condvars c).waiters` in `step` below. -/
 def afterSpurious (w : World) (c : CondvarId) (t : Tid) : World :=
   { w with condvars := upd w.condvars c { waiters := (w.condvars c).waiters.filter (· != t) } }
 
@@ -150,7 +182,8 @@ def step (w : World) : Act → Option World
   | .unlock l t    => if (w.locks l).owner = some t then some (afterUnlock w l) else none
   | .wait c l t    => if (w.locks l).owner = some t ∧ t ∉ (w.condvars c).waiters
                       then some (afterWait w c l t) else none
-  | .notifyOne c t => some (afterNotifyOne w c t)
+  | .notifyOne c t => if t ∈ (w.condvars c).waiters ∨ (w.condvars c).waiters = []
+                      then some (afterNotifyOne w c t) else none
   | .notifyAll c   => some (afterNotifyAll w c)
   | .spurious c t  => if t ∈ (w.condvars c).waiters then some (afterSpurious w c t) else none
   | .tick          => some { w with clock := w.clock + 1 }
@@ -211,14 +244,17 @@ theorem step_preserves_nodup {w : World} {a : Act} {w' : World}
           exact hw c'
       · exact absurd h (by simp)
   | notifyOne c t =>
-      injection h with h; subst h
-      intro c'
-      unfold World.WaitersNodup at hw
-      by_cases hcc : c' = c
-      · subst hcc; simp only [afterNotifyOne, upd_self]
-        exact (hw c').erase t
-      · simp only [afterNotifyOne, upd_of_ne w.condvars hcc]
-        exact hw c'
+      simp only [step] at h
+      split at h
+      · injection h with h; subst h
+        intro c'
+        unfold World.WaitersNodup at hw
+        by_cases hcc : c' = c
+        · subst hcc; simp only [afterNotifyOne, upd_self]
+          exact (hw c').erase t
+        · simp only [afterNotifyOne, upd_of_ne w.condvars hcc]
+          exact hw c'
+      · exact absurd h (by simp)
   | notifyAll c =>
       injection h with h; subst h
       intro c'
@@ -351,7 +387,30 @@ theorem reacquisition_is_anyone {w : World} {c : CondvarId} {l : LockId} {t t' :
   · simp [Step, step, afterWait]
   · simp [afterLock, upd_self]
 
-/-! ### A1 — no fairness, and why it is structural -/
+/-! ### The notification attempt that has no transition -/
+
+/-- **The tightening, stated.** A notification naming a thread that is not enrolled has no transition while
+anybody is waiting, because the runtime wakes somebody whenever somebody is waiting. -/
+theorem notifyOne_absent_named_while_waiting {w : World} {c : CondvarId} {t : Tid}
+    (h : (w.condvars c).waiters ≠ []) (ht : t ∉ (w.condvars c).waiters) :
+    step w (.notifyOne c t) = none := by
+  simp [step, ht, h]
+
+/-- **The affirmative control.** An absence claim is worth nothing without the same detector firing when the
+thing is present: with an empty waiter set the same attempt *does* have a transition — the lost
+notification that `notifyOne_no_waiters` is about. -/
+theorem notifyOne_absent_named_when_none_waiting {w : World} {c : CondvarId} {t : Tid}
+    (h : (w.condvars c).waiters = []) :
+    step w (.notifyOne c t) = some (afterNotifyOne w c t) := by
+  simp [step, h]
+
+/-- And the ordinary case, for the same reason: naming an enrolled thread has a transition. -/
+theorem notifyOne_enrolled_has_transition {w : World} {c : CondvarId} {t : Tid}
+    (ht : t ∈ (w.condvars c).waiters) :
+    step w (.notifyOne c t) = some (afterNotifyOne w c t) := by
+  simp [step, ht]
+
+/-! ### A1 — no fairness, and what the model does not track -/
 
 /-- Both threads can acquire first from the same state: no interleaving is excluded. This is the
 positive form of "no fairness". -/
@@ -360,10 +419,11 @@ theorem both_orders_permitted {w : World} {l : LockId} {t₁ t₂ : Tid}
     (∃ w', Step w (.lock l t₁) w') ∧ (∃ w', Step w (.lock l t₂) w') :=
   ⟨⟨_, lock_gives_ownership h⟩, ⟨_, lock_gives_ownership h⟩⟩
 
-/-- One thread acquires and releases repeatedly while another never does. The model has **no queue of
-pending requests**, so there is nothing a starvation-freedom obligation could be stated against:
-"no fairness" is a property of the model's *shape*, not a lemma that could be strengthened later
-without changing the shape. -/
+/-- One thread acquires and releases repeatedly while another never does. Nothing forbids it, and the
+reason is narrower than "fairness cannot be stated here": the model has no queue of pending requests, so a
+*waiting thread* is not a state, and starvation-freedom phrased against queued requesters has nothing to
+attach to. Fairness over enabled actions could be stated over traces, and the model chooses to assume
+none — an assumption it makes, not a shape that forbids the question. -/
 theorem reacquisition_while_others_wait {w : World} {l : LockId} {t : Tid}
     (h : (w.locks l).owner = none) :
     ∃ w₁ w₂ w₃ : World,
