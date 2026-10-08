@@ -31,6 +31,10 @@ a control; `tests/bridge-contract.sh` runs three native scenarios against them; 
 `LeanIn/Sched/Basic.lean`, whose first scenario `tests/executor-contract.sh SC1` passes against a contract
 written before the code it now checks.
 
+M3's remaining work, and what a network service would need on top of it, are laid out in
+[`docs/tokio-workplan.md`](docs/tokio-workplan.md) — nine deliverables with the evidence each requires, ordered
+so each unblocks the next, extending this plan's M4 and M5 rather than replacing them.
+
 Two findings did the shaping, and both were surprises:
 
 1. **The scheduler is a global singleton with no injection point.** `static task_manager * g_task_manager` (`object.cpp:1095`), constructed at startup, no handle, no second instance. So
