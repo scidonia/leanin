@@ -75,20 +75,64 @@ def Pool.takeFromRing (p : Pool α cap) : Option α × Pool α cap :=
     | x :: rest => (some x, { p with inject := rest, taken := p.taken + 1 })
     | []        => (none, p)
 
-/-- The owner's take.
+/-- **Which way a take's decision went.** The model's `take` does not distinguish these, because none of
+its claims need to; a *report* does, because the tick's allowance is observable only through which decision
+served the take. -/
+inductive Served where
+  /-- The LIFO slot served the take: a poll inside the tick's allowance. -/
+  | slot
+  /-- The slot was occupied with the allowance spent, so this decision flushed it to `inject` and served the
+  ring. -/
+  | flushed
+  /-- Neither: the ring, or `inject` once the ring was empty. -/
+  | queue
+deriving Repr, BEq, DecidableEq
 
-The LIFO slot is preferred while the tick's allowance lasts; **when the allowance runs out with a task
-still in the slot, the slot is flushed to `inject` before the ring is consulted**, so the allowance cannot
-strand it. -/
-def Pool.take (p : Pool α cap) : Option α × Pool α cap :=
+/-- **A take and the decision it made.** `observed` is the LIFO slot's occupant as the decision read it,
+taken inside the same expression that decides — so it is this pool's record of that instant, not a reading
+taken beside it — and `served` says which way the decision went. `item` and `pool` are the take itself.
+
+The client's records are read through this because the allowance has no other observable: a pool that never
+populated the slot would report `none` at every decision, and one that kept polling past its cap would report
+a fourth `slot`. -/
+structure TakeReport (α : Type) (cap : Nat) where
+  /-- The LIFO slot's occupant before this take, as the decision observed it. -/
+  observed : Option α
+  /-- Which way the decision went. -/
+  served   : Served
+  /-- The item taken, if any. -/
+  item     : Option α
+  /-- The pool after the take. -/
+  pool     : Pool α cap
+
+/-- The owner's take, with the decision it made.
+
+The LIFO slot is preferred while the tick's allowance lasts; **when the allowance runs out with a task still
+in the slot, the slot is flushed to `inject` before the ring is consulted**, so the allowance cannot strand
+it. -/
+def Pool.takeReport (p : Pool α cap) : TakeReport α cap :=
   if p.lifoPolls < p.lifoCap then
     match p.lifo with
-    | some x => (some x, { p with lifo := none, lifoPolls := p.lifoPolls + 1, taken := p.taken + 1 })
-    | none   => p.takeFromRing
+    | some x => { observed := some x, served := .slot, item := some x,
+                  pool := { p with lifo := none, lifoPolls := p.lifoPolls + 1, taken := p.taken + 1 } }
+    | none   =>
+      let r := p.takeFromRing
+      { observed := none, served := .queue, item := r.1, pool := r.2 }
   else
     match p.lifo with
-    | some x => ({ p with lifo := none, inject := p.inject ++ [x] }).takeFromRing
-    | none   => p.takeFromRing
+    | some x =>
+      let flushed := { p with lifo := none, inject := p.inject ++ [x] }
+      let r := flushed.takeFromRing
+      { observed := some x, served := .flushed, item := r.1, pool := r.2 }
+    | none   =>
+      let r := p.takeFromRing
+      { observed := none, served := .queue, item := r.1, pool := r.2 }
+
+/-- The owner's take: the decision without its report. One definition of the decision, so the two cannot
+drift — the report is what the record reads, and this is what the worker uses. -/
+def Pool.take (p : Pool α cap) : Option α × Pool α cap :=
+  let r := p.takeReport
+  (r.item, r.pool)
 
 /-- A tick: the LIFO allowance refreshes. -/
 def Pool.tick (p : Pool α cap) : Pool α cap := { p with lifoPolls := 0 }

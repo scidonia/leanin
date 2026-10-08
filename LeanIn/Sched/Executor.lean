@@ -73,18 +73,43 @@ def Executor.submit (e : Executor α cap) (x : α) : IO Unit :=
     -- wait. `Sched.enqueue` already unparked a worker in the *state*; this is what wakes the thread.
     e.cv.notifyOne
 
-/-- Take one item of work. The pool and the scheduler advance together, or neither does — a pool that
-returned a task while the scheduler removed no work would break `Aligned`, and one lock is what makes that
-unreachable rather than merely unlikely. -/
-def Executor.take (e : Executor α cap) : IO (Option α) :=
+/-- **Take one item of work, and report the decision.** The pool and the scheduler advance together, or
+neither does — a pool that returned a task while the scheduler removed no work would break `Aligned`, and one
+lock is what makes that unreachable rather than merely unlikely. A refused scheduler leaves the pool as it
+was and reports no item, which is the same refusal the older form returned as `none`. -/
+def Executor.takeReport (e : Executor α cap) : IO (Sched.TakeReport α cap) :=
   e.state.atomically do
     let st ← get
-    match st.pool.take with
-    | (none, _) => return none
-    | (some x, p') =>
+    let r := st.pool.takeReport
+    match r.item with
+    | none => return r
+    | some _ =>
       match st.sched.take with
-      | none    => return none
-      | some s' => set ({ st with pool := p', sched := s' }); return (some x)
+      | none    => return { r with item := none, pool := st.pool }
+      | some s' => set ({ st with pool := r.pool, sched := s' }); return r
+
+/-- Take one item of work: the decision without its report. -/
+def Executor.take (e : Executor α cap) : IO (Option α) := do
+  return (← e.takeReport).item
+
+/-- **A fresh tick: the LIFO allowance refreshes.** Nothing else moves, and the proof is one line because
+of it — a tick cannot change what the executor holds, only how it will serve the next take. -/
+def Executor.tick (e : Executor α cap) : IO Unit :=
+  e.state.atomically do
+    let st ← get
+    set ({ st with pool := st.pool.tick })
+
+/-- **Local spawn: work that is ready on this worker.** The pool places it in the LIFO slot (displacing the
+occupant through the same overflow rule a submit uses), and the scheduler records the work and unparks a
+worker, as one step — `Sched.enqueue`, exactly as `submit` does it.
+
+The difference from `submit` is only *where* the pool puts it, which is the whole point of the operation: the
+slot is what keeps a chained task on the core that just ran its parent, and it is why the allowance exists. -/
+def Executor.spawn (e : Executor α cap) (x : α) : IO Unit :=
+  e.state.atomically do
+    let st ← get
+    set ({ st with pool := st.pool.spawn x, sched := st.sched.enqueue })
+    e.cv.notifyOne
 
 /-- Park: refused while work is held, granted otherwise. The check and the park are one critical section,
 which is exactly what the model's `park` encodes and the only reason a wakeup cannot be lost between them:
@@ -102,6 +127,13 @@ def Executor.stop (e : Executor α cap) : IO Unit :=
     let st ← get
     set ({ st with sched := st.sched.stop })
     e.cv.notifyAll
+
+omit [Inhabited α] in
+/-- A tick moves neither side of the alignment. -/
+theorem Aligned.tick (st : State α cap) (h : st.Aligned) : ({ st with pool := st.pool.tick }).Aligned := by
+  unfold State.Aligned Pool.inFlight at h ⊢
+  unfold Pool.tick at ⊢
+  omega
 
 omit [Inhabited α] in
 theorem Aligned.submit_of_room (st : State α cap) (h : st.Aligned) (x : α)
