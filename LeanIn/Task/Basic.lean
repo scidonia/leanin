@@ -116,10 +116,20 @@ def Async.spawn (a : Async α) : Async (Task α) := ⟨fun k resume => do
   resume ⟨a.step (fun v => Join.resolve cell v) resume⟩
   k ⟨cell⟩⟩
 
-/-- **Await.** Leave a continuation that schedules itself when the value arrives, and yield: `step` returns
-without calling `k`, and the resolver schedules `k v` as fresh work. Awaiting a finished handle calls `k` at
-once, which is what makes the operation idempotent. -/
-def Async.await (t : Task α) : Async α := ⟨fun k resume => Join.onReady t.cell (fun v => resume ⟨k v⟩)⟩
+/-- **The value, if it is already there.** -/
+def Join.value? (j : Join α) : IO (Option α) := j.lock.atomically do return (← get).1
+
+/-- **Await.** If the value is already there, `k` is called now and the step does not yield: awaiting a
+finished handle costs a lock and no scheduling round, which is what a `JoinHandle` polled as ready does.
+Otherwise the continuation left behind *schedules itself* when the value arrives, and `step` returns without
+calling `k`.
+
+Reading then registering is not a race: if the value arrives between the two, `onReady` runs the continuation
+immediately, which is the case it exists for. -/
+def Async.await (t : Task α) : Async α := ⟨fun k resume => do
+  match ← t.cell.value? with
+  | some v => k v
+  | none   => Join.onReady t.cell (fun v => resume ⟨k v⟩)⟩
 
 /-- **What generic code is written against**: joining and starting, with the handle type alongside. -/
 class MonadAwait (m : Type → Type) where

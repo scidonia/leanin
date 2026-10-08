@@ -354,6 +354,81 @@ def awaitTask {α : Type} (hooks : IO.Ref (List (_root_.Task Unit))) (external :
     return _root_.Task.pure ())
   hooks.modify (· ++ [hooked])⟩
 
+
+/-- The best of `k` runs of `x`, in microseconds. Best rather than mean: the thing being measured is the
+runtime's own cost, and a mean would mostly report what the rest of the machine was doing. -/
+def bestMicros (k : Nat) (x : IO Unit) : IO Nat := do
+  let mut best := 0
+  for _ in List.range k do
+    let t0 ← IO.monoNanosNow
+    x
+    let t1 ← IO.monoNanosNow
+    if best == 0 || t1 - t0 < best then best := t1 - t0
+  return best / 1000
+
+/-- **The runtime against the stock pool, on the two shapes the plan measures.**
+
+`spike` measures Lean's scheduler; this measures ours on the same work. The work unit is the same on both
+sides — one `Std.Mutex`-guarded increment — so the difference is the scheduler and not the payload.
+
+The second shape is the one the plan's M4 exists for: four tasks that each sleep. The stock pool has eight
+workers, so four sleeps overlap; this runtime has one carrier, so they queue — and the number says by how much.
+
+Not part of the library: a diagnostic, run as `lake exe controls --runtime-bench`. -/
+def runtimeBench : IO UInt32 := do
+  let n := 10000
+  let blockers := 4
+  let d : UInt32 := 25
+  let k := 5
+  IO.println s!"runtime bench: {n} tasks, {blockers} x {d}ms sleep, best of {k}"
+
+  -- Shape 1: `n` independent tasks, each taking the same mutex once, spawned and then joined.
+  let stockTiny ← bestMicros k do
+    let m ← Std.Mutex.new (0 : Nat)
+    let ts ← (List.range n).mapM (fun _ =>
+      IO.asTask (m.atomically do set ((← get) + 1)) _root_.Task.Priority.default)
+    for t in ts do let _ ← IO.wait t
+    pure ()
+  let oursTiny ← bestMicros k do
+    let m ← Std.Mutex.new (0 : Nat)
+    let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+    let body : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO (m.atomically do set ((← get) + 1))
+    let _ ← Runtime.run e (do
+      let hs ← (List.range n).mapM (fun _ => LeanIn.Task.Async.spawn body)
+      for h in hs do let _ ← LeanIn.Task.Async.await h
+      pure ())
+    pure ()
+  IO.println s!"{n} tasks, spawn+join   : stock {stockTiny}us / leanin {oursTiny}us"
+
+  -- Shape 2: blocking work. Each task sleeps, which on one carrier stops everything.
+  let stockSleep ← bestMicros k do
+    let ts ← (List.range blockers).mapM (fun _ =>
+      IO.asTask (IO.sleep d) _root_.Task.Priority.default)
+    for t in ts do let _ ← IO.wait t
+    pure ()
+  let oursSleep ← bestMicros k do
+    let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+    let body : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO (IO.sleep d)
+    let _ ← Runtime.run e (do
+      let hs ← (List.range blockers).mapM (fun _ => LeanIn.Task.Async.spawn body)
+      for h in hs do let _ ← LeanIn.Task.Async.await h
+      pure ())
+    pure ()
+  IO.println s!"{blockers} x {d}ms sleeps      : stock {stockSleep}us / leanin {oursSleep}us"
+
+  -- Where our code actually ran, which is the other half of any throughput number.
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let tids ← IO.mkRef ([] : List UInt64)
+  let body : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO do
+    tids.modify (· ++ [← IO.getTID])
+  let _ ← Runtime.run e (do
+    let hs ← (List.range 64).mapM (fun _ => LeanIn.Task.Async.spawn body)
+    for h in hs do let _ ← LeanIn.Task.Async.await h
+    pure ())
+  let distinct := (← tids.get).foldl (fun acc t => if acc.contains t then acc else acc ++ [t]) []
+  IO.println s!"64 spawned tasks       : {distinct.length} distinct threads"
+  return 0
+
 /-- **SC6 — real work on the runtime, and the thread identities it ran on.**
 
 One carrier: the driver, the spawned child's body, and the continuation that resumed after the external
@@ -515,6 +590,7 @@ def main (args : List String) : IO UInt32 := do
   | "--executor-park" :: _ => return ← executorPark 256
   | "--executor-queue" :: _ => return ← executorQueue
   | "--runtime-threads" :: _ => return ← runtimeThreads
+  | "--runtime-bench" :: _ => return ← runtimeBench
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"
