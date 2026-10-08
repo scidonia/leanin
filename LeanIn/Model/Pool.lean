@@ -109,18 +109,35 @@ def Pool.tick (p : Pool α) : Pool α := { p with lifoPolls := 0 }
 
 /-! ### Submitting -/
 
-/-- Submit, with overflow.
+/-- **Where a task goes when it joins the ring.** Append at the back if there is room; otherwise move
+**half** the ring to `inject` and append — half, not all, so the ring keeps the older work and does not
+immediately refill into another overflow (`queue.rs:253`).
 
-If the ring has room, append at the back. Otherwise move **half** the ring to `inject` and append —
-half, not all, so the ring keeps the older work and does not immediately refill into another overflow
-(`queue.rs:253`). -/
-def Pool.submit (p : Pool α) (x : α) : Pool α :=
+Factored out because `spawn` needs the *same* rule for the task its LIFO slot displaces, and there should be
+one definition of the overflow rather than two that can drift. It does not count: the displaced task is
+already in the pool. -/
+def Pool.toRing (p : Pool α) (x : α) : Pool α :=
   if p.ring.length < p.cap then
-    { p with ring := p.ring ++ [x], pushed := p.pushed + 1 }
+    { p with ring := p.ring ++ [x] }
   else
     { p with ring   := p.ring.take (p.ring.length / 2) ++ [x],
-             inject := p.inject ++ p.ring.drop (p.ring.length / 2),
-             pushed := p.pushed + 1 }
+             inject := p.inject ++ p.ring.drop (p.ring.length / 2) }
+
+/-- Submit, with overflow: the placement rule, and the count. -/
+def Pool.submit (p : Pool α) (x : α) : Pool α :=
+  { p.toRing x with pushed := p.pushed + 1 }
+
+/-- **Spawn, owner-local.** The new task takes the LIFO slot; the task it displaces goes to the run queue by
+the same rule a submit uses, overflow included, so displacing it cannot silently drop it — `schedule_local`,
+`worker.rs:1398`.
+
+This is the write side of `next_local_task` in the model's `take`, and it is placed *before* the ring rather
+than in `inject` because the slot's whole purpose is to keep a message pass on one core. It is also why the
+slot is never stolen: a thief reaches the ring and nothing else. -/
+def Pool.spawn (p : Pool α) (x : α) : Pool α :=
+  match p.lifo with
+  | none   => { p with lifo := some x, pushed := p.pushed + 1 }
+  | some y => { (p.toRing y) with lifo := some x, pushed := p.pushed + 1 }
 
 /-! ### What the overflow keeps, and what it evicts
 
@@ -135,6 +152,36 @@ example : (({(emptyPool Nat) with cap := 4, ring := [0, 1, 2, 3]}).submit 4).rin
 
 /-- The newer half is what leaves for `inject`. -/
 example : (({(emptyPool Nat) with cap := 4, ring := [0, 1, 2, 3]}).submit 4).inject = [2, 3] := by
+  decide
+
+/-! ### Spawning -/
+
+/-- A spawn into a free slot occupies it, and the ring is untouched. -/
+example : ((emptyPool Nat).spawn 7).lifo = some 7 := by decide
+
+/-- A second spawn takes the slot, displacing the first. -/
+example : (((emptyPool Nat).spawn 1).spawn 7).lifo = some 7 := by decide
+
+/-- …and the displaced task goes to the ring's *back*, not to `inject` — the ring had room. -/
+example : (((emptyPool Nat).spawn 1).spawn 7).ring = [1] := by decide
+
+/-- Both spawns count as submitted, and the displaced task is not counted twice. -/
+example : (((emptyPool Nat).spawn 1).spawn 7).pushed = 2 := by decide
+
+/-- Displacing from a *full* ring goes through the same overflow rule `submit` uses, so the displaced
+task is placed rather than dropped. -/
+example :
+    (({(emptyPool Nat) with cap := 4, ring := [0, 1, 2, 3], lifo := some 5}).spawn 7).ring = [0, 1, 5] := by
+  decide
+
+/-- …with the newer half leaving for `inject`, exactly as in the `submit` case above. -/
+example :
+    (({(emptyPool Nat) with cap := 4, ring := [0, 1, 2, 3], lifo := some 5}).spawn 7).inject = [2, 3] := by
+  decide
+
+/-- …and the spawn itself holds the slot. -/
+example :
+    (({(emptyPool Nat) with cap := 4, ring := [0, 1, 2, 3], lifo := some 5}).spawn 7).lifo = some 7 := by
   decide
 
 /-! ### The conservation law -/
@@ -184,9 +231,27 @@ theorem take_conserves {p : Pool α} (h : p.Consistent) : (p.take).2.Consistent 
 theorem steal_conserves {p : Pool α} (h : p.Consistent) : (p.steal).2.Consistent :=
   takeFromRing_conserves h
 
+/-- **The placement rule loses nothing.** The task joins the ring, and if the ring was full its newer
+half moves to `inject`, so ring plus inject grows by exactly the one task placed.
+
+This is deliberately *not* a conservation law for `toRing` on its own, and the first version of it said so
+and was false: a task placed by this rule was counted when it entered the pool, not here, so `submitted`
+does not move. Both callers supply that count — `submit` for its task, `spawn` for the spawn, since the
+task it displaces was already counted. -/
+theorem toRing_len (p : Pool α) (x : α) :
+    (p.toRing x).ring.length + (p.toRing x).inject.length
+      = p.ring.length + p.inject.length + 1 := by
+  unfold Pool.toRing
+  by_cases hc : p.ring.length < p.cap
+  · simp only [hc, ite_true, List.length_append, List.length_singleton]
+    omega
+  · simp only [hc, ite_false, List.length_append, List.length_singleton]
+    have hsum := length_take_add_drop p.ring (p.ring.length / 2)
+    omega
+
 theorem submit_conserves {p : Pool α} (x : α) (h : p.Consistent) :
     (p.submit x).Consistent := by
-  unfold Pool.submit
+  unfold Pool.submit Pool.toRing
   by_cases hc : p.ring.length < p.cap
   · simp only [hc, ite_true]
     simp_all [Pool.Consistent, Pool.inFlight]
@@ -200,9 +265,10 @@ theorem tick_conserves {p : Pool α} (h : p.Consistent) : (p.tick).Consistent :=
 
 /-! ### Capacity -/
 
-theorem submit_bounded {p : Pool α} {x : α} (hb : p.Bounded) (hcap : 2 ≤ p.cap) :
-    (p.submit x).Bounded := by
-  unfold Pool.submit Pool.Bounded
+/-- The ring stays within capacity under the placement rule; the newer half leaves for `inject` instead. -/
+theorem toRing_bounded {p : Pool α} {x : α} (hb : p.Bounded) (hcap : 2 ≤ p.cap) :
+    (p.toRing x).Bounded := by
+  unfold Pool.toRing Pool.Bounded
   by_cases hc : p.ring.length < p.cap
   · simp only [hc, ite_true, List.length_append, List.length_singleton]
     omega
@@ -212,6 +278,52 @@ theorem submit_bounded {p : Pool α} {x : α} (hb : p.Bounded) (hcap : 2 ≤ p.c
     have htake : (p.ring.take (p.ring.length / 2)).length = p.ring.length / 2 := by
       rw [List.length_take, Nat.min_eq_left hdiv]
     omega
+
+theorem submit_bounded {p : Pool α} {x : α} (hb : p.Bounded) (hcap : 2 ≤ p.cap) :
+    (p.submit x).Bounded := by
+  unfold Pool.submit Pool.toRing Pool.Bounded
+  by_cases hc : p.ring.length < p.cap
+  · simp only [hc, ite_true, List.length_append, List.length_singleton]
+    omega
+  · simp only [hc, ite_false, List.length_append, List.length_singleton]
+    have hb' : p.ring.length ≤ p.cap := hb
+    have hdiv : p.ring.length / 2 ≤ p.ring.length := Nat.div_le_self _ _
+    have htake : (p.ring.take (p.ring.length / 2)).length = p.ring.length / 2 := by
+      rw [List.length_take, Nat.min_eq_left hdiv]
+    omega
+
+/-! ### Spawning
+
+`spawn` is a write path too, and it gets the same pair of laws as `submit`. Without them the slot would
+be a model field with a writer but no invariant, which is the shape of the defect found in the executor
+this morning: a path that moves state the model describes, with nothing checking that it moved it
+correctly. -/
+
+/-- Spawn conserves work. The displaced task is placed, not dropped, and both it and the spawn were
+already counted. -/
+theorem spawn_conserves {p : Pool α} (x : α) (h : p.Consistent) : (p.spawn x).Consistent := by
+  unfold Pool.spawn Pool.toRing
+  cases hl : p.lifo with
+  | none =>
+    simp_all [Pool.Consistent, Pool.inFlight]
+    omega
+  | some y =>
+    by_cases hc : p.ring.length < p.cap
+    · simp only [hc, ite_true]
+      simp_all [Pool.Consistent, Pool.inFlight]
+      omega
+    · simp only [hc, ite_false]
+      have hsum := length_take_add_drop p.ring (p.ring.length / 2)
+      simp_all [Pool.Consistent, Pool.inFlight]
+      omega
+
+/-- Spawn keeps the ring bounded: the slot holds something, but the slot is not the ring. -/
+theorem spawn_bounded {p : Pool α} {x : α} (hb : p.Bounded) (hcap : 2 ≤ p.cap) :
+    (p.spawn x).Bounded := by
+  unfold Pool.spawn
+  cases hl : p.lifo with
+  | none   => simpa [hl, Pool.Bounded] using hb
+  | some y => simpa [hl, Pool.Bounded] using toRing_bounded (p := p) (x := y) hb hcap
 
 /-! ### No work is stranded -/
 
@@ -284,6 +396,9 @@ a proof that depended on one would be circular. `#print axioms` is the check. -/
 #print axioms LeanIn.Model.take_returns_if_present
 #print axioms LeanIn.Model.submit_conserves
 #print axioms LeanIn.Model.submit_bounded
+#print axioms LeanIn.Model.toRing_len
+#print axioms LeanIn.Model.spawn_conserves
+#print axioms LeanIn.Model.spawn_bounded
 #print axioms LeanIn.Model.take_conserves
 
 end Model

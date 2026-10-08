@@ -103,12 +103,15 @@ def _root_.LeanIn.Ring.drain (r : Ring α cap) : List α × Ring α cap :=
       | (none, _)    => acc)
     ([], r)
 
-/-- **Submit, with overflow.** Append at the back if there is room. Otherwise the *newer* half leaves for
-`inject` and the *older* half stays with the new task — see `Model.Pool.submit`, where the reason is that
-intake places work in the first half, so anything found in the second is provably not freshly intaken. -/
-def Pool.submit (p : Pool α cap) (x : α) : Pool α cap :=
+/-- **Where a task goes when it joins the ring** — the implementation's `Model.Pool.toRing`. Append at the
+back if there is room. Otherwise the *newer* half leaves for `inject` and the *older* half stays with the new
+task: intake places work in the first half, so anything found in the second is provably not freshly intaken.
+
+Factored out so `spawn` places the task its LIFO slot displaces by the same rule, and there is one overflow
+rather than two that can drift. It does not count: the task was counted when it entered the pool. -/
+def Pool.toRing (p : Pool α cap) (x : α) : Pool α cap :=
   if p.ring.size < cap then
-    { p with ring := p.ring.push x, pushed := p.pushed + 1 }
+    { p with ring := p.ring.push x }
   else
     let half := p.ring.size / 2
     let drained := p.ring.drain
@@ -116,8 +119,19 @@ def Pool.submit (p : Pool α cap) (x : α) : Pool α cap :=
     let evict := drained.1.drop half
     let refilled := keep.foldl (fun (r : Ring α cap) y => r.push y) (emptyRing α cap)
     { p with ring   := refilled.push x,
-             inject := p.inject ++ evict,
-             pushed := p.pushed + 1 }
+             inject := p.inject ++ evict }
+
+/-- **Submit, with overflow**: the placement rule, and the count. -/
+def Pool.submit (p : Pool α cap) (x : α) : Pool α cap :=
+  { p.toRing x with pushed := p.pushed + 1 }
+
+/-- **Spawn, owner-local.** The new task takes the LIFO slot; the task it displaces goes to the run queue by
+the same rule a submit uses, overflow included, so displacing it cannot silently drop it —
+`schedule_local`, `worker.rs:1398`. -/
+def Pool.spawn (p : Pool α cap) (x : α) : Pool α cap :=
+  match p.lifo with
+  | none   => { p with lifo := some x, pushed := p.pushed + 1 }
+  | some y => { (p.toRing y) with lifo := some x, pushed := p.pushed + 1 }
 
 /-! ### Agreement with the specification
 
@@ -141,18 +155,52 @@ accounting follows without any invariant — no `Consistent` hypothesis, because
 theorem inFlight_submit_of_room (p : Pool α cap) (x : α) (hroom : p.ring.size < cap) :
     (p.submit x).inFlight = p.inFlight + 1 := by
   by_cases h : p.ring.size < cap
-  · simp only [Pool.submit, ite_eq_left h, Pool.inFlight, Ring.push]
+  · simp only [Pool.submit, Pool.toRing, ite_eq_left h, Pool.inFlight, Ring.push]
     omega
   · exact absurd hroom h
 
 
+/-- **Placement agrees, while the ring has room.** Both sides append the task at the back of the ring, and
+`push_toList` is the whole of the ring's part. The full ring is the owed drain-and-refill lemma named above;
+this case deliberately does not need it. -/
+theorem toModel_toRing_of_room (p : Pool α cap) (x : α)
+    (hw : p.ring.WF) (hroom : p.ring.size < cap) :
+    (p.toRing x).toModel = (p.toModel).toRing x := by
+  have hlen := toList_length p.ring
+  -- The model's room test reads its own ring's length and its own `cap`; `hlen` and `hroom` are what make
+  -- those the implementation's `size` and `cap`, so `simp` discharges it without being told.
+  simp [Pool.toRing, Pool.toModel, Model.Pool.toRing,
+        hroom, hlen, push_toList p.ring x hw hroom]
+
 /-- **Submission with room.** The ring has space, so both sides append at the back and count the push.
-This is the `Impl.push ⊑ Model.push` case that needs no eviction, and `push_toList` is the whole of the
-ring's part. -/
+This is the `Impl.push ⊑ Model.push` case that needs no eviction. -/
 theorem toModel_submit_of_room (p : Pool α cap) (x : α)
     (hw : p.ring.WF) (hroom : p.ring.size < cap) :
     (p.submit x).toModel = (p.toModel).submit x := by
   have hlen := toList_length p.ring
-  simp [Pool.submit, Pool.toModel, Model.Pool.submit, hroom, hlen, push_toList p.ring x hw hroom]
+  simp [Pool.submit, Pool.toRing, Pool.toModel, Model.Pool.submit, Model.Pool.toRing,
+        hroom, hlen, push_toList p.ring x hw hroom]
+
+/-- **Spawning agrees, while the ring has room.** Both sides write the slot, and the displaced task takes
+the same placement path — `toModel_toRing_of_room` is what carries it across. The full ring is the same owed
+lemma as `submit`'s overflow. -/
+theorem toModel_spawn_of_room (p : Pool α cap) (x : α)
+    (hw : p.ring.WF) (hroom : p.ring.size < cap) :
+    (p.spawn x).toModel = (p.toModel).spawn x := by
+  cases h : p.lifo with
+  | none =>
+    simp [Pool.spawn, h, Pool.toModel, Model.Pool.spawn]
+  | some y =>
+    -- Both sides write the slot the same way, so the only field that differs is the ring, and the displaced
+    -- task is the room case: rewriting it across the projection leaves two record literals over the same
+    -- state, which is definitional.
+    have hl : (p.toModel).lifo = some y := by simp [Pool.toModel, h]
+    unfold Pool.spawn Model.Pool.spawn
+    rw [h, hl]
+    simp only []
+    rw [show (p.toModel).toRing y = (p.toRing y).toModel from
+          (toModel_toRing_of_room p y hw hroom).symm]
+    -- …and `toModel` reads that state field by field, so the two sides are the same value.
+    rfl
 
 end LeanIn.Sched
