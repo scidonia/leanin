@@ -34,7 +34,14 @@ and taken from the front, while `lifo` is a single owner-local slot that is neve
 neither, and giving it a capacity would be a claim nothing here checks. When the executor grows the ring it
 belongs in `LeanIn/Data/Ring.lean` — M2b, already verified — and `tests/executor-contract.sh SC5` is the
 contract that will demand it: its receipts are the batch that crossed the ring's capacity, the takes from
-the LIFO slot, and the flush of a pending continuation. -/
+the LIFO slot, and the flush of a pending continuation.
+
+**Tokio's counterpart is batched, and that is the one thing this queue is missing.** `Inject<T>` is
+`{ shared: Shared<T>, synced: Mutex<Synced> }` — a lock-free `shared` half beside a mutex-guarded `synced`
+half — and its intake is `push` *and* `push_batch`, because the local ring overflows by moving **half** its
+contents at once. `docs/tokio-map.md` §3 reads the current source rather than the 2019 blog for exactly this
+reason. So `pushBatch` belongs here when the ring lands, and its absence now is a gap rather than a
+decision. -/
 structure Queue where
   lock     : Std.Mutex (List Job)
   cv       : Std.Condvar
