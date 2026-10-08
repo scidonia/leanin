@@ -121,18 +121,31 @@ axiom wait_spec {cv : Std.Condvar} {m : Std.BaseMutex} {w w' : World} {c : Condv
 /-- **A5 — notification, and its absence of memory.** `lean_io_condvar_notify_one`
 (`mutex.cpp:62`) → `std::condition_variable::notify_one`.
 
-Deliberately weak: notification never *adds* a waiter, and it wakes at most the ones already there.
+Never *adds* a waiter, and it unblocks **at most one**, so the waiter set can lose at most one entry.
 That it can be **lost entirely** when nobody is waiting is not a concession — it is proved, as
-`notifyOne_no_waiters` in `World.lean`. -/
+`notifyOne_no_waiters` in `World.lean`.
+
+**This is not the same proposition as `notifyAll_spec`.** "At most one leaves" is what distinguishes
+the two, and without it the pair says nothing about either: a `notifyOne` that wakes nobody and a
+`notifyAll` that wakes nobody both satisfy a bare "does not grow" clause. -/
 axiom notifyOne_spec {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid} :
     IsCondvar cv w c → Runs t (Std.Condvar.notifyOne cv) w () w' →
-    (w'.condvars c).waiters.length ≤ (w.condvars c).waiters.length
+    (w'.condvars c).waiters.length ≤ (w.condvars c).waiters.length ∧
+    (w.condvars c).waiters.length ≤ (w'.condvars c).waiters.length + 1
 
-/-- **A5 — broadcast.** `lean_io_condvar_notify_all` (`mutex.cpp:67`). Same shape: it can only empty
-the set, never fill it. The shutdown path relies on this. -/
+/-- **A5 — broadcast.** `lean_io_condvar_notify_all` (`mutex.cpp:67`).
+
+Every thread that was waiting is released — it moves to *blocked on the mutex* rather than on the
+condition variable — so every waiter present at the call is gone from the set afterwards, and the set
+does not grow. This is what the shutdown path relies on.
+
+It is therefore **not** the same proposition as `notifyOne_spec`, and the difference is not cosmetic: a
+bare "does not grow" clause admits a `notifyAll` that releases nobody, which would leave the shutdown
+argument proved of the model and never carried across the bridge. -/
 axiom notifyAll_spec {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid} :
     IsCondvar cv w c → Runs t (Std.Condvar.notifyAll cv) w () w' →
-    (w'.condvars c).waiters.length ≤ (w.condvars c).waiters.length
+    (w'.condvars c).waiters.length ≤ (w.condvars c).waiters.length ∧
+    ∀ u, u ∈ (w.condvars c).waiters → u ∉ (w'.condvars c).waiters
 
 /-! ### A7 — the clock -/
 
