@@ -9,7 +9,9 @@ spurious wakeups, no fairness. None of that is assumed. What is assumed is the c
 that model and the running program, and this file is the whole of it.
 
 Everything here is an `axiom`, so `#print axioms` on any theorem downstream will name exactly what it
-rests on. Seven of them are operation contracts, and they are the TCB (D7). One further assumption has
+rests on. Nine of them are operation contracts — creation of a mutex and of a condvar, the three mutex
+operations, waiting, the two notifications, and the clock — and they are the TCB (D7), one per native
+operation the scheduler uses. One further assumption has
 no axiom of its own: that the objects a statement *relates* are not aliased under its representation,
 `Rep.NonAliasing`. It is a *definition*, carried as an explicit hypothesis by the theorems that need it
 rather than by the operation axioms, because no single operation relates two runtime objects. Every
@@ -92,6 +94,32 @@ def Rep.NonAliasing (r : Rep) (m₁ m₂ : Std.BaseMutex) : Prop := r.lockOf m�
 
 /-- The same for two condition variables. -/
 def Rep.NonAliasingC (r : Rep) (cv₁ cv₂ : Std.Condvar) : Prop := r.condOf cv₁ ≠ r.condOf cv₂
+
+/-! ### A0 — creation
+
+`lean_io_basemutex_new` (`mutex.cpp:20`) and `lean_io_condvar_new` (`mutex.cpp:46`) default-construct a
+`std::mutex` and a `std::condition_variable`. They are two of the eight native operations the scheduler
+uses, and until now the only ones with no contract at all.
+
+What can be stated is the *state* a fresh object is in. What cannot be stated here is that a fresh
+object receives an index no live object already holds. That is *identity*, and stating it needs liveness
+and allocation identities in the model: the representation is a fixed map over runtime objects, so it
+cannot distinguish one just created from one that has existed all along. Until that exists, identity
+non-aliasing stays the explicit local hypothesis `Rep.NonAliasing`, not a consequence of creation. -/
+
+/-- **A0 — mutex creation.** A completed `new` yields an unowned model lock, and leaves the clock
+alone. -/
+axiom newMutex_spec {r : Rep} {w w' : World} {l : LockId} {t : Tid} {m : Std.BaseMutex} :
+    IsLock r m l →
+    Runs t (Std.BaseMutex.new : BaseIO Std.BaseMutex) w m w' →
+    (w'.locks l).owner = none ∧ w.SameClock w'
+
+/-- **A0 — condvar creation.** A completed `new` yields a condvar with no waiters, and leaves the clock
+alone. -/
+axiom newCondvar_spec {r : Rep} {w w' : World} {c : CondvarId} {t : Tid} {cv : Std.Condvar} :
+    IsCondvar r cv c →
+    Runs t (Std.Condvar.new : BaseIO Std.Condvar) w cv w' →
+    (w'.condvars c).waiters = [] ∧ w.SameClock w'
 
 /-! ### A1–A2 — the mutex -/
 
