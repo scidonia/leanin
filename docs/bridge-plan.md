@@ -85,6 +85,7 @@ Each is small once the decision above is made. None of them requires the program
 | **C10** | Declare assumption-predicates with `axiom`, never `opaque` | — | **done, and insufficient on its own — see C11.** Found by testing the audit rather than reading it. Visibility is not content: an `axiom` predicate is named by `#print axioms` and can still say nothing |
 | **C11** | State an assumption *and enforce it where it is needed*: `Rep.NonAliasing` is a local, pairwise condition | `Rep`, `distinct_mutexes_are_distinct_locks` | **done** — the guard is a theorem that relates two mutexes, so the hypothesis is required and consumed rather than suppressed |
 | **C12** | Non-clock operations preserve the clock state | `World.SameClock`, six axioms | **done** — `readings_monotone_across_a_call` is the guard: it did not follow before |
+| **C13** | Contract the two creation primitives | `newMutex_spec`, `newCondvar_spec` | **done** — two of the eight native operations had no contract at all. The *state* a fresh object is in is stated; *identity* is not, and cannot be without liveness and allocation identities in the model, which is why `Rep.NonAliasing` stays a hypothesis rather than a consequence |
 | C2, C3, C5 | — | — | **retired or folded** with the choice of (b); see above |
 | **C8** | Model waiters as a set or as episodes, with the invariant stated | `World.Condvar` | **open** — the largest remaining item: it changes the four waiter transitions and every A4 theorem |
 | **C9** | Say whether any claim depends on data read under the lock | `Bridge`, `docs/interface.md` | **open** — documentation, no code |
@@ -141,6 +142,53 @@ could reset it, and the second reading's bound — "never behind the previous sa
 Any budget with a bridged operation between its start and end readings could conclude nothing. The fix
 adds `World.SameClock` to the six non-clock contracts, and `readings_monotone_across_a_call` is the
 guard: a reading, a lock, a reading, and the inequality between them, which did not follow before.
+
+## Testing the dynamics
+
+The contracts cannot be executed: they quantify over an `opaque` relation, so no test observes their
+dynamics. Two things *can* be observed, and between them they are the whole of the direct evidence:
+
+- **the model's dynamics**, by `nix develop -c lake exe dynamics` (`LeanIn/Test/Dynamics.lean`) — `World`
+  is an executable state machine, so the states the contracts speak about can be enumerated and asked
+  for;
+- **the primitives' dynamics**, by `nix develop -c lake exe controls` — one control per contract, each
+  with its limits stated.
+
+What the first answers is **non-vacuity**: a contract whose hypothesis no reachable state satisfies is
+true of nothing. Its output, verbatim, over one lock, one condvar, two threads and sequences of at most
+four actions:
+
+```
+  hypotheses of the contracts. Each must be reachable, or the contract is true of nothing.
+  reachable      A0/A1  a lock is unowned (the state a fresh lock is in)
+                   by: (nothing — the initial world already satisfies it)
+  reachable      A2/A3/A4  a thread owns the lock
+                   by: lock 0 by 0
+  reachable      A5  a thread is enrolled on the condvar
+                   by: lock 0 by 0 → wait 0 by 0
+  reachable      A7  model time has advanced
+                   by: tick
+  reachable      an empty waiter set is reachable, as `notifyOne_no_waiters` assumes
+  reachable      and so is a non-empty one, so that control is not a marker matching nothing
+  realisable     the cycle a runtime `wait` spans (same thread, released at the park)
+                   by: lock 0 by 0 → wait 0 by 0 → spurious 0 → lock 0 by 0
+```
+
+Every hypothesis has a witness, so none of the contracts is vacuous; and the cycle the search finds is
+the cycle `World.wait_cycle_reachable` proves, so the search and the proof agree — the cross-check worth
+having, since neither is evidence for the other's claim on its own.
+
+**The instrument needed three rounds, and running it found each one.** It first accepted
+`lock 1, wait 1, lock 0` as "the cycle" — one thread parking while a *different* thread takes the lock,
+so a predicate one thread's acquisition satisfies was standing in for another thread's cycle. It then
+reported **nothing at all**, because the trace walker dropped the world preceding each action, so every
+path check was aligned against the wrong successor state. It then accepted `lock 0, wait 0, lock 0,
+spurious 0`, with the resume arriving *after* the re-acquisition — and the order is part of the claim,
+because that is what a `wait` call does.
+
+A probe that reports success for a witness which is not the thing claimed is the same defect class as
+everything else in this document, and reading all three would have found none of them. That is the
+argument for the instrument existing in the first place.
 
 ## The programme, separated
 

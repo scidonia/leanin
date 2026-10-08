@@ -10,7 +10,14 @@
   and `Controls.lean`: run `nix develop -c lake exe controls` for
   primitive bridge observations, retain each control's stated
   limits, and observe the executor through a public executable
-  client rather than writing its queue internals.
+  client rather than writing its queue internals. The model side has
+  its own probe: `nix develop -c lake exe dynamics`
+  (`LeanIn/Test/Dynamics.lean`) reports whether each contract's
+  hypothesis is reachable, which is the non-vacuity check a proof
+  cannot make about itself. A path claim needs a predicate that
+  requires the *same* actor at both ends and the stages in order --
+  three versions of the cycle predicate were wrong, and each was
+  found by running the probe, not by reading it.
 - Put externally observable executor scenarios in
   `tests/*contract.md` and their executable checks in the
   adjacent shell fixture. Run an individual check with
