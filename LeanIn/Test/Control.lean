@@ -253,6 +253,85 @@ def executorTrace : IO UInt32 := do
     pos := pos + 1
   return 0
 
+/-- **SC2 — an injected completion wakes a waiting carrier, and shutdown delivers the staged work once.**
+
+Two event orders, and neither is decided by elapsed time. In the *notification-first* order the producer
+submits before any carrier exists, so a carrier started afterwards finds the work rather than parking. In the
+*parked-first* order the carrier is started first, the harness waits until the state *says* it is parked, and
+only then does the producer act — which is the order a naive protocol hangs on, since a notification with no
+waiter is lost.
+
+Then the shutdown half: two identities staged at the public `submit`, shutdown, and a carrier that runs the
+loop until `work` reports stopping. `delivered` is what the carrier actually took, so a drain that reported a
+zero count while completing nothing could not pass as one that delivered both.
+
+`before` and `after` are the pending work completing in each order; each must be exactly one. The events are
+appended where they happen, in the order they happened, and nothing retypes them from a desired result. -/
+def executorPark (cap : Nat) : IO UInt32 := do
+  let events ← IO.mkRef ([] : List String)
+  let record (e : String) : IO Unit := events.modify (· ++ [e])
+
+  -- Order 1: notification before any carrier parks.
+  let e1 ← Sched.Executor.new Nat cap 1
+  e1.submit 7
+  record "pre-notify=emitted-before-park"
+  let got1 ← IO.mkRef false
+  let w1 ← IO.asTask (do
+    match ← e1.work with
+    | some _ => got1.set true
+    | none   => pure ()) Task.Priority.dedicated
+  match ← IO.wait w1 with
+  | .ok _    => if ← got1.get then record "pre-notify=completed"
+  | .error e => IO.println s!"executor-park: order 1 errored: {e}"
+
+  -- Order 2: the carrier parked first, confirmed from the state before the producer acts.
+  let e2 ← Sched.Executor.new Nat cap 1
+  let got2 ← IO.mkRef false
+  -- The carrier starts *first*, so it parks; `snapshot` can take the lock because a parked carrier has
+  -- released it. The producer acts only once the state says the park has happened, which is what makes this
+  -- the order a naive protocol hangs on: a notification with no waiter is lost.
+  let w2 ← IO.asTask (do
+    match ← e2.work with
+    | some _ => got2.set true
+    | none   => pure ()) Task.Priority.dedicated
+  let parked ← IO.mkRef false
+  let mut tries := 0
+  while !(← parked.get) && tries < 1000 do
+    IO.sleep 1
+    let st ← e2.snapshot
+    parked.set (st.2.parked = 1)
+    tries := tries + 1
+  if ← parked.get then record "parked-first=parked"
+  e2.submit 7
+  record "producer=emitted-after-park"
+  match ← IO.wait w2 with
+  | .ok _    => if ← got2.get then record "parked-first=completed"
+  | .error e => IO.println s!"executor-park: order 2 errored: {e}"
+
+  -- Shutdown: stage two identities, stop, and let a carrier drain until `work` reports stopping.
+  let e3 ← Sched.Executor.new Nat cap 1
+  let seen ← IO.mkRef ([] : List Nat)
+  let carrier ← IO.asTask (do
+    let mut go := true
+    while go do
+      match ← e3.work with
+      | some x => seen.modify (· ++ [x])
+      | none   => go := false) Task.Priority.dedicated
+  let queued : List Nat := [31, 32]
+  for t in queued do e3.submit t
+  e3.stop
+  match ← IO.wait carrier with
+  | .error e => IO.println s!"executor-park: the carrier errored: {e}"
+  | .ok _    => pure ()
+  let delivered ← seen.get
+  let st ← e3.snapshot
+  if delivered.isEmpty then record "drain=1" else record "drain=0"
+
+  let before := if ← got1.get then 1 else 0
+  let after := if ← got2.get then 1 else 0
+  IO.println s!"exec|park|before={before}|after={after}|observed={String.intercalate "," (← events.get)}|queued=[{String.intercalate "," (queued.map toString)}]|delivered=[{String.intercalate "," (delivered.map toString)}]|remaining={st.1.inFlight}"
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -261,6 +340,7 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | "--executor-single" :: _ => return ← executorSingle
   | "--executor-trace" :: _ => return ← executorTrace
+  | "--executor-park" :: _ => return ← executorPark 256
   | _ => pure ()
   IO.println "  A3 (release without ownership) and A6 (thread creation) are not tested — see the header."
   IO.println ""
