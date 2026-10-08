@@ -78,21 +78,23 @@ Each is small once the decision above is made. None of them requires the program
 
 | # | what | where | status |
 |---|---|---|---|
-| **C1** | State what `w'` denotes, once, for the whole file | `Bridge.lean`, above `Runs` | **done** — (b), with the reason (a) was rejected recorded there |
+| **C1** | State what `w'` denotes, once, for the whole file | `Bridge.lean`, above `Runs` | **done** — (b), with the reason (a) was rejected recorded there; and the refinement a `do` block needs, that for a call with internal stages the pair is the *composition* rather than one instant, so an isolated effect and a call interval are different objects |
 | **C4** | Record the clock sample, so successive reads are comparable | `clock_spec`, `World.lastSample` | **done** — three conjuncts: model time does not move, the reading is recorded, and it is never behind the previous sample |
-| **C6** | Carry the object correspondence outside the world | `Rep`, `IsLock`, `IsCondvar` | **half done, and the other half was a defect — see C11.** Composability is done and `calls_compose` is its guard: three axioms on the same objects, which did not compile before. The *no aliasing* half was claimed and not delivered |
+| **C6** | Carry the object correspondence outside the world | `Rep`, `IsLock`, `IsCondvar` | **half done, and the other half was a defect — see C11.** Composability is done and `lock_wait_unlock_postcondition` is its guard: three axioms on the same objects, which did not compile before. The *no aliasing* half was claimed and not delivered |
 | **C7** | Say what an actor is | `World.lean`, `abbrev Tid` | **done** — a native thread, carrier or waker, never a green task |
 | **C10** | Declare assumption-predicates with `axiom`, never `opaque` | — | **done, and insufficient on its own — see C11.** Found by testing the audit rather than reading it. Visibility is not content: an `axiom` predicate is named by `#print axioms` and can still say nothing |
 | **C11** | State an assumption *and enforce it where it is needed*: `Rep.NonAliasing` is a local, pairwise condition | `Rep`, `distinct_mutexes_are_distinct_locks` | **done** — the guard is a theorem that relates two mutexes, so the hypothesis is required and consumed rather than suppressed |
 | **C12** | Non-clock operations preserve the clock state | `World.SameClock`, six axioms | **done** — `readings_monotone_across_a_call` is the guard: it did not follow before |
 | **C13** | Contract the two creation primitives | `newMutex_spec`, `newCondvar_spec` | **done** — two of the eight native operations had no contract at all. The *state* a fresh object is in is stated; *identity* is not, and cannot be without liveness and allocation identities in the model, which is why `Rep.NonAliasing` stays a hypothesis rather than a consequence |
+| **C14** | State notification effects exactly, not as counts | `notifyOne_spec`, `notifyAll_spec` | **done** — the count form admitted `[Alice, Bob] -> [Carol, Dave]`: it does not grow and loses at most one, so a wakeup that *replaced* the waiter set passed, while the model's `erase` has no such behaviour. `notifyOne_no_additions` and `notifyAll_no_additions` are the consequences the count could not give, and `counted_notify_admits_replacement` is the control showing the old form accepting what `exact_notify_rejects_replacement` refuses |
+| **C15** | Show the derived theorems consume the axioms, and state what the audit cannot see | `Bridge.lean`, the audit block | **done** — `lock_wait_unlock_postcondition` names `[lock_spec, unlock_spec, wait_spec]` and `readings_monotone_across_a_call` names `[clock_spec, lock_spec]`, which printing only `World.lean`'s theorems cannot show. The limit is stated there: `#print axioms` reports dependencies, not hypotheses — `distinct_mutexes_are_distinct_locks` is axiom-free *and* assumes `NonAliasing` |
 | C2, C3, C5 | — | — | **retired or folded** with the choice of (b); see above |
 | **C8** | Model waiters as a set or as episodes, with the invariant stated | `World.Condvar`, `World.WaitersNodup` | **done** — the invariant is stated and proved preserved, `wait` refuses a caller already enrolled, and `notifyOne` names the waiter it wakes. The probe's violation check went from *reachable* to *not reached*, which is the evidence |
 | **C9** | Say whether any claim depends on data read under the lock | `Bridge`, `docs/interface.md` | **open** — documentation, no code |
 
 C6 was the one that mattered most, and it was the reason the axioms were unusable rather than merely
 incomplete: no conclusion mentioned `IsLock`, so after a first call the representation was lost and no
-second call on that object could be stated. `calls_compose` is a regression guard as much as a
+second call on that object could be stated. `lock_wait_unlock_postcondition` is a regression guard as much as a
 demonstration — make the representation world-indexed again and it stops compiling.
 
 ### C10 — an assumption stated as an `opaque` predicate is invisible to the audit
@@ -246,7 +248,14 @@ Two limits are worth stating plainly:
   of the programme. These are *fidelity* failures: the axiom set forbids behaviours the machine permits,
   or fails to state properties the model relies on. They are detectable by reading, and the handoff's
   countermodel list is the right shape for turning each into a test at the native level.
-- **The handoff was written without `World.lean`**, so it cannot see the model's own defects. Its C8
+- **The revision review was written without `World.lean` too.** Its sections were checked against the code
+  rather than adopted: §1's "confirm `Tid` is a native carrier", §3's "do not equate two distinct Lean
+  values with two distinct native allocations" and §5's clock requirement were already done or already
+  stated, and §3's local condition is the standing design. §4 is the finding this round takes, §7 the audit
+  change; §1's `Effect` against `Call`, §2's composition for a `do` block, §3's `ValidRep` with lifetimes
+  and address reuse, and §6's per-primitive frame conditions are the programme below, restated rather than
+  newly found.
+- **The first handoff was written without `World.lean`**, so it cannot see the model's own defects. Its C8
   requirement — "if waiter lists remain in `World`, prove `NoDup` and exact membership updates" — covers
   the class that produced one of them.
 

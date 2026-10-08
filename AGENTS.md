@@ -57,7 +57,10 @@
   scheduling-destination decision. Check `#print axioms` for each new
   theorem, and know what it does not see: an assumption stated as
   an `opaque` predicate has a hidden value and is not an axiom, so
-  `#print axioms` never names it. Visibility
+  `#print axioms` never names it. The list it
+  prints is dependencies, not hypotheses: a lemma carrying a local assumption such as
+  `Rep.NonAliasing` prints the same list either way, so an axiom-free line means
+  "nothing was assumed as an axiom", never "nothing was assumed". Visibility
   is not content, though: an `axiom` predicate is named and can
   still say nothing, entailing nothing -- which is how a comment
   claiming injectivity sat beside a declaration that entailed no

@@ -53,7 +53,14 @@ concurrent actor can change: another carrier may acquire a lock after this threa
 the call returns, so a conclusion of the form "the returned world does not hold `l`" would forbid a real
 execution. Properties that cannot be taken away — *holding* a lock — hold under either reading; the
 ones that can — *not* holding it — hold only under this one. Stated once here, because every axiom below
-rests on it. -/
+rests on it.
+
+**For a call with internal stages, this pair is the *composition*, not one instant.** `wait` releases and
+enrols, suspends, wakes and re-acquires; A4's conclusion therefore speaks about (holds before, holds after)
+rather than about any single one of those stages, and the stages themselves are the model's transitions --
+`wait_cycle_reachable` exhibits that path. The distinction matters to anything wanting the *interior* of a
+call: one isolated effect and one call interval are different objects, and only the second type-checks
+against a `do` block. -/
 opaque Runs {α : Type} (t : Tid) (op : BaseIO α) (w : World) (r : α) (w' : World) : Prop
 
 /-! ### The representation
@@ -197,33 +204,47 @@ axiom wait_spec {r : Rep} {cv : Std.Condvar} {m : Std.BaseMutex} {w w' : World} 
 /-- **A5 — notification, and its absence of memory.** `lean_io_condvar_notify_one`
 (`mutex.cpp:62`) → `std::condition_variable::notify_one`.
 
-Never *adds* a waiter, and it unblocks **at most one**, so the waiter set can lose at most one entry.
-That it can be **lost entirely** when nobody is waiting is not a concession — it is proved, as
-`notifyOne_no_waiters` in `World.lean`.
+Stated as an **exact** effect on the waiter list, because a count is not an effect. The earlier form —
+"does not grow, and loses at most one" — was satisfied by `[Alice, Bob] → [Carol, Dave]`: the length is
+unchanged and at most one entry was lost, so a wakeup that *replaced* the waiter set was admissible, and
+the model's own `erase` has no such behaviour. What is stated instead: the list is either **untouched**
+(nothing was woken, which is the lost notification of A5, proved as `notifyOne_no_waiters` in
+`World.lean`) or **exactly one named element is gone**.
 
-**This is not the same proposition as `notifyAll_spec`.** "At most one leaves" is what distinguishes
-the two, and without it the pair says nothing about either: a `notifyOne` that wakes nobody and a
-`notifyAll` that wakes nobody both satisfy a bare "does not grow" clause. -/
+`notifyOne_no_additions` is the consequence that the count could not give.
+
+**No release is promised.** A notification with an eligible waiter need not wake one, and nothing here
+requires it to: that is a progress assumption, and the base bridge excludes progress — the same stance as
+no fairness. Realising it as a liveness obligation belongs with the property ladder's later rungs. -/
 axiom notifyOne_spec {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid} :
     IsCondvar r cv c → Runs t (Std.Condvar.notifyOne cv) w () w' →
-    (w'.condvars c).waiters.length ≤ (w.condvars c).waiters.length ∧
-    (w.condvars c).waiters.length ≤ (w'.condvars c).waiters.length + 1 ∧
-    w.SameClock w'
+    w.SameClock w' ∧
+    ((w'.condvars c).waiters = (w.condvars c).waiters ∨
+     ∃ front : List Tid, ∃ x : Tid, ∃ back : List Tid,
+       (w.condvars c).waiters = front ++ x :: back ∧
+       (w'.condvars c).waiters = front ++ back)
 
 /-- **A5 — broadcast.** `lean_io_condvar_notify_all` (`mutex.cpp:67`).
 
-Every thread that was waiting is released — it moves to *blocked on the mutex* rather than on the
-condition variable — so every waiter present at the call is gone from the set afterwards, and the set
-does not grow. This is what the shutdown path relies on.
+Every thread waiting is released — it moves to *blocked on the mutex* rather than on the condition
+variable — so every waiter present at the call is gone, and **no waiter appears**. Both directions are
+needed: "every waiter present is gone" plus "does not grow" was still satisfied by `[Alice, Bob] →
+[Carol, Dave]`, since the length is unchanged and every original member did disappear. The second clause
+is what makes the effect exact rather than merely a bound, and `notifyAll_no_additions` is its
+consequence.
 
-It is therefore **not** the same proposition as `notifyOne_spec`, and the difference is not cosmetic: a
-bare "does not grow" clause admits a `notifyAll` that releases nobody, which would leave the shutdown
-argument proved of the model and never carried across the bridge. -/
+This is what the shutdown path relies on, and it is why the axiom is not the same proposition as
+`notifyOne_spec`: a bare "does not grow" clause admits a `notifyAll` that releases nobody, leaving the
+shutdown argument proved of the model and never carried across the bridge.
+
+No release is promised, on the same grounds as `notifyOne_spec`: that every present waiter is *gone from
+the condvar* is an exact effect, while whether one of them ever *runs* is progress, and progress is
+outside the base bridge. -/
 axiom notifyAll_spec {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid} :
     IsCondvar r cv c → Runs t (Std.Condvar.notifyAll cv) w () w' →
-    (w'.condvars c).waiters.length ≤ (w.condvars c).waiters.length ∧
+    w.SameClock w' ∧
     (∀ u, u ∈ (w.condvars c).waiters → u ∉ (w'.condvars c).waiters) ∧
-    w.SameClock w'
+    (∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters)
 
 /-! ### A7 — the clock -/
 
@@ -253,7 +274,7 @@ it stops compiling.
 It needs no non-aliasing condition, and that is worth stating rather than leaving to be noticed: the
 mutex index `l` and the condvar index `c` index *different* maps of `World`, so a coincidence between
 the two numbers denotes nothing shared. Only two objects of the *same* kind can be aliased. -/
-theorem calls_compose {r : Rep} {cv : Std.Condvar} {m : Std.BaseMutex} {c : CondvarId} {l : LockId}
+theorem lock_wait_unlock_postcondition {r : Rep} {cv : Std.Condvar} {m : Std.BaseMutex} {c : CondvarId} {l : LockId}
     {t : Tid} {w₁ w₂ w₃ w₄ : World}
     (hL : IsLock r m l) (hC : IsCondvar r cv c)
     (h₁ : Runs t (Std.BaseMutex.lock m) w₁ () w₂)
@@ -303,15 +324,79 @@ theorem readings_monotone_across_a_call {r : Rep} {m : Std.BaseMutex} {l : LockI
   exact hbound n₁ (by rw [hpres, hs])
 
 
+/-! ### What the exact notification buys
+
+Two consequences of the exact forms above, and the reason they are stated exactly rather than as counts.
+Neither is derivable from "does not grow, and loses at most one", because `[Alice, Bob] -> [Carol, Dave]`
+satisfies that and trades one waiter's identity for another. -/
+
+/-- **A notification cannot manufacture a waiter.** -/
+theorem notifyOne_no_additions {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid}
+    (hC : IsCondvar r cv c) (h : Runs t (Std.Condvar.notifyOne cv) w () w') :
+    ∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters := by
+  obtain ⟨-, hcase⟩ := notifyOne_spec hC h
+  intro u hu
+  rcases hcase with hsame | ⟨front, x, back, hw, hw'⟩
+  · rwa [hsame] at hu
+  · rw [hw'] at hu
+    rcases List.mem_append.mp hu with hf | hb
+    · rw [hw]; exact List.mem_append.mpr (Or.inl hf)
+    · rw [hw]; exact List.mem_append.mpr (Or.inr (List.mem_cons_of_mem x hb))
+
+/-- **A broadcast cannot manufacture a waiter either** - it removes every waiter present and adds none,
+where "every waiter is gone" together with "does not grow" would have admitted the same replacement. -/
+theorem notifyAll_no_additions {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid}
+    (hC : IsCondvar r cv c) (h : Runs t (Std.Condvar.notifyAll cv) w () w') :
+    ∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters :=
+  (notifyAll_spec hC h).2.2
+
+/-- The form the two now-replaced axioms used: "does not grow, and loses at most one". Kept as the control
+for the theorems above -- a detector that *matches* the defect while it is present is the only thing that
+makes its later absence mean anything. -/
+def CountedNotify (before after : List Tid) : Prop :=
+  after.length ≤ before.length ∧ before.length ≤ after.length + 1
+
+/-- The old form accepts exactly the replacement the new one refuses, so the strengthening is not a
+rephrasing: with two waiters and two *different* waiters after, the count is unchanged and one entry was
+lost, and both clauses hold. -/
+theorem counted_notify_admits_replacement : CountedNotify [0, 1] [2, 3] := ⟨by decide, by decide⟩
+
+/-- The exact form refuses it: a list that has had one element removed is a sublist of the original, so
+`[2, 3]` cannot be the result of removing an element from `[0, 1]`. -/
+theorem exact_notify_rejects_replacement :
+    ¬ (∃ front : List Tid, ∃ x : Tid, ∃ back : List Tid,
+        ([0, 1] : List Tid) = front ++ x :: back ∧ ([2, 3] : List Tid) = front ++ back) := by
+  rintro ⟨front, x, back, hw, hw'⟩
+  -- the original has one element more than the list it is compared against
+  have h1 := congrArg List.length hw
+  have h2 := congrArg List.length hw'
+  simp [List.length_append, List.length_cons] at h1 h2
+  omega
+
 /-! ### The audit
 
-`#print axioms` is the TCB check from `PLAN.md` §6: the theorems in `World.lean` should name nothing,
-proving that the model's properties are not assumed. -/
+`#print axioms` is the TCB check from `PLAN.md` §6. Two lists, read in opposite directions:
+
+* the `World.lean` theorems below should name **nothing** -- the model's properties are proved, not assumed;
+* the bridge theorems should name the bridge axioms -- that is the evidence that they *consume* them, and it
+  is what printing only the model's theorems cannot show.
+
+`#print axioms` reports a theorem's *dependencies*, not its **hypotheses**: a lemma carrying `NonAliasing`,
+`IsLock` or `IsCondvar` prints the same axiom list either way, because premises are invisible to it. An
+axiom-free line below is therefore a statement about what is assumed *as an axiom*, and not about what is
+still assumed. The nine named axioms are also not the whole native TCB -- the compiler and runtime sit
+outside them -- and none of them says anything about a *runtime-facing* theorem until one exists. -/
 
 #print axioms LeanIn.notifyOne_no_waiters
 #print axioms LeanIn.reacquisition_while_others_wait
 #print axioms LeanIn.wait_cycle_reachable
 #print axioms LeanIn.afterWait_releases
 #print axioms LeanIn.reacquisition_is_anyone
+
+#print axioms LeanIn.lock_wait_unlock_postcondition
+#print axioms LeanIn.readings_monotone_across_a_call
+#print axioms LeanIn.distinct_mutexes_are_distinct_locks
+#print axioms LeanIn.notifyOne_no_additions
+#print axioms LeanIn.notifyAll_no_additions
 
 end LeanIn
