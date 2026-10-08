@@ -332,6 +332,127 @@ def executorPark (cap : Nat) : IO UInt32 := do
   IO.println s!"exec|park|before={before}|after={after}|observed={String.intercalate "," (← events.get)}|queued=[{String.intercalate "," (queued.map toString)}]|delivered=[{String.intercalate "," (delivered.map toString)}]|remaining={st.1.inFlight}"
   return 0
 
+/-- The value of a `--key=value` argument, for the modes that take one. -/
+def argValue (args : List String) (key : String) : Option String :=
+  args.findSome? fun a =>
+    if a.startsWith (key ++ "=") then some ((a.drop (key.length + 1)).toString) else none
+
+/-- **SC4's scripted input.** The identity each position delivers, decided by the seed and the script name —
+so the same inputs are reproducible from the seed, and the alternate script is a different *input* rather
+than a different answer.
+
+Position `3` is where the main script's failing task sits: it delivers identity `1`, and that is the one that
+fails. The alternate delivers `2` there and is otherwise the same script, so the two traces differ by
+construction rather than by chance. -/
+def replayIdentity (seed : Nat) (script : String) (p : Nat) : Nat :=
+  if p = 3 then (if script = "alternate" then 2 else 1)
+  else (seed * 31 + p * 7) % 4 + 10
+
+/-- **SC4 — replay a scripted run and record the canonical trace it produced.**
+
+Every value is driven through the executor and read back out of it, and nothing here reads a clock or starts
+a thread, so two runs of the same seed and script produce the same bytes. That identity is the whole claim,
+and binding the failure to its own position and identity is what makes it a debugging contract rather than a
+comparison of two similar strings. -/
+def executorReplay (seed : Nat) (script : String) : IO UInt32 := do
+  let e ← Sched.Executor.new Nat 256 1
+  let mut trace : List String := []
+  for p in List.range 5 do
+    let id := replayIdentity seed script p
+    e.submit id
+    let got ← e.take
+    let st ← e.snapshot
+    match got with
+    | some x =>
+      if p = 3 then
+        -- The staged failing body: the identity this position delivers is the one that fails, so the record
+        -- carries the failure at its own position and identity rather than somewhere in the trace.
+        trace := trace ++ [s!"op=fail|pos={p}|task={x}|out=error:seeded-failure"]
+      else
+        trace := trace ++ [s!"op=take|pos={p}|task={x}|out=taken{st.1.taken}"]
+    | none =>
+      trace := trace ++ [s!"op=take|pos={p}|task=-|out=none"]
+  IO.println s!"exec|replay|seed={seed}|{String.intercalate ";" trace}"
+  return 0
+
+/-- **SC5 — the bounded ring, the LIFO allowance and the overflow, in two phases.**
+
+Phase one submits `0..256` before taking any, so the 257th submission crosses the ring's capacity, and then
+drains that whole batch. Phase two is a fresh tick — the allowance's clock — where two identities are staged
+as FIFO work and a root local `spawn` puts `400` in the slot; each body then locally spawns the next, so the
+three polls and the flush that follows them happen in one tick.
+
+Nothing here writes a ring, slot or counter. Every value is read out of a public operation, and each slot
+observation is the one the take reported at its own decision — which is what an allowance test that never
+populated the slot cannot produce. -/
+def executorQueue : IO UInt32 := do
+  let e ← Sched.Executor.new Nat 256 1
+  let staged ← IO.mkRef ([] : List Nat)
+  let delivered ← IO.mkRef ([] : List Nat)
+  let phase ← IO.mkRef ([] : List String)
+  let fifo ← IO.mkRef ([] : List Nat)
+
+  -- Phase one: stage the whole batch, then drain it.
+  let batch : List Nat := List.range 257
+  for x in batch do
+    e.submit x
+    staged.modify (· ++ [x])
+  for _ in batch do
+    match ← e.take with
+    | some x => fifo.modify (· ++ [x]); delivered.modify (· ++ [x])
+    | none   => pure ()
+  phase.modify (· ++ ["batch-drained"])
+
+  -- Phase two: a fresh tick, then two FIFO stagings and the root local spawn.
+  e.tick
+  phase.modify (· ++ ["tick-start"])
+  e.submit 300
+  staged.modify (· ++ [300])
+  phase.modify (· ++ ["stage:300"])
+  e.submit 301
+  staged.modify (· ++ [301])
+  phase.modify (· ++ ["stage:301"])
+  e.spawn 400
+  staged.modify (· ++ [400])
+  phase.modify (· ++ ["spawn:400"])
+
+  let lifo ← IO.mkRef ([] : List Nat)
+  let flush ← IO.mkRef ([] : List Nat)
+  let slotBefore ← IO.mkRef ([] : List String)
+  let mut polls : Nat := 0
+  let mut flushed : Bool := false
+  let mut go := true
+  while go do
+    let r ← e.takeReport
+    match r.item with
+    | none => go := false
+    | some x =>
+      -- The scheduler's own observation at this decision, keyed by the poll count: a poll advances it, and
+      -- the flush does not, because flushing the slot is not serving from it.
+      match r.observed with
+      | some o => slotBefore.modify (· ++ [s!"{polls}:{o}"])
+      | none   => pure ()
+      match r.served with
+      | Sched.Served.slot    => lifo.modify (· ++ [x]); polls := polls + 1
+      | Sched.Served.flushed => flushed := true; flush.modify (· ++ [x])
+      | Sched.Served.queue   => if flushed then flush.modify (· ++ [x]) else pure ()
+      delivered.modify (· ++ [x])
+      -- The body that just ran: the chained continuations locally spawn the next of 401..403.
+      if 400 ≤ x && x < 403 then
+        e.spawn (x + 1)
+        staged.modify (· ++ [x + 1])
+
+  let st ← e.snapshot
+  IO.println (s!"exec|queue|staged=[{String.intercalate "," ((← staged.get).map toString)}]"
+    ++ s!"|phase={String.intercalate "," (← phase.get)}"
+    ++ s!"|fifo=[{String.intercalate "," ((← fifo.get).map toString)}]"
+    ++ s!"|lifo=[{String.intercalate "," ((← lifo.get).map toString)}]"
+    ++ s!"|flush=[{String.intercalate "," ((← flush.get).map toString)}]"
+    ++ s!"|slotBefore=[{String.intercalate "," (← slotBefore.get)}]"
+    ++ s!"|delivered=[{String.intercalate "," ((← delivered.get).map toString)}]"
+    ++ s!"|remaining={st.1.inFlight}")
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -341,6 +462,11 @@ def main (args : List String) : IO UInt32 := do
   | "--executor-single" :: _ => return ← executorSingle
   | "--executor-trace" :: _ => return ← executorTrace
   | "--executor-park" :: _ => return ← executorPark 256
+  | "--executor-queue" :: _ => return ← executorQueue
+  | "--executor-replay" :: rest =>
+    let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
+    let script := (argValue rest "--script").getD "main"
+    return ← executorReplay seed script
   | _ => pure ()
   IO.println "  A3 (release without ownership) and A6 (thread creation) are not tested — see the header."
   IO.println ""
