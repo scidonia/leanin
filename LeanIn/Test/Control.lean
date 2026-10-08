@@ -1,4 +1,5 @@
 import Std
+import LeanIn.Sched.Basic
 
 /-!
 # Runtime controls for the bridge axioms
@@ -136,9 +137,81 @@ def controlPredicateRecheck (delayMs : UInt32) : IO Unit := do
   IO.println s!"  A4  after a wake with the predicate false : {afterEmptyWake}  (re-parked = correct)"
   IO.println s!"  A4  after the predicate becomes true      : {afterRealWake}"
 
-/-- Run every control that can be run. -/
-def main : IO UInt32 := do
+/-- **SC1 — the awaiter yields to a sibling on the invoking caller before the gated wake.**
+
+One `blockOn` on the invoking thread. The awaited body and the sibling are both polled on that same
+caller — the single-carrier claim — while the completion is a stock `Task` completing on a pool worker,
+which is the *native* waker and must be a different thread. The gate is a mutex/condvar handshake
+between the sibling and that completion, so the order is not decided by elapsed time.
+
+The events are appended by the actor that caused them, where it occurred, and nothing retypes them from
+a desired result: the awaiter appends `await-registered` on its first poll, the sibling appends its two,
+and the completion's continuation appends the last when it resumes. -/
+def executorSingle : IO UInt32 := do
+  let q ← Sched.Queue.new
+  let events ← IO.mkRef ([] : List String)
+  let record (e : String) : IO Unit := events.modify (· ++ [e])
+  let value ← IO.mkRef (0 : Nat)
+  let callerTid ← IO.getTID
+  let bodyTid ← IO.mkRef (0 : UInt64)
+  let siblingTid ← IO.mkRef (0 : UInt64)
+  let wakerTid ← IO.mkRef (0 : UInt64)
+  let finished ← IO.mkRef false
+  let gate ← Std.Mutex.new false
+  let gateCv ← Std.Condvar.new
+  -- The fake completion: a stock Task that blocks until the gate is released, then returns a value.
+  let completion ← IO.asTask (do
+    gate.atomicallyOnce gateCv (pred := do return (← get)) (k := do return ())
+    return (7 : Nat)) Task.Priority.default
+  -- What the completion's continuation enqueues when it fires: the awaited task's resume, not the
+  -- body again. Hoisted out of the `BaseIO` continuation so its type is the job's, not that monad's.
+  let resume : Sched.Job := do
+    record "await-completed"
+    finished.set true
+    return true
+  -- The hooked tasks live here: a continuation whose task is dropped is not a continuation.
+  let hooks ← IO.mkRef ([] : List (Task Unit))
+  -- The awaited body: polled on the caller. It registers its continuation once and parks.
+  let awaited : Sched.Job := do
+    if (← bodyTid.get) == 0 then bodyTid.set (← IO.getTID)
+    record "await-registered"
+    -- `IO.asTask` reports through the task's own result, so the continuation receives the `Except`.
+    let hooked ← BaseIO.bindTask completion (fun r => do
+      wakerTid.set (← IO.getTID)
+      match r with
+      | .ok v    => value.set v
+      | .error _ => pure ()
+      -- Inlined rather than `q.push`, whose type is `IO`: the continuation's monad is `BaseIO`.
+      -- Same discipline either way -- append and notify under the one lock.
+      q.lock.atomically do
+        set ((← get) ++ [resume])
+        q.cv.notifyOne
+      return Task.pure ())
+    hooks.modify (· ++ [hooked])
+    return false
+  -- The sibling: polled on the caller too, and it releases the gate the completion waits on.
+  let sibling : Sched.Job := do
+    if (← siblingTid.get) == 0 then siblingTid.set (← IO.getTID)
+    record "sibling-done"
+    gate.atomically do set true; gateCv.notifyAll
+    record "gate-released"
+    return true
+  q.push awaited
+  q.push sibling
+  Sched.blockOn q (do return (← finished.get))
+  let order ← events.get
+  let v ← value.get
+  IO.println s!"exec|single|caller={callerTid}|body={← bodyTid.get}|sibling={← siblingTid.get}|waker={← wakerTid.get}|result={v}|order={String.intercalate "," order}"
+  return 0
+
+/-- Run every control that can be run, or one executor scenario when named. -/
+def main (args : List String) : IO UInt32 := do
+  -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
+  -- "the executable ran" from "the executable did not", which is a setup error rather than a verdict.
   IO.println "controls for the bridge axioms"
+  match args with
+  | "--executor-single" :: _ => return ← executorSingle
+  | _ => pure ()
   IO.println "  A3 (release without ownership) and A6 (thread creation) are not tested — see the header."
   IO.println ""
   controlClock 10000
