@@ -100,8 +100,18 @@ def afterNotifyOne (w : World) (c : CondvarId) : World :=
 def afterNotifyAll (w : World) (c : CondvarId) : World :=
   { w with condvars := upd w.condvars c { waiters := [] } }
 
+/-- The resume, from the waiter's side: it stops being a waiter.
+
+`filter` rather than `erase`, because `List.erase` removes only the **first** occurrence and this model
+does not require `waiters` to be duplicate-free — a thread can be enrolled twice by the transitions as
+written (`wait`, `lock`, `wait`). With `erase`, a doubly-enrolled thread that wakes spuriously stays a
+waiter, which is a state no machine can be in. Filtering maps the set-like reading directly, so
+de-enrolment holds unconditionally.
+
+**Open question, not settled here:** whether to exclude double enrolment at its source instead, by
+giving `wait` the precondition that its caller is not already enrolled. -/
 def afterSpurious (w : World) (c : CondvarId) (t : Tid) : World :=
-  { w with condvars := upd w.condvars c { waiters := (w.condvars c).waiters.erase t } }
+  { w with condvars := upd w.condvars c { waiters := (w.condvars c).waiters.filter (· != t) } }
 
 /-- The effect of an action, or `none` if its precondition does not hold. -/
 def step (w : World) : Act → Option World
@@ -186,6 +196,46 @@ constrained, which is exactly why predicates must be re-checked. -/
 theorem wait_parks_and_releases {w : World} {c : CondvarId} {l : LockId} {t : Tid}
     (h : (w.locks l).owner = some t) : Step w (.wait c l t) (afterWait w c l t) := by
   simp [Step, step, h]
+
+/-! ### A4 — the cycle a `wait` call spans
+
+A runtime `wait` is one operation to its caller and three model steps to this model: park (release and
+enrol), resume, re-acquire. These three theorems are what a `wait` obligation has to rest on. -/
+
+/-- **Parking releases the lock** — which is why the condition can become reachable at all: the step
+that enrols the waiter also gives the lock up. This is the fact that stops `wait` corresponding to a
+single model step. -/
+theorem afterWait_releases {w : World} {c : CondvarId} {l : LockId} {t : Tid} :
+    ((afterWait w c l t).locks l).owner = none := by
+  simp [afterWait]
+
+/-- **The whole cycle, as the model reaches it**: park, resume, re-acquire. The endpoint is what the
+caller observes on return — it holds the lock again, and it is no longer a waiter. -/
+theorem wait_cycle_reachable {w : World} {c : CondvarId} {l : LockId} {t : Tid}
+    (h : (w.locks l).owner = some t) :
+    ∃ w₁ w₂ w₃ : World,
+      Step w (.wait c l t) w₁ ∧ Step w₁ (.spurious c t) w₂ ∧ Step w₂ (.lock l t) w₃ ∧
+      (w₃.locks l).owner = some t ∧ t ∉ (w₃.condvars c).waiters := by
+  refine ⟨afterWait w c l t, afterSpurious (afterWait w c l t) c t,
+          afterLock (afterSpurious (afterWait w c l t) c t) l t, ?_, ?_, ?_, ?_, ?_⟩
+  · simp [Step, step, h]
+  · simp [Step, step, afterWait, List.mem_append]
+  · simp [Step, step, afterWait, afterSpurious]
+  · simp [afterLock, upd_self]
+  · simp [afterLock, afterSpurious, List.mem_filter]
+
+/-- **The control**: re-acquisition is possible for *anyone*, not compelled for the waiter, because
+parking left the lock free. So `owner = some t` on return is a scheduler decision, and a `wait`
+obligation must identify the re-acquiring thread rather than let the matching endpoint stand in for
+it. -/
+theorem reacquisition_is_anyone {w : World} {c : CondvarId} {l : LockId} {t t' : Tid}
+    (h : (w.locks l).owner = some t) :
+    ∃ w₁ w₂ : World,
+      Step w (.wait c l t) w₁ ∧ Step w₁ (.lock l t') w₂ ∧ (w₂.locks l).owner = some t' := by
+  refine ⟨afterWait w c l t, afterLock (afterWait w c l t) l t', ?_, ?_, ?_⟩
+  · simp [Step, step, h]
+  · simp [Step, step, afterWait]
+  · simp [afterLock, upd_self]
 
 /-! ### A1 — no fairness, and why it is structural -/
 
