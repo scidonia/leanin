@@ -25,7 +25,13 @@
 - Bridge contract scenarios live in `tests/bridge-contract.md` with
   their executable checks in `tests/bridge-contract.sh`, driven at
   the public `bridgecontrols` executable: run one with
-  `nix develop -c bash tests/bridge-contract.sh BT1`. Records are
+  `nix develop -c bash tests/bridge-contract.sh BT1` (also BT2, BT3).
+  A scenario's synchronization must not depend on which thread wins
+  a race, and the way to check is to run it repeatedly: BT2's first
+  two designs hung intermittently because a waker looping over two
+  episodes could spend the second notification before the second
+  wait had started. Start each synchronizing actor while the lock is
+  held, and give it one job. Records are
   the carriers' own annotations, because the primitives have no
   observation hooks, so such a scenario can state ordering and
   ownership and cannot see anything a carrier does not name. A
