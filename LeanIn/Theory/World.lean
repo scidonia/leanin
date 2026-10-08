@@ -160,7 +160,12 @@ def Step (w : World) (a : Act) (w' : World) : Prop := step w a = some w'
 
 /-- **The waiter invariant: no thread is enrolled twice on one condvar.**
 
-A thread is either parked or running, so a second enrolment would mean it was both. The model *could*
+A thread is either parked or running, so a second enrolment would mean it was both. **The model does not
+enforce that**, and this is the place to say so: the transition relation is an over-approximation, and a
+parked carrier can still take an action — nothing in `step` prevents `.lock` after `.wait`. What the
+machine enforces is stated where it is needed, as `wait`'s precondition that its caller is not already
+enrolled, and that is why the invariant survives; it is not a general rule about parked actors. The model
+*could*
 represent it — the sequence `lock 0 by 0 → wait 0 by 0 → lock 0 by 0 → wait 0 by 0` reaches
 `waiters = [0, 0]`, which `nix develop -c lake exe dynamics` reports as reachable — and that is what made
 a spurious waiter's removal ambiguous: `List.erase` removes only the first occurrence, so one of the two

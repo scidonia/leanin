@@ -88,6 +88,8 @@ Each is small once the decision above is made. None of them requires the program
 | **C13** | Contract the two creation primitives | `newMutex_spec`, `newCondvar_spec` | **done** — two of the eight native operations had no contract at all. The *state* a fresh object is in is stated; *identity* is not, and cannot be without liveness and allocation identities in the model, which is why `Rep.NonAliasing` stays a hypothesis rather than a consequence |
 | **C14** | State notification effects exactly, not as counts | `notifyOne_spec`, `notifyAll_spec` | **done** — the count form admitted `[Alice, Bob] -> [Carol, Dave]`: it does not grow and loses at most one, so a wakeup that *replaced* the waiter set passed, while the model's `erase` has no such behaviour. `notifyOne_no_additions` and `notifyAll_no_additions` are the consequences the count could not give, and `counted_notify_admits_replacement` is the control showing the old form accepting what `exact_notify_rejects_replacement` refuses |
 | **C15** | Show the derived theorems consume the axioms, and state what the audit cannot see | `Bridge.lean`, the audit block | **done** — `lock_wait_unlock_postcondition` names `[lock_spec, unlock_spec, wait_spec]` and `readings_monotone_across_a_call` names `[clock_spec, lock_spec]`, which printing only `World.lean`'s theorems cannot show. The limit is stated there: `#print axioms` reports dependencies, not hypotheses — `distinct_mutexes_are_distinct_locks` is axiom-free *and* assumes `NonAliasing` |
+| **C16** | The representation is a parameter of the interpretation, not only of the statements | `Runs`, all nine axioms | **done** — with the map outside `Runs`, one witness could be re-instantiated at *every* constant representation, so `lock_spec` entailed that acquiring one mutex sets every model lock's owner to the caller, and `notifyAll_spec` that one broadcast empties every condvar. `LeanIn/Test/BridgeControls.lean` proves both against the superseded signature and keeps the guarded form as the regression check |
+| **C17** | State the notification guarantee that is native, and the one that is not | `notifyOne_spec`, `notifyAll_spec` | **done** — selection when a waiter is eligible is the C++ draft's guarantee and is now stated, with `notifyOne_selects` naming it. The superseded wording called it a fairness assumption and weakened the axiom to match, which confused an unblocking event with subsequent execution; progress remains unstated |
 | C2, C3, C5 | — | — | **retired or folded** with the choice of (b); see above |
 | **C8** | Model waiters as a set or as episodes, with the invariant stated | `World.Condvar`, `World.WaitersNodup` | **done** — the invariant is stated and proved preserved, `wait` refuses a caller already enrolled, and `notifyOne` names the waiter it wakes. The probe's violation check went from *reachable* to *not reached*, which is the evidence |
 | **C9** | Say whether any claim depends on data read under the lock | `Bridge`, `docs/interface.md` | **open** — documentation, no code |
@@ -195,7 +197,9 @@ argument for the instrument existing in the first place.
 **The waiter invariant was closed the same way, and this is what the probe is for.** `World.WaitersNodup`
 says no thread is enrolled twice on one condvar. The probe's violation check was written *before* the
 fix and found `lock 0 by 0 → wait 0 by 0 → lock 0 by 0 → wait 0 by 0` in four actions — a state no
-machine can be in, since a thread is either parked or running. Three changes close it: the invariant is
+machine can be in, since a thread is either parked or running — a fact the *machine* enforces and the
+model does not, its transition relation being an over-approximation in which a parked carrier can still
+act. The invariant is upheld by `wait`'s precondition, not by a rule about actors. Three changes close it: the invariant is
 stated and proved preserved by every transition (`step_preserves_nodup`); `wait` now refuses a caller
 that is already enrolled, which is the precondition that preserves it; and `notifyOne` names the waiter
 it wakes, because `notify_one` unblocks *one of* those waiting and names none, so the choice belongs to
@@ -207,6 +211,16 @@ would matter if one carrier could have two invocations in flight, and it cannot 
 parked or running. A set of carrier identities is therefore exact here, and `WaitersNodup` is the
 invariant that makes it so. An earlier attempt to model this without the invariant is what produced the
 `List.erase` defect this item exists to close.
+
+## The next two, which are not the programme
+
+Its §5 separates these from the deferred list, and its §3 confirms the frame conditions are separable from
+the abstraction relation rather than part of it.
+
+| # | what | where | status |
+|---|---|---|---|
+| **C18** | Frame conditions on *isolated* primitive effects | the six non-wait contracts | **open, next** — an isolated effect on `l` changes ownership at `l` and nothing else: every other tracked lock, every tracked condvar, and the clock state are untouched. Not for `wait`: other actors run between its stages, and an interval frame there would exclude them. Needs a small family of frame predicates, and `wait` keeps only its caller-visible endpoints |
+| **C19** | Admissibility premises for the objects currently tracked | `Rep` | **open, after C18** — representation *dependence* prevented changing a map while keeping a witness, and is fixed; representation *validity* is the residual, and the local pairwise condition is its corollary for the two objects a statement relates. A premise "appropriate to the currently tracked objects" needs that tracked set as a notion, which is the identity work, so it lands with creation freshness rather than before it |
 
 ## The programme, separated
 

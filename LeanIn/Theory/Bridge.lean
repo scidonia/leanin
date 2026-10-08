@@ -34,10 +34,33 @@ file when the multi-carrier scheduler does (D2, D11).
 
 namespace LeanIn
 
+/-! ### The representation
+
+The mapping from runtime objects to model indices is carried **alongside** the world, not inside it.
+
+It has to be, for a mechanical reason rather than an aesthetic one: a world-indexed claim has to be
+re-established after every step, and no axiom did. After any call you no longer knew that `m` was the
+lock at `l`, so no *second* call on the same object could be reasoned about -- the seven axioms were
+unusable in sequence, which is why nothing downstream consumed them. With the map fixed outside the
+world, `IsLock r m l` survives every transition for free and the axioms compose.
+
+It is a **parameter of the interpretation**, not only of the statements that use it, and that is a repair
+rather than a tidy-up. With the map outside `Runs`, one witness could be re-instantiated at every
+constant representation, so `lock_spec` entailed that acquiring a single mutex sets *every* model lock's
+owner to the caller -- `LeanIn/Test/BridgeControls.lean` proves that against the earlier signature, and
+the same construction emptied every condvar from one broadcast. An execution is an execution *under a
+representation*; two maps are two interpretations, and no witness is shared between them. -/
+
+/-- Which model lock and condvar each runtime object stands for. A function, so its values are as opaque
+to Lean as the C++ objects are: nothing here says which index a given `std::mutex` receives. -/
+structure Rep where
+  lockOf : Std.BaseMutex → LockId
+  condOf : Std.Condvar → CondvarId
+
 /-! ### The uninterpreted pieces -/
 
-/-- The interpretation. `Runs t op w r w'` means: **thread `t`** executes the `BaseIO` operation
-`op` in world `w`, terminating with result `r` in world `w'`.
+/-- The interpretation. `Runs r t op w res w'` means: **under representation `r`**, **thread `t`**
+executes the `BaseIO` operation `op` in world `w`, terminating with result `res` in world `w'`.
 
 The acting thread is a *parameter* rather than a hypothesis, because the model's steps name their actor
 (`Act.lock l t`, `Act.unlock l t`, `Act.wait c l t`) and a bridge that omits it cannot say what any of
@@ -61,23 +84,9 @@ rather than about any single one of those stages, and the stages themselves are 
 `wait_cycle_reachable` exhibits that path. The distinction matters to anything wanting the *interior* of a
 call: one isolated effect and one call interval are different objects, and only the second type-checks
 against a `do` block. -/
-opaque Runs {α : Type} (t : Tid) (op : BaseIO α) (w : World) (r : α) (w' : World) : Prop
+opaque Runs {α : Type} (r : Rep) (t : Tid) (op : BaseIO α) (w : World) (res : α) (w' : World) : Prop
 
-/-! ### The representation
-
-The mapping from runtime objects to model indices is carried **alongside** the world, not inside it.
-
-It has to be, for a mechanical reason rather than an aesthetic one: a world-indexed claim has to be
-re-established after every step, and no axiom did. After any call you no longer knew that `m` was the
-lock at `l`, so no *second* call on the same object could be reasoned about — the seven axioms were
-unusable in sequence, which is why nothing downstream consumed them. With the map fixed outside the
-world, `IsLock r m l` survives every transition for free and the axioms compose. -/
-
-/-- Which model lock and condvar each runtime object stands for. A function, so its values are as opaque
-to Lean as the C++ objects are: nothing here says which index a given `std::mutex` receives. -/
-structure Rep where
-  lockOf : Std.BaseMutex → LockId
-  condOf : Std.Condvar → CondvarId
+/-! ### Reading the map -/
 
 /-- `m` stands for model lock `l` under `r`. A definition rather than an axiom, because it must hold
 *stably*: it mentions `r`, never a world. -/
@@ -118,14 +127,14 @@ non-aliasing stays the explicit local hypothesis `Rep.NonAliasing`, not a conseq
 alone. -/
 axiom newMutex_spec {r : Rep} {w w' : World} {l : LockId} {t : Tid} {m : Std.BaseMutex} :
     IsLock r m l →
-    Runs t (Std.BaseMutex.new : BaseIO Std.BaseMutex) w m w' →
+    Runs r t (Std.BaseMutex.new : BaseIO Std.BaseMutex) w m w' →
     (w'.locks l).owner = none ∧ w.SameClock w'
 
 /-- **A0 — condvar creation.** A completed `new` yields a condvar with no waiters, and leaves the clock
 alone. -/
 axiom newCondvar_spec {r : Rep} {w w' : World} {c : CondvarId} {t : Tid} {cv : Std.Condvar} :
     IsCondvar r cv c →
-    Runs t (Std.Condvar.new : BaseIO Std.Condvar) w cv w' →
+    Runs r t (Std.Condvar.new : BaseIO Std.Condvar) w cv w' →
     (w'.condvars c).waiters = [] ∧ w.SameClock w'
 
 /-! ### A1–A2 — the mutex -/
@@ -140,7 +149,7 @@ Stated as a property of the returned world rather than an equality with `afterLo
 world is not forced to be *only* what the model says — the mutex is free to have other effects the
 model does not track. -/
 axiom lock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} :
-    IsLock r m l → Runs t (Std.BaseMutex.lock m) w () w' →
+    IsLock r m l → Runs r t (Std.BaseMutex.lock m) w () w' →
     (w'.locks l).owner = some t ∧ w.SameClock w'
 
 /-- **A2 — non-blocking acquisition.** `lean_io_basemutex_try_lock` (`mutex.cpp:33`) →
@@ -157,7 +166,7 @@ not the caller. Without the second conjunct nothing downstream could use a faile
 establish anything, which is the whole point of `false`. -/
 axiom tryLock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} {b : Bool} :
     IsLock r m l → (w.locks l).owner ≠ some t →
-    Runs t (Std.BaseMutex.tryLock m) w b w' →
+    Runs r t (Std.BaseMutex.tryLock m) w b w' →
     (b = true → (w'.locks l).owner = some t) ∧
     (b = false → (w'.locks l).owner = (w.locks l).owner ∧ (w'.locks l).owner ≠ some t) ∧
     w.SameClock w'
@@ -168,7 +177,7 @@ Requires ownership — releasing without holding is undefined behaviour, which i
 transition for it (`unlock_without_ownership_has_no_transition`). -/
 axiom unlock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} :
     IsLock r m l → (w.locks l).owner = some t →
-    Runs t (Std.BaseMutex.unlock m) w () w' → (w'.locks l).owner = none ∧ w.SameClock w'
+    Runs r t (Std.BaseMutex.unlock m) w () w' → (w'.locks l).owner = none ∧ w.SameClock w'
 
 /-! ### A4–A5 — the condition variable -/
 
@@ -198,7 +207,7 @@ de-enrolment), not the cycle. -/
 axiom wait_spec {r : Rep} {cv : Std.Condvar} {m : Std.BaseMutex} {w w' : World} {c : CondvarId}
     {l : LockId} {t : Tid} :
     IsCondvar r cv c → IsLock r m l → (w.locks l).owner = some t →
-    Runs t (Std.Condvar.wait cv m) w () w' →
+    Runs r t (Std.Condvar.wait cv m) w () w' →
     (w'.locks l).owner = some t ∧ t ∉ (w'.condvars c).waiters ∧ w.SameClock w'
 
 /-- **A5 — notification, and its absence of memory.** `lean_io_condvar_notify_one`
@@ -213,13 +222,21 @@ the model's own `erase` has no such behaviour. What is stated instead: the list 
 
 `notifyOne_no_additions` is the consequence that the count could not give.
 
-**No release is promised.** A notification with an eligible waiter need not wake one, and nothing here
-requires it to: that is a progress assumption, and the base bridge excludes progress — the same stance as
-no fairness. Realising it as a liveness obligation belongs with the property ladder's later rungs. -/
+`notifyOne_no_additions` is the consequence the count could not give, and `notifyOne_selects` names the
+selection guarantee itself.
+
+**The native guarantee is selection, and it is stated; what stays unstated is that the woken thread runs.**
+The C++ draft has `notify_one` unblock one thread if any are blocked (`[thread.condition.condvar]`), so the
+axiom requires exactly that: an empty list stays empty, and otherwise one named entry is removed. That is
+*not* a fairness assumption — unblocking is an event, and the standard does not claim the thread is then
+scheduled, acquires the mutex, or returns from `wait`. Those are progress, they remain unstated, and the
+later rungs are where they belong. The distinction matters enough to have been got wrong here: an earlier
+version of this comment called the selection guarantee a fairness assumption and weakened the axiom to
+match it, which is the wrong repair of the right observation. -/
 axiom notifyOne_spec {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid} :
-    IsCondvar r cv c → Runs t (Std.Condvar.notifyOne cv) w () w' →
+    IsCondvar r cv c → Runs r t (Std.Condvar.notifyOne cv) w () w' →
     w.SameClock w' ∧
-    ((w'.condvars c).waiters = (w.condvars c).waiters ∨
+    (((w.condvars c).waiters = [] ∧ (w'.condvars c).waiters = []) ∨
      ∃ front : List Tid, ∃ x : Tid, ∃ back : List Tid,
        (w.condvars c).waiters = front ++ x :: back ∧
        (w'.condvars c).waiters = front ++ back)
@@ -237,11 +254,11 @@ This is what the shutdown path relies on, and it is why the axiom is not the sam
 `notifyOne_spec`: a bare "does not grow" clause admits a `notifyAll` that releases nobody, leaving the
 shutdown argument proved of the model and never carried across the bridge.
 
-No release is promised, on the same grounds as `notifyOne_spec`: that every present waiter is *gone from
-the condvar* is an exact effect, while whether one of them ever *runs* is progress, and progress is
-outside the base bridge. -/
+Nothing beyond removal is claimed, and removal itself is *forced* rather than permitted: the two clauses
+together leave the list empty whenever it was non-empty. What is not claimed is that any of those threads
+runs, reacquires the mutex, or returns — that is progress, and progress is outside the base bridge. -/
 axiom notifyAll_spec {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid} :
-    IsCondvar r cv c → Runs t (Std.Condvar.notifyAll cv) w () w' →
+    IsCondvar r cv c → Runs r t (Std.Condvar.notifyAll cv) w () w' →
     w.SameClock w' ∧
     (∀ u, u ∈ (w.condvars c).waiters → u ∉ (w'.condvars c).waiters) ∧
     (∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters)
@@ -257,7 +274,7 @@ and therefore what makes a budget meaningful — without the second, two reading
 clock that no read moved, and "the clock never goes backwards" stayed a property of the runtime that no
 theorem could use. Equal readings are permitted: the native clock has finite resolution. -/
 axiom clock_spec {w w' : World} {n : Nat} {t : Tid} :
-    Runs t (IO.monoNanosNow : BaseIO Nat) w n w' →
+    Runs r t (IO.monoNanosNow : BaseIO Nat) w n w' →
     w'.clock = w.clock ∧ w'.lastSample = some n ∧ ∀ s, w.lastSample = some s → s ≤ n
 
 
@@ -277,9 +294,9 @@ the two numbers denotes nothing shared. Only two objects of the *same* kind can 
 theorem lock_wait_unlock_postcondition {r : Rep} {cv : Std.Condvar} {m : Std.BaseMutex} {c : CondvarId} {l : LockId}
     {t : Tid} {w₁ w₂ w₃ w₄ : World}
     (hL : IsLock r m l) (hC : IsCondvar r cv c)
-    (h₁ : Runs t (Std.BaseMutex.lock m) w₁ () w₂)
-    (h₂ : Runs t (Std.Condvar.wait cv m) w₂ () w₃)
-    (h₃ : Runs t (Std.BaseMutex.unlock m) w₃ () w₄) :
+    (h₁ : Runs r t (Std.BaseMutex.lock m) w₁ () w₂)
+    (h₂ : Runs r t (Std.Condvar.wait cv m) w₂ () w₃)
+    (h₃ : Runs r t (Std.BaseMutex.unlock m) w₃ () w₄) :
     (w₄.locks l).owner = none :=
   (unlock_spec hL (wait_spec hC hL (lock_spec hL h₁).1 h₂).1 h₃).1
 
@@ -311,9 +328,9 @@ the intervening axiom was free to reset the sample, and the second reading's bou
 theorem readings_monotone_across_a_call {r : Rep} {m : Std.BaseMutex} {l : LockId} {t : Tid}
     {w₁ w₂ w₃ w₄ : World} {n₁ n₂ : Nat}
     (hL : IsLock r m l)
-    (h₁ : Runs t (IO.monoNanosNow : BaseIO Nat) w₁ n₁ w₂)
-    (h₂ : Runs t (Std.BaseMutex.lock m) w₂ () w₃)
-    (h₃ : Runs t (IO.monoNanosNow : BaseIO Nat) w₃ n₂ w₄) :
+    (h₁ : Runs r t (IO.monoNanosNow : BaseIO Nat) w₁ n₁ w₂)
+    (h₂ : Runs r t (Std.BaseMutex.lock m) w₂ () w₃)
+    (h₃ : Runs r t (IO.monoNanosNow : BaseIO Nat) w₃ n₂ w₄) :
     n₁ ≤ n₂ := by
   have hs : w₂.lastSample = some n₁ := (clock_spec h₁).2.1
   have hpres : w₃.lastSample = w₂.lastSample := by
@@ -332,12 +349,12 @@ satisfies that and trades one waiter's identity for another. -/
 
 /-- **A notification cannot manufacture a waiter.** -/
 theorem notifyOne_no_additions {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid}
-    (hC : IsCondvar r cv c) (h : Runs t (Std.Condvar.notifyOne cv) w () w') :
+    (hC : IsCondvar r cv c) (h : Runs r t (Std.Condvar.notifyOne cv) w () w') :
     ∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters := by
   obtain ⟨-, hcase⟩ := notifyOne_spec hC h
   intro u hu
-  rcases hcase with hsame | ⟨front, x, back, hw, hw'⟩
-  · rwa [hsame] at hu
+  rcases hcase with ⟨-, hsame⟩ | ⟨front, x, back, hw, hw'⟩
+  · exact absurd hu (by simp [hsame])
   · rw [hw'] at hu
     rcases List.mem_append.mp hu with hf | hb
     · rw [hw]; exact List.mem_append.mpr (Or.inl hf)
@@ -346,7 +363,7 @@ theorem notifyOne_no_additions {r : Rep} {cv : Std.Condvar} {w w' : World} {c : 
 /-- **A broadcast cannot manufacture a waiter either** - it removes every waiter present and adds none,
 where "every waiter is gone" together with "does not grow" would have admitted the same replacement. -/
 theorem notifyAll_no_additions {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid}
-    (hC : IsCondvar r cv c) (h : Runs t (Std.Condvar.notifyAll cv) w () w') :
+    (hC : IsCondvar r cv c) (h : Runs r t (Std.Condvar.notifyAll cv) w () w') :
     ∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters :=
   (notifyAll_spec hC h).2.2
 
@@ -372,6 +389,18 @@ theorem exact_notify_rejects_replacement :
   have h2 := congrArg List.length hw'
   simp [List.length_append, List.length_cons] at h1 h2
   omega
+
+/-- **The selection guarantee, named.** When the waiter list is non-empty the native call unblocks one of
+them, so the exact effect is a removal that *must* happen, not one that merely may. -/
+theorem notifyOne_selects {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid}
+    (hC : IsCondvar r cv c) (h : Runs r t (Std.Condvar.notifyOne cv) w () w')
+    (hne : (w.condvars c).waiters ≠ []) :
+    (w'.condvars c).waiters.length + 1 = (w.condvars c).waiters.length := by
+  obtain ⟨-, hcase⟩ := notifyOne_spec hC h
+  rcases hcase with ⟨hempty, -⟩ | ⟨front, x, back, hw, hw'⟩
+  · exact absurd hempty hne
+  · rw [hw, hw', List.length_append, List.length_append, List.length_cons]
+    omega
 
 /-! ### The audit
 
