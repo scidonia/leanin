@@ -547,6 +547,27 @@ def runtimeShared : IO UInt32 := do
 
   return 0
 
+/-- Spawn a child and await it, `n` times, inside one driver run: the round-trip shape, with the driver's
+setup outside the measurement. -/
+def roundTripProgram (ticks : IO.Ref Nat) (n : Nat) : LeanIn.Task.Async Unit := do
+  let rec go (m : Nat) : LeanIn.Task.Async Unit := do
+    if m = 0 then pure ()
+    else
+      let h ← LeanIn.Task.Async.spawn (LeanIn.Task.Async.ofIO do ticks.modify (· + 1))
+      let _ ← LeanIn.Task.Async.await h
+      go (m - 1)
+  go n
+
+/-- The round-trip figure: one child spawned and awaited immediately, repeated, inside one driver run. The
+`spawn+take` row above is the queue's throughput; this is what a dependent chain costs per link. -/
+def roundTripMicros (k : Nat) : IO Nat := do
+  let ticks ← IO.mkRef (0 : Nat)
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let t0 ← IO.monoNanosNow
+  let _ ← Runtime.run e (roundTripProgram ticks k)
+  let t1 ← IO.monoNanosNow
+  return (t1 - t0) / k
+
 /-- **What one operation costs.** The end-to-end benchmarks say we are slower; these say which operation is
 paying for it, in nanoseconds, best of three.
 
@@ -578,6 +599,8 @@ def runtimeOps : IO UInt32 := do
   let nativeNs ← best do for _ in List.range k do
     let t ← IO.asTask (pure ()) _root_.Task.Priority.default
     let _ ← IO.wait t
+  -- The same round trip for this runtime: the latency figure, whose counterpart is the native row above.
+  let roundNs ← roundTripMicros k
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1
   let item : LeanIn.Task.Item := ⟨pure ()⟩
   let spawnNs ← best do for _ in List.range k do e.spawn item
@@ -593,6 +616,7 @@ def runtimeOps : IO UInt32 := do
     e4.spawn item
     let _ ← e4.tryTake
   IO.println s!"ops: native Task spawn+join {nativeNs}ns | ref set/get {refNs}ns | mutex section {mutexNs}ns | notify (nobody parked) {notifyNs}ns"
+  IO.println s!"ops: leanin spawn+await round trip {roundNs}ns"
   IO.println s!"ops: Join.new {joinNs}ns | Executor.spawn {spawnNs}ns | Executor.submit {submitNs}ns | Executor.tryTake {workNs}ns | spawn+take (steady) {steadyNs}ns"
   return 0
 
