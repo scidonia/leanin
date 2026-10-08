@@ -126,7 +126,7 @@ items are held, granted once both have been taken.
 | 7 | take task 2 |
 | 8 | take, with nothing held |
 
----
+______________________________________________________________________
 
 ### SC1 — the awaiter yields to a sibling on the invoking caller before the gated wake
 
@@ -161,7 +161,7 @@ starves every sibling behind it; the executor's nonblocking claim is that the aw
 the caller's own carrier runs the sibling, and the only evidence of that at this boundary is the
 sibling's progress recorded before the wake.
 
----
+______________________________________________________________________
 
 ### SC2 — an injected completion wakes a waiting `blockOn`, and shutdown delivers the staged work once
 
@@ -203,7 +203,7 @@ the park; the parked-first order is exactly the race that a naive protocol hangs
 other half of the same protocol: a drain that reports a zero count while completing nothing, or
 completes one item twice, has lost or duplicated work the caller staged.
 
----
+______________________________________________________________________
 
 ### SC3 — implementation operation records match the pure model pairwise
 
@@ -241,7 +241,7 @@ itself: the model's records against the implementation's none.
 model-versus-implementation trace mismatch has to be a failing comparison with the differing record
 named, not a difference described in prose.
 
----
+______________________________________________________________________
 
 ### SC4 — a staged scripted failure replays identically, and an alternate script differs
 
@@ -286,7 +286,7 @@ reproducible from its inputs, which is only meaningful if the replay reproduces 
 own position and identity, and if a genuinely different script is observed to produce a different
 trace.
 
----
+______________________________________________________________________
 
 ### SC5 — the bounded ring, the LIFO allowance and the overflow keep every staged identity
 
