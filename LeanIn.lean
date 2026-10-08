@@ -5,6 +5,7 @@ import LeanIn.Model.Pool
 import LeanIn.Model.Scheduler
 import LeanIn.Data.Ring
 import LeanIn.Sched.Basic
+import LeanIn.Sched.Pool
 
 /-- Placeholder root module; the library proper lands here. -/
 def hello : String := "leanin"
