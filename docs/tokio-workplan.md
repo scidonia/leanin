@@ -47,8 +47,29 @@ Two additions from what we have measured and built:
    only option", and io_uring would make file I/O genuinely asynchronous — so the blocking pool should stay
    **bounded and separable**, a route that blocking leaves take, rather than file I/O being baked into it.
 
-So the workplan does not add an io_uring item. It adds a **constraint**: the leaf seam must be
-completion-shaped, and the blocking pool must be a route rather than an assumption.
+Two things argue the other way, and a decision record should carry them rather than only the costs.
+
+**The seam is already shaped for it.** io_uring is *completion*-based: an operation is submitted with a
+`user_data` tag and the completion carries that tag back — which is D3's seam literally, "an event attaches a
+continuation that enqueues". epoll and libuv give *readiness* instead, leaving the operation to be issued and
+re-armed by us. A ring-based leaf therefore fits this design better than a readiness-based one does.
+
+**And it is the only route to a loop we own.** With libuv we cannot own the reactor at all: one process-global
+`global_ev`, no `uv_loop_init` anywhere (D11) — structurally the same singleton the task manager has. A ring is
+polled by whoever holds it, so a carrier could be scheduler *and* reactor on one thread, which is what Tokio's
+`current_thread` actually is. That is a genuine argument for io_uring, and it is an argument for **owning the
+leaf set**, not for swapping one reactor library for another.
+
+Against: every leaf becomes ours, which is the premise D3 and W1 rest on; DNS stays blocking either way, since
+io_uring has no resolver; it is Linux-only, and Linux *conditionally* — this development machine carries
+`apparmor_restrict_unprivileged_io_uring`, so D11's hazard is live here rather than hypothetical; and no
+`liburing` is installed, so even the helper library would be work.
+
+So the workplan does not add an io_uring item. It adds a **constraint** and a **decision rule**: the leaf seam
+must be completion-shaped, and the question is not which reactor to link but **whose leaves**. Reusing Lean's
+means libuv comes with them, and a ring-based leaf can still join at the seam. Writing our own means io_uring
+becomes the attractive choice for the set we would be writing anyway — starting with files, where libuv gives
+us nothing at all.
 
 ## 2. Workplan
 
