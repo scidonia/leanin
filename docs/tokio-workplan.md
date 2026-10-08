@@ -67,6 +67,12 @@ the carrier's thread, the completor's thread is observed to differ, and nothing 
 generalised, with its detector control. And a `MonadAwait` instance for `Std.Async.Async` so the leaves compose
 in `do` notation.
 
+**And a boundary that this item defines for the rest of the tree.** Today the runtime calls no `Std.Async`
+anywhere — the only mention of it under `LeanIn/` is a comment — so it uses no libuv; the platform library is
+in the build only because `Std.Internal` re-exports `Std.Async` publicly. This item is where that changes, and
+it should change in exactly one place: after W1, `Std.Async` is referenced by the leaf module and by nothing
+else, and a check in the suite can say so. Everything else in the runtime stays on the C++ primitives.
+
 ### W2 — Sockets
 
 **Deliverable.** An accept loop and per-connection tasks over `Std.Async.TCP`'s `accept`/`recv?`/`send`,
