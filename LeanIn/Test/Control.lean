@@ -440,6 +440,61 @@ def runtimeBench : IO UInt32 := do
   IO.println s!"64 spawned tasks       : {distinct.length} distinct threads"
   return 0
 
+/-- **Where a work item can be delayed, and by how much.** Three shapes, each measured rather than argued:
+
+* `tail` — the same O(1) payload on both sides, so the number is the *scheduler's* and not the payload's: how
+  long after the first task does the last of them start.
+* `queue` — `W` workers occupied by blocking work, then `W` more tasks that want a worker. This is the pool's
+  starvation shape: with no spare worker, ready work does not run at all, for as long as the occupiers hold on.
+* `dedicated` — one OS thread per task, which is what "more threads than workers" means when the priority asks
+  for it. `LEAN_NUM_THREADS` does not affect this one.
+
+Diagnostic, not part of the library: `lake exe controls --runtime-tail`. -/
+def runtimeTail : IO UInt32 := do
+  let n := 10000
+  -- (1) How far behind can a work item get? Every task records when it *started*; the last start is the tail.
+  let m ← Std.Mutex.new (0 : Nat)
+  let t0 ← IO.monoNanosNow
+  let ts ← (List.range n).mapM (fun _ => IO.asTask (do
+    let t ← IO.monoNanosNow
+    m.atomically do set (max (← get) (t - t0))) _root_.Task.Priority.default)
+  for t in ts do let _ ← IO.wait t
+  let poolLast ← m.atomically get
+  IO.println s!"tail    : pool, last of {n} tasks started {poolLast / 1000}us after the first"
+
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let m2 ← Std.Mutex.new (0 : Nat)
+  let t1 ← IO.monoNanosNow
+  let body : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO do
+    let t ← IO.monoNanosNow
+    m2.atomically do set (max (← get) (t - t1))
+  let _ ← Runtime.run e (do
+    let hs ← (List.range n).mapM (fun _ => LeanIn.Task.Async.spawn body)
+    for h in hs do let _ ← LeanIn.Task.Async.await h
+    pure ())
+  let t2 ← IO.monoNanosNow
+  let oursLast ← m2.atomically get
+  IO.println s!"tail    : leanin, last of {n} tasks started {oursLast / 1000}us after the first, run {(t2 - t1) / 1000}us"
+
+  -- (2) Queued behind blocking work: W workers occupied for 300ms, then W more tasks want a worker.
+  let w : Nat := 8
+  let t3 ← IO.monoNanosNow
+  let blockers ← (List.range w).mapM (fun _ => IO.asTask (IO.sleep 300) _root_.Task.Priority.default)
+  IO.sleep 100
+  let after ← (List.range w).mapM (fun _ => IO.asTask (return ()) _root_.Task.Priority.default)
+  for t in after do let _ ← IO.wait t
+  let t4 ← IO.monoNanosNow
+  IO.println s!"queue   : {w} workers blocked 300ms; {w} further tasks finished at {(t4 - t3) / 1000}us"
+  for t in blockers do let _ ← IO.wait t
+
+  -- (3) Ten thousand dedicated tasks: one OS thread each.
+  let t5 ← IO.monoNanosNow
+  let many ← (List.range 10000).mapM (fun _ => IO.asTask (return ()) _root_.Task.Priority.dedicated)
+  for t in many do let _ ← IO.wait t
+  let t6 ← IO.monoNanosNow
+  IO.println s!"dedicat : 10000 dedicated tasks, one thread each, ran in {(t6 - t5) / 1000}us"
+  return 0
+
 /-- **SC6 — real work on the runtime, and the thread identities it ran on.**
 
 One carrier: the driver, the spawned child's body, and the continuation that resumed after the external
@@ -602,6 +657,7 @@ def main (args : List String) : IO UInt32 := do
   | "--executor-queue" :: _ => return ← executorQueue
   | "--runtime-threads" :: _ => return ← runtimeThreads
   | "--runtime-bench" :: _ => return ← runtimeBench
+  | "--runtime-tail" :: _ => return ← runtimeTail
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"
