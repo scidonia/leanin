@@ -75,9 +75,11 @@ capacity, and `take_returns_if_present` for the LIFO allowance not stranding wor
 (well-defined reads, uniqueness, existence) are stated over the pool as a whole and still to do.
 
 ⚠️ **`ring` here is the specification, not the container** (D12). It is the ghost view; a `Ring`
-container — fixed store plus a head index and a live count — refines it, with `Ring.toList` as the
-view and `Ring.WF` (including density: the live range has no holes) as the invariant. Lean's own
-`Std.DHashMap` does exactly this: Array implementation, `List` model, laws in a separate file.
+container — a fixed-size **`Array`** of slots plus a head index and a live count — refines it, with
+`Ring.toList` as the view and `Ring.WF` (including density: the live range has no holes) as the
+invariant. `Array`, not `List`, because `Array.set` updates in place while `List.set` copies; the
+`List` lives only in the ghost view. Lean's own `Std.DHashMap` does exactly this: Array
+implementation, `List` model, laws in a separate file.
 
 Taken from the deque literature (Lê et al.'s four properties) and from Tokio's own assertion that a
 queue is empty when dropped (`queue.rs:571`):

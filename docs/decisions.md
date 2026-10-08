@@ -243,13 +243,19 @@ if it ever spawns its own, A6 joins v1's axiom set.
 The model's `ring : List α` is not an implementation and must not be read as one. It is the ghost
 view, and a separate `Ring` container refines it.
 
-**The container.** `Ring` is a fixed store plus the index of the oldest live element and a live count,
-with:
+**The container.** `Ring` is a **fixed-size `Array`** of slots plus the index of the oldest live element
+and a live count, with:
 
 - `Ring.toList` — the ghost view, oldest first, so every proof is about a list;
-- `Ring.WF` — the store's length is `cap`, the live count fits, and the live range is **dense** (no
+- `Ring.WF` — the store's size is `cap`, the live count fits, and the live range is **dense** (no
   holes), so `toList` yields real elements rather than defaults;
 - `push` / `pop`, with `push_toList` and `pop_toList` as the laws tying it to the spec.
+
+**`Array`, not `List`, and that is the point of a ring.** `Array.set` modifies in place when the array
+is uniquely referenced; `List.set` copies a prefix. `push`/`pop` use `Array.setIfInBounds` so they stay
+total and independent of `WF` — `Array.set` demands a bound proof. The `List` appears **only** in
+`Ring.toList`, where its algebraic lemmas keep the proofs short. That split is the one Lean's own
+containers use.
 
 **Precedent: Lean's own containers already do exactly this.** `Std.DHashMap` is an Array-of-buckets
 implementation carrying a bundled well-formedness invariant, and `Std/Data/DHashMap/Lemmas.lean`

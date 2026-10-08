@@ -13,12 +13,21 @@ downstream of here is about a list and never about an index.
 
 ## Shape
 
-Fixed store, the index of the oldest live element, and a live count. `push` writes at
-`(head + size) % cap` and `pop` clears `head % cap` and advances, so neither moves any other element —
-which is the whole point, and the reason `List` could not be the container.
+A **fixed-size `Array`** of slots, the index of the oldest live element, and a live count. `push` writes
+at `(head + size) % cap` and `pop` clears `head % cap` and advances, so neither moves any other element.
 
-`Ring.WF` carries three conjuncts, and the third is the interesting one: the live range is **dense**,
-so `toList` reads real elements rather than falling back to a default. `pop_isSome` is what makes that
+The store is an `Array` and not a `List` because that is the whole point of a ring: `Array.set`
+modifies in place when the array is uniquely referenced, whereas `List.set` copies a prefix. The `List`
+in this file appears **only** in `Ring.toList`, the ghost view, where its algebraic lemmas make the
+proofs short — the split Lean's own containers use, e.g. `Std.DHashMap` (Array implementation, `List`
+model, laws in a separate file).
+
+`push` and `pop` use `Array.setIfInBounds` rather than `Array.set`: the latter demands a bound proof,
+and the operations should be total and independent of `WF`. The bounds are available wherever a law
+needs them, which is where the `_of_lt` lemmas below come in.
+
+`Ring.WF` carries three conjuncts, and the third is the interesting one: the live range is **dense**, so
+`toList` reads real elements rather than falling back to a default. `pop_isSome` is what makes that
 conjunct load-bearing — without it, a `pop` on a non-empty ring could return `none`.
 
 ## Where the arithmetic lives
@@ -40,7 +49,7 @@ namespace LeanIn
 /-- A bounded FIFO ring buffer. -/
 structure Ring (α : Type) (cap : Nat) where
   /-- Backing store, in physical order. Slots outside the live range are `none`. -/
-  slots : List (Option α) := []
+  slots : Array (Option α) := #[]
   /-- Physical index of the oldest live element. -/
   head  : Nat := 0
   /-- Number of live elements. -/
@@ -48,9 +57,9 @@ structure Ring (α : Type) (cap : Nat) where
 deriving Inhabited, Repr
 
 /-- The all-empty ring: a store of `cap` empty slots. Written out so examples reduce — and note that
-`slots` must have length `cap`, which the vacuity checks below are what caught. -/
+`slots` must have size `cap`, which the vacuity checks below are what caught. -/
 def emptyRing (α : Type) (cap : Nat) : Ring α cap :=
-  { slots := List.replicate cap none, head := 0, size := 0 }
+  { slots := Array.replicate cap none, head := 0, size := 0 }
 
 variable {α : Type} [Inhabited α]
 
@@ -64,19 +73,19 @@ def Ring.toList (r : Ring α cap) : List α :=
 without which a slot containing `none` would satisfy the conjunct while `toList` quietly fell back to
 a default. -/
 def Ring.WF (r : Ring α cap) : Prop :=
-  r.slots.length = cap ∧ r.size ≤ cap ∧
+  r.slots.size = cap ∧ r.size ≤ cap ∧
   ∀ i, i < r.size → ((r.slots[(r.head + i) % cap]?).join).isSome
 
 /-- Push at the free end. No element moves. -/
 def Ring.push (r : Ring α cap) (x : α) : Ring α cap :=
-  { r with slots := r.slots.set ((r.head + r.size) % cap) (some x), size := r.size + 1 }
+  { r with slots := r.slots.setIfInBounds ((r.head + r.size) % cap) (some x), size := r.size + 1 }
 
 /-- Pop the oldest. No element moves. -/
 def Ring.pop (r : Ring α cap) : Option α × Ring α cap :=
   if 0 < r.size then
     match r.slots[r.head % cap]? with
     | some (some x) =>
-      (some x, { r with slots := r.slots.set (r.head % cap) none,
+      (some x, { r with slots := r.slots.setIfInBounds (r.head % cap) none,
                         head  := (r.head + 1) % cap,
                         size  := r.size - 1 })
     | _ => (none, r)
@@ -124,10 +133,10 @@ theorem push_toList (r : Ring α cap) (x : α) (hw : r.WF) (hroom : r.size < cap
     intro i hi
     simp only [List.mem_range] at hi
     have hne : (r.head + i) % cap ≠ (r.head + r.size) % cap := slot_ne hcap hi hroom
-    simp only [List.getElem?_set_ne hne.symm]
-  · have hw' : (r.head + r.size) % cap < r.slots.length := by
+    simp only [Array.getElem?_setIfInBounds_ne hne.symm]
+  · have hw' : (r.head + r.size) % cap < r.slots.size := by
       rw [hw.1]; exact Nat.mod_lt _ hcap
-    simp [List.getElem?_set_self hw']
+    simp [Array.getElem?_setIfInBounds_self_of_lt hw']
 
 /-- **Density does work.** A non-empty ring can always be popped — exactly the `dense` conjunct of
 `WF`, and false without it: a slot holding `none` would satisfy the weaker form. -/
@@ -176,7 +185,7 @@ theorem pop_toList (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) :
         simp only [Nat.add_zero] at hne
         have hshift : ((r.head + 1) % cap + i) % cap = (r.head + (i + 1)) % cap := by
           rw [Nat.mod_add_mod]; congr 1; omega
-        simp only [Function.comp_apply, hshift, List.getElem?_set_ne hne]
+        simp only [Function.comp_apply, hshift, Array.getElem?_setIfInBounds_ne hne]
 
 /-! ### The invariant is preserved
 
@@ -187,19 +196,19 @@ theorem push_wf (r : Ring α cap) (x : α) (hw : r.WF) (hroom : r.size < cap) :
     (r.push x).WF := by
   have hcap : 0 < cap := Nat.lt_of_le_of_lt (Nat.zero_le _) hroom
   refine ⟨?_, ?_, ?_⟩
-  · simp [Ring.push, List.length_set, hw.1]
+  · simp [Ring.push, hw.1]
   · simp only [Ring.push]; omega
   · intro i hi
     simp only [Ring.push] at hi ⊢
     by_cases hic : i < r.size
     · have hne : (r.head + i) % cap ≠ (r.head + r.size) % cap := slot_ne hcap hic hroom
-      simp only [List.getElem?_set_ne hne.symm]
+      simp only [Array.getElem?_setIfInBounds_ne hne.symm]
       exact hw.2.2 i hic
     · have hie : i = r.size := by omega
       subst hie
-      have hw' : (r.head + r.size) % cap < r.slots.length := by
+      have hw' : (r.head + r.size) % cap < r.slots.size := by
         rw [hw.1]; exact Nat.mod_lt _ hcap
-      simp [List.getElem?_set_self hw']
+      simp [Array.getElem?_setIfInBounds_self_of_lt hw']
 
 theorem pop_wf (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).2.WF := by
   have hcap : 0 < cap := Nat.lt_of_lt_of_le hpos hw.2.1
@@ -214,11 +223,11 @@ theorem pop_wf (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).2.WF 
     | none => rw [hm] at hden; simp at hden
     | some x =>
       have hle : r.size ≤ cap := hw.2.1
-      show (r.slots.set (r.head % cap) none).length = cap ∧ (r.size - 1 ≤ cap) ∧
+      show (r.slots.setIfInBounds (r.head % cap) none).size = cap ∧ (r.size - 1 ≤ cap) ∧
            ∀ i, i < r.size - 1 →
-             ((r.slots.set (r.head % cap) none)[((r.head + 1) % cap + i) % cap]?).join.isSome
+             ((r.slots.setIfInBounds (r.head % cap) none)[((r.head + 1) % cap + i) % cap]?).join.isSome
       refine ⟨?_, ?_, ?_⟩
-      · simp [List.length_set, hw.1]
+      · simp [hw.1]
       · omega
       · intro i hi
         have hi2 : i + 1 < cap := by omega
@@ -228,7 +237,7 @@ theorem pop_wf (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).2.WF 
         have hshift : ((r.head + 1) % cap + i) % cap = (r.head + (i + 1)) % cap := by
           rw [Nat.mod_add_mod]; congr 1; omega
         rw [hshift]
-        simp only [List.getElem?_set_ne hne]
+        simp only [Array.getElem?_setIfInBounds_ne hne]
         exact hw.2.2 (i + 1) (by omega)
 
 /-! ### Vacuity and the audit
@@ -244,7 +253,7 @@ example : (emptyRing Nat 4).WF := by
   exact (Nat.not_lt_zero i hi).elim
 
 /-- …and a ring whose live count exceeds its capacity is **not**, so `WF` is not true of everything. -/
-example : ¬ (Ring.WF (α := Nat) (cap := 4) ⟨List.replicate 4 none, 0, 5⟩) := by
+example : ¬ (Ring.WF (α := Nat) (cap := 4) ⟨Array.replicate 4 none, 0, 5⟩) := by
   intro h
   have hle := h.2.1
   have h5 : (5 : Nat) ≤ 4 := hle
