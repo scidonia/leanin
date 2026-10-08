@@ -24,8 +24,17 @@ namespace LeanIn.Sched
 when whatever it is waiting for completes. -/
 abbrev Job := IO Bool
 
-/-- The ready queue: one mutex, one condvar, and a stop flag. FIFO, which is the model's `pending` list
-and not its LIFO slot — that is a scheduling decision the model makes separately. -/
+/-- **The inject queue**: the model's `inject`, "the shared queue receiving overflow. Unbounded." One
+mutex, one condvar, a stop flag, and a list — because that is what the model says it is, and because it is
+pushed from any thread, the waker included.
+
+It is *not* the model's `ring` and not its `lifo` slot, and the difference is not cosmetic. `ring` is
+bounded — `Pool.Bounded p` is `p.ring.length ≤ p.cap`, 256 in Tokio — and owner-local, submitted at the back
+and taken from the front, while `lifo` is a single owner-local slot that is never stolen. This queue is
+neither, and giving it a capacity would be a claim nothing here checks. When the executor grows the ring it
+belongs in `LeanIn/Data/Ring.lean` — M2b, already verified — and `tests/executor-contract.sh SC5` is the
+contract that will demand it: its receipts are the batch that crossed the ring's capacity, the takes from
+the LIFO slot, and the flush of a pending continuation. -/
 structure Queue where
   lock     : Std.Mutex (List Job)
   cv       : Std.Condvar
