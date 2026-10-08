@@ -109,3 +109,13 @@
   cited primitive and control. A text search cannot rule
   out aliases or indirect imports: inspect calls and import
   edges as well. No source-level end-to-end IO theorem exists.
+- Prefer a directed `rw` or a `by_cases` to `simp` on
+  contract-shaped goals. `simp` rewrites one `if` and not the
+  other, leaving two sides that print identically and will not
+  close because they differ in the `Decidable` instance behind
+  the `if`; resolving the condition first sidesteps the instance
+  matching. Learned three times in one session, once per file.
+  Check a declaration's naming convention rather than inferring
+  it, too: `LeanIn/Data/Ring.lean` name-extends its definitions
+  (`Ring.push`) and leaves its theorems bare (`push_toList`), so
+  a use site cannot name one by the other's rule.
