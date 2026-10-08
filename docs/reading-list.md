@@ -8,7 +8,7 @@ how projects end up claiming more than they have.
 Legend: **[V]** verified status stated explicitly below · ⚠️ = known gap or limitation we must plan
 around.
 
----
+______________________________________________________________________
 
 ## Part I — What a scheduler must be proven to do
 
@@ -19,16 +19,17 @@ Model: a multithreaded computation is a DAG with continue/spawn/join edges; `T�
 critical-path length; threads form a spawn tree, and their bounds hold for **fully strict**
 computations (every join edge goes to the parent).
 The results to aim at:
+
 - **Theorem 1 (greedy/Brent–Graham):** for *any* greedy *P*-processor schedule, `T(X) ≤ T₁/P + T_∞`.
 - **Theorem 8 (main):** the Work-Stealing Algorithm runs in expected `T₁/P + O(T_∞)`, and with
   probability ≥ 1−ε in `T₁/P + O(T_∞ + lg P + lg(1/ε))`.
 - **Lemma 6:** w.h.p. `O(P·(T_∞ + lg(1/ε)))` steal attempts; expected `O(P·T_∞)`.
 - **Theorem 7 (space):** ≤ `S₁·P` stack space.
 - **Theorem 9 (communication):** expected `O(P·T_∞·n_d·S_max)` bytes.
-The analysis rests on a **P-M recycling game** (balls-and-bins) with `E[D] ≤ M` and a high-probability
-tail — that lemma is *the* probabilistic prerequisite for us.
-⚠️ Beware the folklore: "work-first" and "selfish" are *later* framings (e.g. Rice COMP 522 lecture
-notes), not BL's own vocabulary. Value: **[pen-and-paper proof, no mechanization]**.
+  The analysis rests on a **P-M recycling game** (balls-and-bins) with `E[D] ≤ M` and a high-probability
+  tail — that lemma is *the* probabilistic prerequisite for us.
+  ⚠️ Beware the folklore: "work-first" and "selfish" are *later* framings (e.g. Rice COMP 522 lecture
+  notes), not BL's own vocabulary. Value: **[pen-and-paper proof, no mechanization]**.
 
 **2. Brent, "The parallel evaluation of general arithmetic expressions."** J. ACM 21(2), 1974.
 **Graham, "Bounds for certain multiprocessing anomalies."** Bell Sys. Tech. J. 45, 1966; and SIAM J.
@@ -41,7 +42,7 @@ machine-checked formalization in any prover** (a deliberate negative result — 
 → The original fixed-size-array work-stealing deque with a tag field against ABA. Needed to
 understand why Chase–Lev exists (it removes the tag). Value: **[paper only]**.
 
----
+______________________________________________________________________
 
 ## Part II — The deque, and its proofs
 
@@ -80,8 +81,8 @@ OCaml 5's domain pool, in Iris/Zoo/Rocq: the Saturn Chase–Lev deque plus a bou
 just success, and they argue (against the weaker spec of Jung et al. 2023) that this is *required* to
 prove **scheduler completion** when queues drain; (ii) they identify a **"future-dependent
 linearization point"** in `steal` and handle it with *wise* and *multiplexed* prophecy variables.
-→ Read this first for architecture, last for porting (Rocq, not Lean). Value: **[machine-checked, SC,
-Rocq/Iris]**.
+→ Read this first for architecture, last for porting (Rocq, not Lean). Value: **\[machine-checked, SC,
+Rocq/Iris\]**.
 
 **8. Wang et al., "BWoS: Formally Verified Block-based Work Stealing for Parallel Processing."**
 OSDI 2023.
@@ -97,7 +98,7 @@ on IT, 2020.
 only; the author reports finding an *unsoundness artefact* (a false assertion that passed). Value:
 **[include as a cautionary tale about tool trust, not as a source]**. ⚠️
 
----
+______________________________________________________________________
 
 ## Part III — The logic: Iris, in Rocq and now in Lean
 
@@ -131,8 +132,8 @@ T3 and do not have in Lean. Value: **[machine-checked, Rocq]**.
 Span Credits" (Parcas).** ICFP 2026. DOI `10.1145/3828679`; `github.com/nobrakal/parcas`.
 → **The cost-reasoning design template.** Work credits + tagged span credits + transfer, i.e. exactly
 the machinery needed to make the BL bound a *statement about the implementation* rather than a
-statement about a DAG. Rocq-only, so adopting it in Lean is real work (T4). Value: **[machine-checked,
-Rocq]**. ⭐
+statement about a DAG. Rocq-only, so adopting it in Lean is real work (T4). Value: **\[machine-checked,
+Rocq\]**. ⭐
 
 **14. "Lawyer: Modular Obligations-Based Liveness Reasoning."** OOPSLA 2026.
 and **"Verifying Wait-Freedom for Concurrent Higher-Order Programs."** ECOOP 2026.
@@ -144,7 +145,7 @@ Internal Determinism in Parallel Programs."** POPL 2026.
 → Relevant to `leanin`'s *deterministic test runtime*: proof techniques that exploit determinism
 rather than reasoning around it. Value: **[machine-checked, Rocq]**.
 
----
+______________________________________________________________________
 
 ## Part IV — Verified kernels and preemptive schedulers
 
@@ -204,7 +205,7 @@ Recorded so the misattribution stops propagating.
 5(4), 1989. An early kernel verified down to object code in Nqthm/ACL2 — single-core, no scheduler
 result. Listed for lineage.
 
----
+______________________________________________________________________
 
 ## Part V — Atomicity, refinement and compositionality
 
@@ -251,7 +252,7 @@ to invent "wise" and "multiplexed" prophecy variables for the deque's `pop` fail
 
 **47. RGSim / RGSim-T.** Liang, Feng & Fu, POPL 2012 and TOPLAS 36(1), 2014; Liang, Feng & Shao,
 "Compositional verification of termination-preserving refinement of concurrent programs", CSL-LICS
-2014. → **Refinement between concurrent programs** — the technique behind P8.
+2014\. → **Refinement between concurrent programs** — the technique behind P8.
 
 **48. Khyzha, Gotsman & Parkinson, "A generic logic for proving linearizability."** FM 2016,
 arXiv:1609.01171.
@@ -271,36 +272,36 @@ DOI `10.4230/LIPIcs.ECOOP.2026.11`.
 1. **Layered refinement / certified abstraction layers** (CertiKOS, #33). Define a pure scheduler
    abstract spec, then prove each concrete worker/deque operation refines it by forward simulation.
    Verify a worker module *once* against its deep spec, then stop looking at it.
-2. **Environment contexts** (#33) — per-worker reasoning under a *rely* describing the other workers,
+1. **Environment contexts** (#33) — per-worker reasoning under a *rely* describing the other workers,
    never the whole machine. This is what makes a *P*-worker scheduler proof tractable instead of a
    *P*-thread interference argument.
-3. **Atomicity as a resource** (TaDA, #42) plus **non-fixed linearization points** (#45) — the
+1. **Atomicity as a resource** (TaDA, #42) plus **non-fixed linearization points** (#45) — the
    combination needed to state the deque spec and then relate it to the scheduler loop.
-4. **Fairness as an explicit hypothesis** (#46, and the mCertiKOS Lemma 6 caveat) — the honest way to
+1. **Fairness as an explicit hypothesis** (#46, and the mCertiKOS Lemma 6 caveat) — the honest way to
    state P9, and the way to keep the plan from overclaiming.
-5. **A timeline/timing abstraction** (#34) — if we ever state a *bound* about the implementation
+1. **A timeline/timing abstraction** (#34) — if we ever state a *bound* about the implementation
    rather than the DAG, this is the design to copy.
 
----
+______________________________________________________________________
 
 ## Part VI — Memory models
 
 **16. Batty et al., "Mathematical Foundations of C++ Concurrency."** POPL 2011. →
 C11 (the model Lean's runtime's atomics rest on).
 **17. Lahav, Vafeiadis, Kang, Hur & Dreyer, "Repairing Sequential Consistency in C/C++11."** PLDI
-2017. → **RC11**, the repaired model used by essentially every modern proof and verifier.
+2017\. → **RC11**, the repaired model used by essentially every modern proof and verifier.
 **18. Sarkar et al., "Understanding POWER Multiprocessors."** PLDI 2011; **Mador-Haim et al.**,
 axiomatic POWER/ARM. → The models Lê et al. prove against.
 **19. Rust `Waker` contract.** `doc.rust-lang.org/std/task/trait.Wake.html`. → The *executor-side*
 obligation in Rust ("to avoid missed wakeups, all executors must adhere…"). This is the prose
-specification of a runtime fact we intend to prove (P6) rather than assume. Value: **[the spec we are
-trying to beat]**.
+specification of a runtime fact we intend to prove (P6) rather than assume. Value: **\[the spec we are
+trying to beat\]**.
 
 Read 16–18 only if we attempt T3. Default plan: **restrict to `seq_cst`** and say so. Lean's runtime
 already uses C++11 `seq_cst` atomics for refcounts and task fields, so an SC assumption is not
 unreasonable — but it must be *stated*, not implied.
 
----
+______________________________________________________________________
 
 ## Part VII — Rust-side tools (relevant only if parts stay in Rust)
 
@@ -319,7 +320,7 @@ Rust *as written* and give no Lean-side theorem. The dynamic ones (Miri, Loom, s
 answer to "how do you test a scheduler you cannot yet prove" — and note that **Tokio itself relies on
 them**, which is worth remembering before claiming a proof advantage.
 
----
+______________________________________________________________________
 
 ## Part VIII — Adjacent systems worth reading for shape, not content
 
@@ -339,7 +340,7 @@ The nearest thing to a *language-native* precedent for what we want.
 executes on.
 **32. Liquid Haskell** — listed to dismiss: no concurrency model, no scheduler case study.
 
----
+______________________________________________________________________
 
 ## Part IX — What is *missing* (the honest negative results)
 

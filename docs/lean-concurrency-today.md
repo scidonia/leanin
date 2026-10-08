@@ -1,6 +1,6 @@
 # Lean 4 concurrency as it stands
 
-Verdict, in one paragraph: **Lean 4.35 already ships a Tokio-shaped *surface* — tasks, promises,
+Verdict, in one paragraph: \*\*Lean 4.35 already ships a Tokio-shaped *surface* — tasks, promises,
 `async`/`await`, cancellation contexts, channels, semaphores, a `select` protocol, timers, TCP/UDP,
 DNS and an HTTP server, all on a libuv reactor — but underneath that surface is a single *global
 priority thread pool with no work-stealing, no per-worker run queues, and no blocking pool*, and
@@ -8,7 +8,7 @@ priority thread pool with no work-stealing, no per-worker run queues, and no blo
 scheduler under an existing, working async layer, and (b) prove things about it that nothing in the
 Lean ecosystem currently proves."
 
----
+______________________________________________________________________
 
 ## 1. Layer map
 
@@ -46,7 +46,7 @@ Two notes on the trusted boundary **[S]**:
 - `Std.Async` is a *thin monadic shell over `Task`*. There is no separate executor object, no
   `Runtime::new`, and no way to substitute a scheduler. `Task.spawn` is the scheduler.
 
----
+______________________________________________________________________
 
 ## 2. What the scheduler actually is
 
@@ -82,7 +82,7 @@ The two rows in bold are the design drivers. **Head-of-line blocking of the pool
 is exactly what Tokio's `spawn_blocking` pool exists to prevent. **A capped pool with no stealing**
 is exactly what Tokio's work-stealing scheduler exists to fix.
 
----
+______________________________________________________________________
 
 ## 3. How to use Lean concurrency today
 
@@ -121,7 +121,7 @@ Ergonomics findings worth recording because they cost time:
   must be at root scope. This is a real trap for anyone building an executable library.
 - `race` **does not cancel the loser** **[S]**; `ContextAsync.race` does.
 
----
+______________________________________________________________________
 
 ## 4. Gap to a Tokio-shaped library
 
@@ -166,7 +166,7 @@ Ergonomics findings worth recording because they cost time:
   or scheduling bound exists in Lean, and no formal semantics of Lean's `IO`/`Task` exists at all
   **[R]** (see `docs/proof-strategy.md` for what that forces).
 
----
+______________________________________________________________________
 
 ## 5. What you can test with today
 

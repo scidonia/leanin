@@ -8,24 +8,29 @@ Every load-bearing claim in this plan is traceable to one of three kinds of sour
 | **[S]** | **S**ource read first-hand — a file in an installed toolchain, or a paper/artifact read by a research subagent with a URL. The anchor is given. |
 | **[R]** | **R**eported by a research subagent from a named source, not independently re-read. Treat as a lead, not a fact. |
 
----
+______________________________________________________________________
 
 ## 1. Environment
 
 ```
-$ lean --version
+$ lean --version                 # elan's toolchain: the release tarball for this version
 Lean (version 4.35.0-rc3, x86_64-unknown-linux-gnu, commit 470d5ce1400764999581fd26d5d72b00d990b0f4, Release)
+$ nix develop -c lean --version  # the nix dev shell
+Lean (version 4.35.0-rc3, Release)
 $ nproc
 8
 ```
 
-Two ways to get that toolchain, and they must agree:
+Two ways to get that toolchain, and both resolve the same release. The nixpkgs build sets
+`USE_GITHASH=false`, so its version string carries neither the commit nor the target triple; the part
+that matters is the version, `4.35.0-rc3`, which both report.
 
-- **Nix** (the default here): `flake.nix` pins the v4.35.0-rc3 release tarball by SHA-256
-  (`sha256-FSbeFsBJbxa0ahaPJsmQr043llBSc8M0L+wX1y12OZc=`) and nixpkgs at the revision
-  `../SpecAMQP`/`../TemperMint` pin. Commands run as `nix develop -c lake …`. The tarball is
-  self-contained — `libgmp`, `libuv`, `libssl` and `libcrypto` ship as static archives under
-  `lib/lean` — so the shell adds only the C++ standard library **[S]**.
+- **Nix** (the default here): `flake.nix` derives `lean4` from nixpkgs' own `lean4` derivation with
+  the source and version moved to the `v4.35.0-rc3` tag, and tracks `nixos-unstable` with no revision
+  written into the flake. Commands run as `nix develop -c lake …`. The derivation is built from
+  source against the store's `gmp`, `libuv` and `openssl` **[S]** (nixpkgs
+  `pkgs/by-name/le/lean4/package.nix`), so the toolchain comes from the shell's closure rather than
+  from a self-contained tarball.
 - **elan**: `lean-toolchain` names `leanprover/lean4:v4.35.0-rc3`; toolchains v4.25.2 … v4.35.0-rc3 are
   installed locally **[S]**.
 
@@ -38,7 +43,7 @@ v4.31.0 onward **[S]**. The 4.35 line is still pre-release — `v4.35.0-rc4` is 
 **[S]** — so the pin names an RC deliberately, and bumping it means re-checking that `Std.WP` and
 `Std.Async` still have the shape this plan assumes.
 
----
+______________________________________________________________________
 
 ## 2. Measured: what Lean 4.35's scheduler actually does
 
@@ -66,23 +71,23 @@ Readings **[M]**:
    (8 on an earlier run, 7 on a later one) — i.e. ≤ `hardware concurrency`. This is a fixed pool,
    not a growable one.
 
-2. **`Task.Priority.dedicated` escapes the pool entirely.** 64 tasks at `dedicated` (priority 9)
+1. **`Task.Priority.dedicated` escapes the pool entirely.** 64 tasks at `dedicated` (priority 9)
    used **64 distinct threads** — one thread per task. This is the only "get off the pool" escape
    hatch Lean offers, and it is per-task, not a bounded blocking pool.
 
-3. **Blocking work on the pool causes head-of-line blocking.** 64 tasks each doing
+1. **Blocking work on the pool causes head-of-line blocking.** 64 tasks each doing
    `IO.sleep 100` took **801 ms** — `ceil(64/8) × 100 ms`, i.e. exactly 8 rounds over 8 workers.
    The blocking sleep *occupies a worker thread*. Serial baseline: 6406 ms for the same 64 sleeps.
 
-4. **The `Async` layer is genuinely non-blocking.** 64 concurrent `Async.sleep 100` (libuv timer)
+1. **The `Async` layer is genuinely non-blocking.** 64 concurrent `Async.sleep 100` (libuv timer)
    completed in **102 ms** — the 64 timers did not consume 64 pool workers; they did not consume
    *any* pool worker while waiting. This is the single most important measured fact in the plan:
    the async path already has a working reactor, and the *blocking* path is the hole.
 
-5. **`await` on the async path runs two `IO.sleep 200` computations concurrently** (200 ms, not
+1. **`await` on the async path runs two `IO.sleep 200` computations concurrently** (200 ms, not
    400 ms), confirming `Async.async`/`await` composes into real parallelism **[M]**.
 
-6. `IO.Promise` handoff and `CloseableChannel` (bounded capacity 4, and unbounded) both work
+1. `IO.Promise` handoff and `CloseableChannel` (bounded capacity 4, and unbounded) both work
    correctly across tasks, summing 0..99 to 4950 **[M]**.
 
 ### Pool width is a dial, and the two sleep paths diverge
@@ -115,7 +120,7 @@ separate blocking pool, and (1) is precisely the problem Tokio's work-stealing s
 letting idle workers steal rather than sit parked. Both are real, both are measured, and neither is
 hypothetical. The library's first two milestones are aimed at exactly these two facts.
 
----
+______________________________________________________________________
 
 ## 3. Read first-hand: the shape of Lean's concurrency stack
 
@@ -145,7 +150,7 @@ Two structural facts that matter for the TCB story **[S]**:
   from `LEAN_NUM_THREADS` or the logical processor count, and that the size "is not a hard limit"
   **[S]** (`lean-lang.org/doc/reference/latest/IO/Tasks-and-Threads`).
 
----
+______________________________________________________________________
 
 ## 4. Reported: supporting facts
 
@@ -164,7 +169,7 @@ Two structural facts that matter for the TCB story **[S]**:
   **[R]**; the binary toolchain distribution does *not* ship those `.cpp` files, only `.a`/`.so`
   **[S]** — so runtime source must be read upstream, not locally.
 
----
+______________________________________________________________________
 
 ## 5. Measured: the `Task`-as-waker bridge
 
@@ -190,10 +195,10 @@ Readings **[M]**:
 1. **An external `Task` completion can be routed into our own data structure.** `BaseIO.bindTask`
    attaches a continuation whose body pushes into a mutex-guarded inbox; the completion runs on the
    pool, the *work* runs on our carrier. This is the mechanism D3 depends on.
-2. **The waker and the carrier are different threads**, reproducibly, across runs.
-3. **`IO.println` is unavailable in a `bindTask` continuation** — it is `IO Unit`, the continuation is
+1. **The waker and the carrier are different threads**, reproducibly, across runs.
+1. **`IO.println` is unavailable in a `bindTask` continuation** — it is `IO Unit`, the continuation is
    `BaseIO (Task β)`. Instrumentation built on this seam must carry its observations as data.
-4. **`IO.asTask` wraps its result in `Except IO.Error`**, so a bound continuation receives
+1. **`IO.asTask` wraps its result in `Except IO.Error`**, so a bound continuation receives
    `Except IO.Error α` (visible as `event:ok: 7` above) rather than a bare `α`.
 
 ⚠️ **Limits of this instrument.** The "carrier not a pool worker" and "waker was a pool worker" checks
@@ -202,7 +207,7 @@ pool's real membership, not its actual membership. Only the first check — the 
 is conclusive. The claim that a `dedicated`-priority task gets its own OS thread rests on the runtime
 source (`object.cpp:792` → `spawn_dedicated_worker`), not on this harness.
 
----
+______________________________________________________________________
 
 ## 6. Measured: the runtime controls
 
@@ -236,16 +241,16 @@ Readings **[M]**:
    between 171 696 and 536 621 updates across runs (a quarter of them); with a `Std.Mutex` the total is
    exactly 2 000 000. The guarded half is the **affirmative control**: it shows the counter and the
    threads are real, so the loss is attributable to the missing lock.
-2. **A2 — `tryLock` observes a held lock and returns.** The `tryLock` is issued from a *second* thread,
+1. **A2 — `tryLock` observes a held lock and returns.** The `tryLock` is issued from a *second* thread,
    because `std::mutex::try_lock` on a mutex already held by the calling thread is undefined behaviour
    — the naive control would have been the defect it is meant to detect.
-3. **A5 — a notification with no waiter is lost.** `notifyOne` before anyone parks leaves the waiter
+1. **A5 — a notification with no waiter is lost.** `notifyOne` before anyone parks leaves the waiter
    parked indefinitely (after 200 ms it is still not `finished`); `notifyAll` then resumes it. This is
    the runtime counterpart of the proved `notifyOne_no_waiters`.
-4. **A4 — a `waitUntil` shape tolerates a wakeup it did not ask for.** Woken with the predicate false,
+1. **A4 — a `waitUntil` shape tolerates a wakeup it did not ask for.** Woken with the predicate false,
    the waiter re-parks; when the predicate becomes true, it finishes. This is a *tolerance* test, not an
    observation of a spurious wakeup.
-5. **A7 — the clock never went backwards** across 10 000 reads, and advanced on every one.
+1. **A7 — the clock never went backwards** across 10 000 reads, and advanced on every one.
 
 ⚠️ **Limits of these controls.** A1 is a **race**: loss is expected but not guaranteed on any given
 run, and the count is printed rather than asserted. **A3 and A4 cannot be tested as claimed** — A3
@@ -254,7 +259,7 @@ is permitted to wake spuriously, not obliged to, so a spurious wakeup cannot be 
 discharged by reading `mutex.cpp` against the standard, and A3 additionally by the model having no
 transition for it (`unlock_without_ownership_has_no_transition`). **A6** is absent from v1.
 
----
+______________________________________________________________________
 
 ## 7. Reported: what is *not* proven anywhere
 

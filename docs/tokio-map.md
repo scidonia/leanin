@@ -14,7 +14,7 @@ Chase-Lev deque, which … is not a good fit"; the rewrite replaced it with a qu
 reclamation, and reclamation costs two atomic RMWs on every operation in the hot path. Tokio traded
 growth for a **fixed-size local queue that overflows into a shared queue**.
 
----
+______________________________________________________________________
 
 ## 1. Scheduler flavours
 
@@ -187,7 +187,7 @@ Porting note: **Lean already has equivalents** (`Std.Sync`), so this is a compar
 interesting difference is that Lean's `Mutex` is a real blocking OS mutex (C++), whereas Tokio's is an
 async-aware lock; and Lean's channels are built on `Mutex` + `Promise` rather than on wakers.
 
----
+______________________________________________________________________
 
 ## What we steal, in priority order
 

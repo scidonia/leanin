@@ -6,7 +6,7 @@ provable by ordinary sequential reasoning, and a **concurrent implementation** o
 
 The interface exists to be *small*. Everything provable should be provable about the model.
 
----
+______________________________________________________________________
 
 ## 1. Shape
 
@@ -20,7 +20,7 @@ Task α      await                         -- plus MonadAsync / MonadAwait insta
 mechanism operations plus the protocol, and nothing else — anything that cannot be expressed here is
 out of scope, not a missing feature.
 
----
+______________________________________________________________________
 
 ## 2. Queue
 
@@ -85,17 +85,17 @@ Taken from the deque literature (Lê et al.'s four properties) and from Tokio's 
 queue is empty when dropped (`queue.rs:571`):
 
 1. **No lost work.** Dropping a non-empty queue is an error, not a silent discard.
-2. **Well-defined reads.** Only pushed elements are returned.
-3. **Uniqueness.** An element is returned at most once, across `pop` and every `steal`.
-4. **Existence.** With finitely many pushes, if takers keep attempting, every element is returned
+1. **Well-defined reads.** Only pushed elements are returned.
+1. **Uniqueness.** An element is returned at most once, across `pop` and every `steal`.
+1. **Existence.** With finitely many pushes, if takers keep attempting, every element is returned
    exactly once.
-5. **Bounded capacity.** The ring never exceeds 256 and overflow routes to inject, never to `none`.
+1. **Bounded capacity.** The ring never exceeds 256 and overflow routes to inject, never to `none`.
 
 **Batch size is one here, and this is the one place we invert Tokio deliberately.** Batching amortises
 a CAS and never blocks the victim; under a lock it lengthens the critical section *and* blocks the
 victim (D4). Take one element.
 
----
+______________________________________________________________________
 
 ## 3. Scheduler
 
@@ -131,7 +131,7 @@ Three obligations, each traceable to an axiom:
 Two details that are policy, not mechanism, and are separately testable: the LIFO cap of 3, and the
 inject check interval.
 
----
+______________________________________________________________________
 
 ## 4. Task layer
 
@@ -161,7 +161,7 @@ and notifies — Tokio's `wake()` → `inject.push` + `unpark`
 (`scheduler/current_thread/mod.rs:734`). Our task bodies are never `Task`s. *This bridge is D3/O3:
 proposed, must be spiked.*
 
----
+______________________________________________________________________
 
 ## 5. Deliberately absent
 
@@ -177,7 +177,7 @@ Each of these is a decision, not an oversight:
 - **No `LocalSet`, `block_in_place`, `block_on`-variants, or runtime-flavour enum** in v1. One flavour
   (single-carrier, D2), shaped on `LocalRuntime`.
 
----
+______________________________________________________________________
 
 ## 6. What refinement means here
 

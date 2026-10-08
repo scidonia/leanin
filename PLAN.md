@@ -14,7 +14,7 @@ algorithms taken from Tokio, and machine-checked proofs for the properties that 
 | [`docs/reading-list.md`](docs/reading-list.md) | Annotated primary sources with verification status |
 | [`docs/evidence.md`](docs/evidence.md) | Every measured and read-first-hand fact, with anchors |
 
----
+______________________________________________________________________
 
 ## 0. Status
 
@@ -27,16 +27,15 @@ No library code exists yet, by design: the plan is model-first, and the model is
 
 Two findings did the shaping, and both were surprises:
 
-1. **The scheduler is a global singleton with no injection point.** `static task_manager *
-   g_task_manager` (`object.cpp:1095`), constructed at startup, no handle, no second instance. So
+1. **The scheduler is a global singleton with no injection point.** `static task_manager * g_task_manager` (`object.cpp:1095`), constructed at startup, no handle, no second instance. So
    there is no runtime object to replace: a scheduler is a fork, a parallel runtime, or an
    `@[extern]`-and-own-library arrangement. We chose the third (D0).
-2. **`Std.Async` is not a runtime.** It is `BaseIO (MaybeTask α)` and every operation delegates to
+1. **`Std.Async` is not a runtime.** It is `BaseIO (MaybeTask α)` and every operation delegates to
    `Task` (`Basic.lean:327,389,432,456,463,474`) — no queue, no waker, no poll. Driving it *is* using
    the stock pool. So the task layer is ours by elimination (D3), while the leaf layer (timers,
    sockets, `Std.Sync`) is reused.
 
----
+______________________________________________________________________
 
 ## 1. What we are building
 
@@ -44,17 +43,17 @@ Four things, and deliberately no more:
 
 1. **A task layer** — our own `Task`/`Async`, continuation-based, because `Std.Async` cannot be reused
    and `Task` cannot be patched (D3).
-2. **A scheduling policy** — a single-carrier executor first (D2), with the multi-carrier
+1. **A scheduling policy** — a single-carrier executor first (D2), with the multi-carrier
    work-stealing scheduler as a *refinement* of it rather than a first build.
-3. **A blocking pool** — forced early, because with one carrier a blocking task blocks everything.
-4. **A theory of the primitives** — the axioms that make the rest provable
+1. **A blocking pool** — forced early, because with one carrier a blocking task blocks everything.
+1. **A theory of the primitives** — the axioms that make the rest provable
    ([`primitive-theory.md`](primitive-theory.md)).
 
 If the project ever reads as "reimplement Tokio", scope has escaped. Lean already has the async
 surface, the sync primitives, libuv I/O and an HTTP server; what it lacks is exactly the four items
 above.
 
----
+______________________________________________________________________
 
 ## 2. What the current scheduler does, and why we are replacing the policy
 
@@ -71,7 +70,7 @@ The policy we are replacing: nine shared FIFO deques behind **one** mutex, stric
 stealing, no fairness, and `IO.sleep` implemented through `lean_dbg_sleep` — a debug helper whose
 Lean definition ignores its argument ([`lean-scheduler.md`](lean-scheduler.md) §7).
 
----
+______________________________________________________________________
 
 ## 3. Strategy
 
@@ -88,15 +87,15 @@ Lean definition ignores its argument ([`lean-scheduler.md`](lean-scheduler.md) �
   victim; under a lock it lengthens the critical section and blocks the victim. So we steal one
   element, and copy the rest of the shape unchanged.
 
----
+______________________________________________________________________
 
 ## 4. Workspace and toolchain
 
-- Toolchain pinned in two places that must agree: `lean-toolchain`
-  (`leanprover/lean4:v4.35.0-rc3`, for elan) and `flake.nix` (`leanDistribution`, the same release
-  tarball by SHA-256, for nix) — because `Std.WP` exists only in the 4.35 line. The nix pin exists
-  because elan resolves `lean-toolchain` over the network, which offline runs cannot do; the pattern
-  is copied from `../SpecAMQP`/`../TemperMint`.
+- Toolchain named in two places that must agree: `lean-toolchain`
+  (`leanprover/lean4:v4.35.0-rc3`, for elan) and `flake.nix` (`lean4`, nixpkgs' `lean4` derivation at
+  the `v4.35.0-rc3` tag, for nix) — because `Std.WP` exists only in the 4.35 line. The nix path
+  builds from source through nixpkgs rather than installing through elan, which resolves
+  `lean-toolchain` over a network that offline runs cannot use.
 - Build: `nix develop -c lake build`; harness: `nix develop -c lake exe spike`. The dev shell wraps
   `lake`/`lean` in `nice -n 19`; `LEANIN_LEAN_NICE=0` opts out.
 - Reference trees, read-only and outside the build: `Vendor/tokio/` (algorithms) and `Vendor/lean4/`
@@ -116,7 +115,7 @@ Vendor/{tokio,lean4}/
 docs/
 ```
 
----
+______________________________________________________________________
 
 ## 5. Roadmap
 
@@ -133,13 +132,14 @@ graph TD
 
 Critical path to something usable: **M1 → M2 → M3**. M4 is forced by D2 and is small.
 
----
+______________________________________________________________________
 
 ### M0 — Close the open questions
 
 **Goal:** make the interface freezable.
 
 **Build**
+
 - ~~Copy Tokio~~ — **done**: `Vendor/tokio` at `3eb95a40…`, `master`, 2026-10-07.
 - ~~Pin the runtime source~~ — **done**: `Vendor/lean4` at `v4.35.0-rc3`, commit `470d5ce…`, the exact
   toolchain commit.
@@ -152,17 +152,19 @@ Critical path to something usable: **M1 → M2 → M3**. M4 is forced by D2 and 
 [`decisions.md`](decisions.md).
 
 **Exit criteria — met**
+
 - D8 and D9 recorded with their reasons; **D10 spiked with a passing observation**
   (`WakerSpike.lean`, three runs, all checks true).
 - `nix develop -c lake exe spike` reproduces the baseline in [`evidence.md`](evidence.md).
 
----
+______________________________________________________________________
 
 ### M1 — The theory and the interface, in Lean
 
 **Goal:** the axioms exist as Lean declarations, and the interface is frozen against them.
 
 **Landed so far.** The machine, its theorems, and the bridge:
+
 - `LeanIn/Theory/World.lean` — `World`, `Act`, `step`/`Step`, and proofs of mutual exclusion
   (`lock_has_one_owner`, `lock_gives_ownership`), A3's impossibility
   (`unlock_without_ownership_has_no_transition`), A5's loss of notification
@@ -178,6 +180,7 @@ Critical path to something usable: **M1 → M2 → M3**. M4 is forced by D2 and 
 **Still to do** — the interface signatures, and the refinement obligation stated against them.
 
 **Build** — `LeanIn/Theory/`, then `docs/interface.md` realised as Lean signatures
+
 - the machine `M`: engine state, locks, condvar waiter sets, clock;
 - `⟦·⟧` for the primitive fragment;
 - A1–A7 as Lean axioms, each carrying its source citation in a doc-comment;
@@ -192,18 +195,20 @@ axiom, not a smoke test.
 **Exit criteria** — the axiom set compiles, is the size of the list in D7 (no accidental extras), and
 every axiom has a control that has been observed to distinguish "holds" from "does not hold".
 
----
+______________________________________________________________________
 
 ### M2 — The pure model
 
 **Goal:** a scheduler as mathematics, with no concurrency at all, and executable.
 
 **Build** — `LeanIn/Model/`
+
 - `Queue α := List α` with `push`/`pop`/`steal` per [`interface.md`](interface.md) §2;
 - the worker shape: bounded ring, one-slot LIFO, `lifoPolls` capped at 3, overflow to inject;
 - `Scheduler`: workers, inject, idle set, `stopping`.
 
 **Landed so far** — `LeanIn/Model/Pool.lean`, the worker shape:
+
 - `Pool` with the ring, LIFO slot, per-tick allowance, inject queue, and the `pushed`/`taken`
   bookkeeping Tokio lacks. **No sorries.**
 - **`Consistent`** — no lost work, as an equation: `inFlight + taken = pushed`. Preserved by
@@ -218,6 +223,7 @@ every axiom has a control that has been observed to distinguish "holds" from "do
   the bridge axioms. The model is not circular; it does not assume the primitives it is about.
 
 **Landed** — `LeanIn/Model/Scheduler.lean`, the wake protocol:
+
 - `Sched` (work, parked, total, stopping) and `Sched.Live`: work implies a worker that is not parked.
   `Reachable` restricts the claim to states the protocol can produce, because a state with work and
   every worker parked *is* well-formed and *would* be a lost wakeup — so `Live` is genuinely stronger
@@ -234,6 +240,7 @@ every axiom has a control that has been observed to distinguish "holds" from "do
 **Still to do** — invariants 2–4 over the pool as a whole: well-defined reads, uniqueness, existence.
 
 **Prove**
+
 - queue invariants 1–5 (no lost work, well-defined reads, uniqueness, existence, bounded capacity);
 - **no lost wakeup**: if work exists and a worker is parked, one is woken;
 - **no lost work at shutdown**: draining returns every queued element;
@@ -246,7 +253,7 @@ be inhabited by some reachable state and not by others, so the theorems are not 
 **Exit criteria** — sorry-free; a corpus of generated schedules runs and the invariants hold; the
 `steal`-order property is demonstrated by a failing control on a deliberately mis-ordered variant.
 
----
+______________________________________________________________________
 
 ### M2b — The ring buffer container (D12)
 
@@ -257,6 +264,7 @@ of slots plus the index of the oldest live element plus a live count -- `Array` 
 `Array.set` updates in place while `List.set` copies a prefix, and the ring exists to move no element.
 
 **Build** — `LeanIn/Data/Ring.lean`
+
 - `Ring` with `slots`, `head`, `size`;
 - `Ring.toList` — the ghost view, oldest first, so every downstream proof is about a list;
 - `Ring.WF` — the store's size is `cap`, the live count fits, **and the live range is dense** (no
@@ -264,6 +272,7 @@ of slots plus the index of the oldest live element plus a live count -- `Array` 
 - `push` / `pop`.
 
 **Prove**
+
 - `push_toList` and `pop_toList` — the laws that make `Ring` an implementation of the spec's queue;
 - the one lemma where the arithmetic lives: distinct live indices occupy distinct slots. Everything
   modular is isolated there, and no proof downstream of the ghost view ever sees an index.
@@ -330,13 +339,14 @@ so all five laws still prove with the same axiom audit.
 **Exit criteria** — the laws hold, the checks distinguish, and the ghost view is the only representation
 any downstream proof mentions.
 
----
+______________________________________________________________________
 
 ### M3 — The single-carrier executor
 
 **Goal:** the first thing a user can run — and the deterministic runtime falls out of it.
 
 **Build** — `LeanIn/Sched/`, `LeanIn/Runtime/`, `LeanIn/Task/`
+
 - the worker loop over the model's structure, backed by `Mutex`/`Condvar`;
 - the inject queue and the park protocol;
 - our `Task`/`Async` with `MonadAsync`/`MonadAwait` instances;
@@ -346,6 +356,7 @@ any downstream proof mentions.
 **Prove** — refinement of M2 (`Impl.push ⊑ Model.push`, etc.), using the serializability lemma.
 
 **Test**
+
 - run real work; confirm the executor uses **one** thread and no pool workers;
 - **deterministic replay**: same seed, same trace, byte-for-byte; a failure replays from its seed.
 - the A5 control in situ: a park/wake protocol that survives a lost notification because state is
@@ -355,7 +366,7 @@ any downstream proof mentions.
 [`interface.md`](interface.md) §6; replay is deterministic; and Lean now has something it did not have
 before, which is a scheduler whose behaviour is *specified*.
 
----
+______________________________________________________________________
 
 ### M4 — The blocking pool
 
@@ -377,7 +388,7 @@ executor, and the stock pool must be left untouched.
 **Exit criteria** — the 801 ms case no longer applies to `leanin` work; blocking work is accounted for
 and cannot starve the executor.
 
----
+______________________________________________________________________
 
 ### M5 — Multi-carrier and stealing
 
@@ -387,6 +398,7 @@ and cannot starve the executor.
 across threads, the steal protocol with batch size **one** (D4).
 
 **Prove**
+
 - refinement of the M2 model, now with real interleaving;
 - no lost wakeup across threads;
 - **completion, conditional on a fairness hypothesis** — A1 gives no fairness and A6 gives no
@@ -398,7 +410,7 @@ across threads, the steal protocol with batch size **one** (D4).
 **Exit criteria** — work stealing beats or matches the stock pool on the async benchmark while
 preserving every M2 invariant.
 
----
+______________________________________________________________________
 
 ### Later, and only on evidence
 
@@ -408,7 +420,7 @@ preserving every M2 invariant.
   lacks. Off the critical path and independently publishable.
 - **Ergonomics** (`select!`-style macros, `JoinSet`) — policy, tested not proved.
 
----
+______________________________________________________________________
 
 ## 6. Risk register
 
@@ -424,7 +436,7 @@ preserving every M2 invariant.
 | Scope creep into "reimplementing Tokio" | unbounded | §1's four items; everything else named out of scope |
 | `iris-lean` does not build on 4.35.0-rc3 | Rocq fallback needed for v2 proofs | verify in M1; `~/.opam/rocq-9` has `coq-iris 4.4.0` and `rocq-iris dev 2026-06-04` |
 
----
+______________________________________________________________________
 
 ## 7. Open decisions
 

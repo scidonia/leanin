@@ -4,7 +4,7 @@ This is the part of the plan that decides whether the project is worth doing at 
 not "can we write a work-stealing scheduler in Lean" — that is ordinary engineering. It is **"what
 can we actually prove, about what, with which tool, and what has to stay assumed."**
 
----
+______________________________________________________________________
 
 ## 1. The three nested gaps
 
@@ -80,7 +80,7 @@ mathematics rather than systems engineering, and it is the least risky thing in 
 paper-and-Lean development of the work-stealing bound is a result on its own, independent of whether
 the runtime ever lands.
 
----
+______________________________________________________________________
 
 ## 2. The TCB, stated plainly
 
@@ -110,7 +110,7 @@ in the plan rather than in a footnote. The alternative is to accept exactly the 
 (Isabelle/HOL) and CertiKOS (Coq) accept for their verified schedulers and say so — noting that those
 projects verify the actual C kernel, which Lean cannot do for its C++ task runtime.
 
----
+______________________________________________________________________
 
 ## 3. The property ladder
 
@@ -133,7 +133,7 @@ The ladder is deliberately ordered so that **P3/P4/P5 are provable first and ind
 need no concurrency logic, no Iris, no runtime, and no semantics of Lean. They are pure mathematics
 about DAGs and schedules.
 
----
+______________________________________________________________________
 
 ## 4. Recommended proof architecture: three layers
 
@@ -186,7 +186,7 @@ HeapLang.
 **(b) + (c) is the combination that yields a result worth publishing.** (a) is the one that ships in
 weeks. The plan sequences (a) → (b) and does (c) alongside.
 
----
+______________________________________________________________________
 
 ## 5. What is genuinely tricky, ranked
 
@@ -199,14 +199,14 @@ that runs:
 1. **Model + `@[extern]`** (the `Array` discipline): write correct pure Lean definitions of the
    primitives we rely on, bind them to native code with `@[extern]`, prove against the model, keep the
    native code as TCB. Established Lean practice; requires authoring the model.
-2. **`iris-lean`/HeapLang**: write the concurrent core in the modelled language, prove it there,
+1. **`iris-lean`/HeapLang**: write the concurrent core in the modelled language, prove it there,
    port the result. Loses the connection to Lean's own code and adds a porting step.
-3. **A new `Std.WP` instance** for our own concurrent language with an **omnisemantics** —
+1. **A new `Std.WP` instance** for our own concurrent language with an **omnisemantics** —
    `Std.WP` has the framework and a worked deep-embedding recipe (`tests/elab/vcgenImp.lean`) but no
    `IO` instance and no concurrency, so this is authoring work; it is also the path most aligned with
    where the Lean FRO is going (`Std.WP` is being actively developed — PR #15290 moved `vcgen` into
    `Std.WP.Tactic` in September 2026, and PR #14685 is a "vcgen separation logic demo").
-4. **Prove the model, argue the refinement in prose**: the fallback, and honest as long as the
+1. **Prove the model, argue the refinement in prose**: the fallback, and honest as long as the
    argument is a first-class document with an executable correspondence test.
 
 **This is the single hardest and least-precedented item in the project**, and it is not a scheduling
@@ -254,7 +254,7 @@ against our pinned 4.35.0-rc3 is **unverified**, and the API is moving (47 open 
 few days). Also missing: Actris, Simuliris, Actris-style session/protocol reasoning that would
 naturally express a `select`/`Notify` protocol **[S]**.
 
----
+______________________________________________________________________
 
 ## 6. What we will *not* prove
 
@@ -269,7 +269,7 @@ Stated up front so the plan's claims stay honest:
   refinement with a written model↔implementation correspondence, not a chain of proofs, until such
   time as a concurrent `IO` semantics exists.
 
----
+______________________________________________________________________
 
 ## 7. Instrument selection, per rung
 

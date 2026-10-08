@@ -4,7 +4,7 @@ What the externs `leanin` stands on actually guarantee, stated precisely enough 
 hypotheses. This is the piece that closes the semantics gap: without it there is no term for a
 theorem to be *about*.
 
----
+______________________________________________________________________
 
 ## 1. What a theory has to be
 
@@ -27,7 +27,7 @@ Either choice forces us to model our own code *and* still bridge to Lean — two
 What our code actually needs is far less: every critical section is a transaction, and mutual
 exclusion gives serializability (§5).
 
----
+______________________________________________________________________
 
 ## 2. The machine
 
@@ -47,7 +47,7 @@ operation; or — in v2 — a spawn.
 The point of this shape: *the engine is Lean data*, so anything the scheduler computes is sequential
 Lean reasoning. The axioms exist only at the four boundaries where the engine touches a primitive.
 
----
+______________________________________________________________________
 
 ## 3. The axioms
 
@@ -111,7 +111,7 @@ assumption.
 
 **A7 — no resolution guarantee.** A clock is not a scheduler; it cannot bound latency.
 
----
+______________________________________________________________________
 
 ## 4. What the axioms are consumed by
 
@@ -139,7 +139,7 @@ editorial choices:
 - **P9 (fairness)** is not attainable from these primitives at all. It can only be a property of our
   own discipline under that hypothesis.
 
----
+______________________________________________________________________
 
 ## 5. Discharge
 
@@ -166,7 +166,7 @@ never fires passes forever:
 | A6 | writes before spawn are visible in the thread (happens-before), and the thread is joinable. |
 | A7 | `monoNanosNow` is non-decreasing across samples in several threads. |
 
----
+______________________________________________________________________
 
 ## 6. What is deliberately *not* in the theory
 

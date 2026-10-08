@@ -7,7 +7,7 @@ Answered from source, not from documentation. Source of truth: `Vendor/lean4`, t
 The surprise is that there is no separate scheduler file. `src/runtime/object.cpp` (3 023 lines)
 holds the task object, the task manager **and** the scheduling policy. There is no `task.cpp`.
 
----
+______________________________________________________________________
 
 ## 1. The answer in one paragraph
 
@@ -20,7 +20,7 @@ occupies a worker thread; `Task.get` called from a pooled task *raises the pool 
 Separately, **one** dedicated thread runs a libuv event loop, and that is what timers and non-blocking
 I/O use — the two mechanisms share nothing.
 
----
+______________________________________________________________________
 
 ## 2. The data structure
 
@@ -186,14 +186,14 @@ Readings:
 
 1. **`IO.sleep` scales exactly as `ceil(64/N)`** — 6406 / 3203 / 1602 / 801. One blocked worker per
    sleeping task, confirmed four times over. Blocking work occupies the pool.
-2. **`Async.sleep` is flat — 102 ms even at `LEAN_NUM_THREADS=1`** — because the libuv loop thread
+1. **`Async.sleep` is flat — 102 ms even at `LEAN_NUM_THREADS=1`** — because the libuv loop thread
    services the timers and consumes no pool worker. The reactor genuinely works.
-3. **The thread-identity probe under-reports for bursty work** (1 thread observed at
+1. **The thread-identity probe under-reports for bursty work** (1 thread observed at
    `LEAN_NUM_THREADS=2`, while the timing proves 2-way parallelism). The timing probe is the reliable
    instrument for pool width; the TID probe measures concurrency actually exercised by short tasks.
    This is a methodological correction to `docs/evidence.md`.
 
----
+______________________________________________________________________
 
 ## 9. What this means for `leanin`
 
@@ -244,10 +244,10 @@ relying on any assumption about `Task` behaviour.
 1. Does anything in-tree (`Lean.Server`, `Lake`, `Lean.Language`) depend on the singleton's exact
    behaviour — priority ordering, or the `Task.get` pool-growth hack — such that replacing it would
    break them?
-2. Is the demand-driven worker spawn a *deliberate* throttle or an accident? The comment at
+1. Is the demand-driven worker spawn a *deliberate* throttle or an accident? The comment at
    `object.cpp:849–857` discusses throttling after `task_get` decreased the cap, which suggests it is
    deliberate, but the under-spawn for bursts looks unintended.
-3. What happens to `Task.get`'s cap-bump under a work-stealing scheduler — is "blocked worker is
+1. What happens to `Task.get`'s cap-bump under a work-stealing scheduler — is "blocked worker is
    replaced" even a meaningful idea when stealing exists?
-4. Which of (i)/(ii)/(iii) in §9a does the toolchain permit? (ii) is the only one that needs no
+1. Which of (i)/(ii)/(iii) in §9a does the toolchain permit? (ii) is the only one that needs no
    toolchain patch, and (i) is the only one that makes the whole async layer provably ours.

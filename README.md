@@ -31,16 +31,18 @@ Supporting documents:
 
 ## Build and run
 
-The toolchain is pinned in **two places that must agree**:
+The toolchain is named in **two places that must agree**:
 
-| File | For | Pin |
+| File | For | Toolchain |
 |---|---|---|
 | `lean-toolchain` | `elan` users | `leanprover/lean4:v4.35.0-rc3` |
-| `flake.nix` | `nix` users | `leanDistribution`, the v4.35.0-rc3 release tarball by SHA-256 |
+| `flake.nix` | `nix` users | `lean4`, nixpkgs' `lean4` derivation at the `v4.35.0-rc3` tag |
 
-Both name the same release. The nix path pins the release **tarball** rather than installing through
-`elan`, because `elan` resolves `lean-toolchain` by downloading from the network — which an offline
-run may not do. This is the same convention `../SpecAMQP` and `../TemperMint` use.
+Both name the same release. The nix path builds that release from source through nixpkgs' own `lean4`
+derivation rather than installing through `elan`, because `elan` resolves `lean-toolchain` by
+downloading from the network — which an offline run may not do. `nixpkgs` itself tracks
+`nixos-unstable`, with no revision written in the flake: `flake.lock` records the revision actually
+resolved, and `nix flake update` advances it.
 
 ```sh
 nix develop -c lake build          # the library, the theory, and every harness below
@@ -48,7 +50,14 @@ nix develop -c lake build          # the library, the theory, and every harness 
 nix develop -c lake exe spike      # measure Lean's current scheduler
 nix develop -c lake exe wakerspike # the Task-as-waker bridge
 nix develop -c lake exe controls   # runtime controls for the bridge axioms
+
+nix fmt                            # treefmt over nix, shell, markdown and TOML
 ```
+
+`nix fmt` runs treefmt: `nixfmt`, `deadnix` and `statix` on Nix, `shfmt` and `shellcheck` on shell,
+`mdformat` on Markdown, `taplo` on TOML. `nix flake check` runs the same configuration as a check.
+Lean sources are the one file type treefmt does not cover — neither treefmt-nix nor nixpkgs ships a
+Lean formatter.
 
 `lake build` also prints the `#print axioms` audit from `LeanIn/Theory/Bridge.lean`, which reports
 what the model's theorems rest on — currently only Lean's built-in `propext` and `Quot.sound`.

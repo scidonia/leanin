@@ -5,7 +5,7 @@ Settled decisions and the evidence each rests on. Evidence anchors are in
 we are taking) and [`evidence.md`](evidence.md) (measurements). Two decisions are still open; they are
 at the bottom and nothing downstream should be treated as fixed until they close.
 
----
+______________________________________________________________________
 
 ## Settled
 
@@ -128,7 +128,7 @@ Everything the scheduler may trust is enumerated, and anything not on the list i
 **Deliberately excluded.** Atomics (not exposed). `IO.Promise` (Mutex+Condvar covers it, so it stays
 out of the TCB). Thread creation (v1 runs on the caller's thread; D2). `IO.Ref` — see O1.
 
----
+______________________________________________________________________
 
 ## Closed after M0
 
@@ -236,7 +236,7 @@ which D3 already places in the TCB. So A6 as a raw `pthread_create` axiom is *st
 That holds only as long as the blocking pool is built on `Task` rather than spawning threads itself;
 if it ever spawns its own, A6 joins v1's axiom set.
 
----
+______________________________________________________________________
 
 ### D12 — `List` is the *specification*; a ring buffer is the *container*.
 
@@ -285,7 +285,7 @@ See M2b in [`PLAN.md`](../PLAN.md).
 **Consequence for the plan.** `Ring` is a pure, provable obligation and belongs *before* M3's
 concurrency, since the concurrent queue is a `Ring` under a mutex. It is scheduled as **M2b**.
 
----
+______________________________________________________________________
 
 ## Open
 
