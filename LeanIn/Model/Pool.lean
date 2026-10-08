@@ -118,9 +118,24 @@ def Pool.submit (p : Pool α) (x : α) : Pool α :=
   if p.ring.length < p.cap then
     { p with ring := p.ring ++ [x], pushed := p.pushed + 1 }
   else
-    { p with ring   := p.ring.drop (p.ring.length / 2) ++ [x],
-             inject := p.inject ++ p.ring.take (p.ring.length / 2),
+    { p with ring   := p.ring.take (p.ring.length / 2) ++ [x],
+             inject := p.inject ++ p.ring.drop (p.ring.length / 2),
              pushed := p.pushed + 1 }
+
+/-! ### What the overflow keeps, and what it evicts
+
+The two halves are not interchangeable, and `queue.rs:295` gives the reason: intake places work in the
+*first* half of the ring, so a task found in the *second* half is provably not one just intaken — "at
+least not until after we have polled it at least once". That is only true if the *second* half is what
+gets evicted, which is what these two examples pin. -/
+
+/-- The ring keeps the older half, plus the new task. -/
+example : (({(emptyPool Nat) with cap := 4, ring := [0, 1, 2, 3]}).submit 4).ring = [0, 1, 4] := by
+  decide
+
+/-- The newer half is what leaves for `inject`. -/
+example : (({(emptyPool Nat) with cap := 4, ring := [0, 1, 2, 3]}).submit 4).inject = [2, 3] := by
+  decide
 
 /-! ### The conservation law -/
 
@@ -193,11 +208,9 @@ theorem submit_bounded {p : Pool α} {x : α} (hb : p.Bounded) (hcap : 2 ≤ p.c
     omega
   · simp only [hc, ite_false, List.length_append, List.length_singleton]
     have hb' : p.ring.length ≤ p.cap := hb
-    have hsum := length_take_add_drop p.ring (p.ring.length / 2)
     have hdiv : p.ring.length / 2 ≤ p.ring.length := Nat.div_le_self _ _
-    have htake : 1 ≤ (p.ring.take (p.ring.length / 2)).length := by
+    have htake : (p.ring.take (p.ring.length / 2)).length = p.ring.length / 2 := by
       rw [List.length_take, Nat.min_eq_left hdiv]
-      omega
     omega
 
 /-! ### No work is stranded -/
