@@ -3,7 +3,9 @@
 Behaviour checks for the bridge contracts in `LeanIn/Theory/Bridge.lean`, driven at the public boundary —
 the `Std` primitives — and checked against records the carriers themselves emit.
 
-    nix develop -c bash tests/bridge-contract.sh BT1     # or BT2, BT3
+```
+nix develop -c bash tests/bridge-contract.sh BT1     # or BT2, BT3
+```
 
 Records come from `lake exe bridgecontrols`, the public executable for bridge observations. Running that
 with no argument runs every trace in sequence. Each scenario's checker is exercised in the same invocation
