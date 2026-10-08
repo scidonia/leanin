@@ -19,9 +19,12 @@ Three transactions, and the projection that makes them comparable:
 | `park` | unchanged | `Sched.park`, refused while work is held |
 
 `Aligned` -- the scheduler's work count and the pool's held work being one quantity -- is what `take`'s two
-halves must not come apart through. **Its preservation is owed, not proved**: the transactions below are
-*written* to respect it, and nothing yet checks that they do. It is the same equation
-`tests/ModelOracle.lean` checks after every step of its script, which is where the check currently lives.
+halves must not come apart through. **Its preservation is proved**, one theorem per transaction below: a
+tick, a submit, a spawn and a take. Those four are the whole of what a transaction can do to the pair — the
+two pool operations that add work, the one that removes it, and the allowance refresh that moves neither
+side — and the proofs are the pool's own count laws applied to the scheduler's two counters.
+`tests/ModelOracle.lean` checks the same equation after every step of its script, which is where it is
+observed rather than proved.
 
 `Executor.work` is one step of a worker — take work, or park until there is some — and the carrier loop is
 that step run until `none`. The records and the driver that emits them are not here.
@@ -135,16 +138,51 @@ theorem Aligned.tick (st : State α cap) (h : st.Aligned) : ({ st with pool := s
   unfold Pool.tick at ⊢
   omega
 
-omit [Inhabited α] in
-theorem Aligned.submit_of_room (st : State α cap) (h : st.Aligned) (x : α)
-    (hroom : st.pool.ring.size < cap) :
+/-- **A submission keeps the alignment.** The pool holds one more and the scheduler records one more, so
+the two sides move together — with room or on a full ring, since the eviction is a move. -/
+theorem Aligned.submit (st : State α cap) (h : st.Aligned) (x : α) (hw : st.pool.ring.WF)
+    (hcap : 0 < cap) :
     ({ st with pool := st.pool.submit x, sched := st.sched.enqueue } : State α cap).Aligned := by
   have hp : (st.pool.submit x).inFlight = st.pool.inFlight + 1 :=
-    inFlight_submit_of_room st.pool x hroom
+    inFlight_submit st.pool x hw hcap
   unfold State.Aligned at h ⊢
   show (st.sched.enqueue).work = (st.pool.submit x).inFlight
   rw [hp]
   simp only [Scheduler.enqueue]
+  omega
+
+/-- **A spawn keeps the alignment.** The slot write and the enqueue are the same pair of moves a submission
+makes — the pool holds one more, the scheduler records one more — so the same proof does the work. -/
+theorem Aligned.spawn (st : State α cap) (h : st.Aligned) (x : α) (hw : st.pool.ring.WF)
+    (hcap : 0 < cap) :
+    ({ st with pool := st.pool.spawn x, sched := st.sched.enqueue } : State α cap).Aligned := by
+  have hp : (st.pool.spawn x).inFlight = st.pool.inFlight + 1 :=
+    spawn_inFlight st.pool x hw hcap
+  unfold State.Aligned at h ⊢
+  show (st.sched.enqueue).work = (st.pool.spawn x).inFlight
+  rw [hp]
+  simp only [Scheduler.enqueue]
+  omega
+
+/-- **A take keeps the alignment.** The pool holds one fewer and the scheduler's count drops by one, which
+is the same move — and this is the transaction `Executor.take`, `Executor.takeReport` and the `k` of
+`Executor.work` each perform, in one critical section per call. A scheduler that refused leaves the pool as
+it was, which is no transaction at all and needs no theorem. -/
+theorem Aligned.takeReport (st : State α cap) (h : st.Aligned) (hw : st.pool.ring.WF)
+    (s' : Scheduler) (hr : (st.pool.takeReport).item.isSome) (hs : st.sched.take = some s') :
+    ({ st with pool := (st.pool.takeReport).pool, sched := s' } : State α cap).Aligned := by
+  have hp : ((st.pool.takeReport).pool).inFlight + 1 = st.pool.inFlight :=
+    takeReport_inFlight st.pool hw hr
+  -- The scheduler's count is the one it just removed.
+  have hs' : s' = { st.sched with work := st.sched.work - 1 } := by
+    rw [Scheduler.take] at hs
+    split at hs
+    · exact (Option.some.inj hs).symm
+    · exact absurd hs (by simp)
+  unfold State.Aligned at h
+  show s'.work = ((st.pool.takeReport).pool).inFlight
+  rw [hs']
+  dsimp only
   omega
 
 /-- **One step of a worker: take work, or park until there is some.** The predicate is re-checked under

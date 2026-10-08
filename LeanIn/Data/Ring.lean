@@ -123,6 +123,16 @@ theorem slot_ne {cap head i j : Nat} (hcap : 0 < cap) (hij : i < j) (hj : j < ca
 
 /-! ### The laws tying the container to the spec -/
 
+/-- A fresh ring's ghost view is empty. -/
+theorem emptyRing_toList (cap : Nat) : (emptyRing α cap).toList = [] := by
+  simp [emptyRing, Ring.toList]
+
+/-- A fresh ring is well-formed: `cap` empty slots and nothing live. -/
+theorem emptyRing_wf (cap : Nat) : (emptyRing α cap).WF := by
+  refine ⟨by simp [emptyRing], by simp [emptyRing], ?_⟩
+  intro i hi
+  exact (Nat.not_lt_zero i hi).elim
+
 theorem push_toList (r : Ring α cap) (x : α) (hw : r.WF) (hroom : r.size < cap) :
     (r.push x).toList = r.toList ++ [x] := by
   have hcap : 0 < cap := Nat.lt_of_le_of_lt (Nat.zero_le _) hroom
@@ -256,6 +266,104 @@ theorem pop_wf (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).2.WF 
         simp only [Array.getElem?_setIfInBounds_ne hne]
         exact hw.2.2 (i + 1) (by omega)
 
+/-! ### Draining
+
+A ring can only pop its front, so emptying it means popping `size` times. `drain` is that loop, and the
+read-out is exactly the ghost view — which is what lets the pool's overflow be a *move* of the newer half to
+`inject` rather than a rearrangement. The two laws below are the inverse pair the overflow needs: reading the
+list out reproduces it, and pushing a list back reproduces it. -/
+
+/-- One pop, appended: the drain's step. The index argument belongs to the loop, not the container. -/
+def drainStep (acc : List α × Ring α cap) : List α × Ring α cap :=
+  match acc.2.pop with
+  | (some x, r') => (acc.1 ++ [x], r')
+  | (none, _)    => acc
+
+/-- The drain's loop from a fresh accumulator, named so its two laws are stated once. -/
+def Ring.drainLoop (r : Ring α cap) (n : Nat) : List α × Ring α cap :=
+  (List.range n).foldl (fun acc (_ : Nat) => drainStep acc) ([], r)
+
+/-- **Drain the ring's live elements, oldest first.** Reading them all out is how the *newer* half of a
+full ring is evicted: the container can only pop the front, so evicting the back means reading the whole
+ring out and pushing the front back. -/
+def Ring.drain (r : Ring α cap) : List α × Ring α cap := r.drainLoop r.size
+
+/-- A pop that returned an element had one: the `none` arms only run on an empty ring. -/
+theorem pop_isSome_size {r : Ring α cap} (h : (r.pop).1.isSome) : 0 < r.size := by
+  unfold Ring.pop at h
+  split at h
+  · assumption
+  · simp at h
+
+/-- **The drain's invariant**: what has been read out and what is left partition the ghost view, and the
+ring left behind holds the rest. The partition is an append rather than an explicit `take`/`drop` pair,
+because appending is what the step actually does. -/
+theorem drainLoop_inv (r : Ring α cap) (hw : r.WF) :
+    ∀ n, n ≤ r.size →
+      (r.drainLoop n).1 ++ (r.drainLoop n).2.toList = r.toList ∧
+      (r.drainLoop n).2.size + n = r.size ∧
+      (r.drainLoop n).2.WF := by
+  intro n
+  induction n with
+  | zero => intro _; exact ⟨by simp [Ring.drainLoop], by simp [Ring.drainLoop], hw⟩
+  | succ k ih =>
+    intro hk
+    obtain ⟨h1, h2, h3⟩ := ih (by omega)
+    have hpos : 0 < (r.drainLoop k).2.size := by omega
+    obtain ⟨x, hx, hlist⟩ := pop_toList (r.drainLoop k).2 h3 hpos
+    -- The step, on a ring that has something to pop: `drainStep`'s `none` arms cannot run here.
+    have hpop : (r.drainLoop k).2.pop = (some x, ((r.drainLoop k).2.pop).2) :=
+      Prod.ext_iff.mpr ⟨hx, rfl⟩
+    have hstep : r.drainLoop (k + 1) = ((r.drainLoop k).1 ++ [x], ((r.drainLoop k).2.pop).2) := by
+      have hfold : r.drainLoop (k + 1) = drainStep (r.drainLoop k) := by
+        simp [Ring.drainLoop, List.range_succ, List.foldl_append]
+      rw [hfold, drainStep, hpop]
+    have hps := pop_size (r.drainLoop k).2 h3 hpos
+    rw [hstep]
+    refine ⟨?_, ?_, pop_wf (r.drainLoop k).2 h3 hpos⟩
+    · rw [List.append_assoc]
+      simp only [List.cons_append, List.nil_append]
+      rw [← hlist]
+      exact h1
+    · dsimp only
+      omega
+
+/-- **The read-out is the ghost view.** The overflow's `take`/`drop` split is applied to this list, which is
+why the implementation's eviction is the model's halving rather than a rearrangement of its own. -/
+theorem drain_toList (r : Ring α cap) (hw : r.WF) : r.drain.1 = r.toList := by
+  obtain ⟨h1, h2, -⟩ := drainLoop_inv r hw r.size (Nat.le_refl _)
+  have hnil : (r.drainLoop r.size).2.toList = [] := by
+    have hl := toList_length (r.drainLoop r.size).2
+    have h0 : (r.drainLoop r.size).2.size = 0 := by omega
+    rw [h0] at hl
+    exact List.eq_nil_of_length_eq_zero hl
+  rw [hnil, List.append_nil] at h1
+  simpa [Ring.drain] using h1
+
+/-- **Pushing a list back reproduces it.** The inverse of `drain_toList`, stated from an arbitrary ring so
+that the refill's own induction goes through: the ghost view of the refilled ring is the ghost view it
+started from, followed by the list. -/
+theorem foldl_push_toList (l : List α) (r : Ring α cap) (hw : r.WF) (hroom : r.size + l.length ≤ cap) :
+    (l.foldl (fun (r : Ring α cap) y => r.push y) r).toList = r.toList ++ l ∧
+    (l.foldl (fun (r : Ring α cap) y => r.push y) r).WF ∧
+    (l.foldl (fun (r : Ring α cap) y => r.push y) r).size = r.size + l.length := by
+  induction l generalizing r with
+  | nil => exact ⟨by simp, hw, by simp⟩
+  | cons y ys ih =>
+    rw [List.foldl_cons]
+    have hlen : (y :: ys).length = ys.length + 1 := rfl
+    have hroom1 : r.size < cap := by rw [hlen] at hroom; omega
+    have hroom2 : (r.push y).size + ys.length ≤ cap := by
+      show r.size + 1 + ys.length ≤ cap
+      omega
+    obtain ⟨ih1, ih2, ih3⟩ := ih (r.push y) (push_wf r y hw hroom1) hroom2
+    refine ⟨?_, ih2, ?_⟩
+    · rw [ih1, push_toList r y hw hroom1]
+      simp [List.append_assoc]
+    · rw [ih3]
+      show r.size + 1 + ys.length = r.size + (ys.length + 1)
+      omega
+
 /-! ### Vacuity and the audit
 
 `WF` must be shown to **distinguish**, or the laws above could be true of nothing. The checks below
@@ -263,10 +371,7 @@ use defeq coercion rather than `simp`: `(emptyRing Nat 4).size` reduces to `0` d
 is not a `simp` target, which is what defeated three earlier attempts. -/
 
 /-- A fresh ring is well-formed. -/
-example : (emptyRing Nat 4).WF := by
-  refine ⟨by simp [emptyRing], by simp [emptyRing], ?_⟩
-  intro i hi
-  exact (Nat.not_lt_zero i hi).elim
+example : (emptyRing Nat 4).WF := emptyRing_wf 4
 
 /-- …and a ring whose live count exceeds its capacity is **not**, so `WF` is not true of everything. -/
 example : ¬ (Ring.WF (α := Nat) (cap := 4) ⟨Array.replicate 4 none, 0, 5⟩) := by
@@ -293,5 +398,7 @@ example : (Ring.pop (Ring.push (emptyRing Nat 4) 7)).1.isSome := by
 #print axioms LeanIn.pop_toList
 #print axioms LeanIn.push_wf
 #print axioms LeanIn.pop_wf
+#print axioms LeanIn.drain_toList
+#print axioms LeanIn.foldl_push_toList
 
 end LeanIn

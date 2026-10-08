@@ -14,9 +14,11 @@ The ring is `LeanIn.Data.Ring` (M2b) rather than a `List`, because the model's `
 elements, oldest first — so `push` is the back-append and `pop` the front-take.
 
 Two things are deliberately not here. The wake protocol lives in `Scheduler`, and the script driver that
-produces the executor's records lives with the client. What *is* owed and stated where it is owed: the
-commutation fact for the overflow, which needs a drain-and-refill lemma this container does not yet have,
-and is therefore carried as an example rather than a theorem.
+produces the executor's records lives with the client. The overflow's commutation, by contrast, is here and
+unconditional: `Ring.drain`'s read-out is the ring's own ghost view, so the halves this implementation keeps
+and evicts are the model's `take` and `drop` of its list, and refilling the kept half reproduces it.
+`toModel_toRing` states that, and `toModel_submit` and `toModel_spawn` apply it to the two operations that
+place work.
 -/
 
 namespace LeanIn.Sched
@@ -137,16 +139,6 @@ def Pool.take (p : Pool α cap) : Option α × Pool α cap :=
 /-- A tick: the LIFO allowance refreshes. -/
 def Pool.tick (p : Pool α cap) : Pool α cap := { p with lifoPolls := 0 }
 
-/-- Drain the ring's live elements, oldest first. The container can only pop the front, so evicting the
-**newer** half of a full ring means reading them all out and pushing the older half back. -/
-def _root_.LeanIn.Ring.drain (r : Ring α cap) : List α × Ring α cap :=
-  (List.range r.size).foldl
-    (fun (acc : List α × Ring α cap) _ =>
-      match acc.2.pop with
-      | (some x, r') => (acc.1 ++ [x], r')
-      | (none, _)    => acc)
-    ([], r)
-
 /-- **Where a task goes when it joins the ring** — the implementation's `Model.Pool.toRing`. Append at the
 back if there is room. Otherwise the *newer* half leaves for `inject` and the *older* half stays with the new
 task: intake places work in the first half, so anything found in the second is provably not freshly intaken.
@@ -179,9 +171,10 @@ def Pool.spawn (p : Pool α cap) (x : α) : Pool α cap :=
 
 /-! ### Agreement with the specification
 
-The first three obligations of `interface.md` §6's refinement, stated against `toModel`. The overflow's
-commutation is not here: it is stated over `Ring.drain`'s read-out-and-refill, and the lemma tying that to
-`take`/`drop` does not exist yet. -/
+The obligations of `interface.md` §6 that this file owns, stated against `toModel`: the accounting, a tick,
+and the two operations that place work — each for the full ring as much as for one with room. What makes the
+full cases go through is the container's own pair of laws, `drain_toList` and `foldl_push_toList`: the
+eviction is the model's halving of the ghost view rather than a rearrangement free to disagree with it. -/
 
 /-- **The accounting agrees.** `inFlight` reads the container's `size`; the model reads its list's length.
 `toList_length` is what makes those the same quantity rather than two counters that happen to move together. -/
@@ -193,43 +186,70 @@ theorem toModel_inFlight (p : Pool α cap) : p.inFlight = p.toModel.inFlight := 
 theorem toModel_tick (p : Pool α cap) : (p.tick).toModel = (p.toModel).tick := by
   simp [Pool.tick, Pool.toModel, Model.Pool.tick]
 
-omit [Inhabited α] in
-/-- **Submission with room holds one more item.** `Ring.push` moves `size` and nothing else, so the
-accounting follows without any invariant — no `Consistent` hypothesis, because nothing is *removed*. -/
-theorem inFlight_submit_of_room (p : Pool α cap) (x : α) (hroom : p.ring.size < cap) :
-    (p.submit x).inFlight = p.inFlight + 1 := by
-  by_cases h : p.ring.size < cap
-  · simp only [Pool.submit, Pool.toRing, ite_eq_left h, Pool.inFlight, Ring.push]
-    omega
-  · exact absurd hroom h
 
+/-- **Placement commutes with the specification, room or not.**
 
-/-- **Placement agrees, while the ring has room.** Both sides append the task at the back of the ring, and
-`push_toList` is the whole of the ring's part. The full ring is the owed drain-and-refill lemma named above;
-this case deliberately does not need it. -/
-theorem toModel_toRing_of_room (p : Pool α cap) (x : α)
-    (hw : p.ring.WF) (hroom : p.ring.size < cap) :
+With room, both sides append at the back and `push_toList` is the whole of the ring's part. The full ring is
+the case that needs the container's laws: `Ring.drain`'s read-out *is* the ghost view, so the halves the
+implementation keeps and evicts are the model's own `take` and `drop` of its list, and refilling the kept
+half reproduces it. That is what makes the eviction a *move* of the newer half to `inject` rather than a
+rearrangement free to disagree with the model about which half crosses.
+
+`cap` must be positive: at `cap = 0` the ring is always full and `push` would write out of bounds while the
+model still appended, so the two would genuinely differ. -/
+theorem toModel_toRing (p : Pool α cap) (x : α) (hw : p.ring.WF) (hcap : 0 < cap) :
     (p.toRing x).toModel = (p.toModel).toRing x := by
   have hlen := toList_length p.ring
-  -- The model's room test reads its own ring's length and its own `cap`; `hlen` and `hroom` are what make
-  -- those the implementation's `size` and `cap`, so `simp` discharges it without being told.
-  simp [Pool.toRing, Pool.toModel, Model.Pool.toRing,
-        hroom, hlen, push_toList p.ring x hw hroom]
+  by_cases hroom : p.ring.size < cap
+  · -- The model's room test reads its own ring's length and its own `cap`; `hlen` and `hroom` are what make
+    -- those the implementation's `size` and `cap`, so `simp` discharges it without being told.
+    simp [Pool.toRing, Pool.toModel, Model.Pool.toRing, hroom, hlen,
+          push_toList p.ring x hw hroom]
+  · -- Full: read the ring out, keep the older half, evict the newer one, and place the task.
+    have hle : p.ring.size ≤ cap := hw.2.1
+    have hsize : p.ring.size = cap := by omega
+    have hread : p.ring.drain.1 = p.ring.toList := drain_toList p.ring hw
+    -- The kept half leaves room: the ring is full, so half of it is strictly below capacity.
+    have hkeep_len : (p.ring.drain.1.take (p.ring.size / 2)).length ≤ p.ring.size / 2 := by
+      rw [hread, List.length_take]; exact Nat.min_le_left _ _
+    have hhalf_lt : p.ring.size / 2 < cap := by
+      rw [hsize]; exact Nat.div_lt_self hcap (by decide)
+    have hfill := foldl_push_toList (p.ring.drain.1.take (p.ring.size / 2)) (emptyRing α cap)
+      (emptyRing_wf (α := α) cap) (by have := hkeep_len; simp [emptyRing]; omega)
+    have hroom_push : (p.ring.drain.1.take (p.ring.size / 2)).length < cap := by omega
+    -- …so the refill has room as well, which is what the final push needs.
+    have hroom_refill : ((p.ring.drain.1.take (p.ring.size / 2)).foldl
+        (fun (r : Ring α cap) y => r.push y) (emptyRing α cap)).size < cap := by
+      rw [hfill.2.2]
+      simp only [emptyRing]
+      omega
+    -- The refilled and pushed ring reads back as the kept half plus the new task…
+    have hring : (((p.ring.drain.1.take (p.ring.size / 2)).foldl
+          (fun (r : Ring α cap) y => r.push y) (emptyRing α cap)).push x).toList
+        = (p.ring.toList.take (p.ring.size / 2)) ++ [x] := by
+      rw [push_toList _ x hfill.2.1 hroom_refill, hfill.1, emptyRing_toList, List.nil_append, ← hread]
+    -- …and `inject` keeps everything the ring dropped, in the same order.
+    have hinject : p.inject ++ p.ring.drain.1.drop (p.ring.size / 2)
+        = p.inject ++ (p.ring.toList.drop (p.ring.size / 2)) := by rw [hread]
+    simp [Pool.toRing, Pool.toModel, Model.Pool.toRing, hroom, hlen]
+    -- What is left is the two fields the eviction writes, with the drain's read-out still in them: one
+    -- rewrite of `hread` puts the ghost view in its place, and then it is `hring` and reflexivity.
+    rw [hread] at hring
+    rw [hread]
+    exact ⟨hring, rfl⟩
 
-/-- **Submission with room.** The ring has space, so both sides append at the back and count the push.
-This is the `Impl.push ⊑ Model.push` case that needs no eviction. -/
-theorem toModel_submit_of_room (p : Pool α cap) (x : α)
-    (hw : p.ring.WF) (hroom : p.ring.size < cap) :
+/-- **Submission agrees, full ring included.** `submit` is the placement rule plus its count, and the count
+is the same on both sides, so this is `toModel_toRing` with one field moved. -/
+theorem toModel_submit (p : Pool α cap) (x : α) (hw : p.ring.WF) (hcap : 0 < cap) :
     (p.submit x).toModel = (p.toModel).submit x := by
-  have hlen := toList_length p.ring
-  simp [Pool.submit, Pool.toRing, Pool.toModel, Model.Pool.submit, Model.Pool.toRing,
-        hroom, hlen, push_toList p.ring x hw hroom]
+  have hstep : (p.submit x).toModel = { (p.toRing x).toModel with pushed := p.pushed + 1 } := rfl
+  rw [hstep, Model.Pool.submit, ← toModel_toRing p x hw hcap]
+  rfl
 
-/-- **Spawning agrees, while the ring has room.** Both sides write the slot, and the displaced task takes
-the same placement path — `toModel_toRing_of_room` is what carries it across. The full ring is the same owed
-lemma as `submit`'s overflow. -/
-theorem toModel_spawn_of_room (p : Pool α cap) (x : α)
-    (hw : p.ring.WF) (hroom : p.ring.size < cap) :
+/-- **Spawning agrees, full ring included.** Both sides write the slot, and the task the spawn displaces
+takes the same placement path — `toModel_toRing` is what carries it across, for a full ring as much as for an
+empty one. -/
+theorem toModel_spawn (p : Pool α cap) (x : α) (hw : p.ring.WF) (hcap : 0 < cap) :
     (p.spawn x).toModel = (p.toModel).spawn x := by
   cases h : p.lifo with
   | none =>
@@ -242,9 +262,122 @@ theorem toModel_spawn_of_room (p : Pool α cap) (x : α)
     unfold Pool.spawn Model.Pool.spawn
     rw [h, hl]
     simp only []
-    rw [show (p.toModel).toRing y = (p.toRing y).toModel from
-          (toModel_toRing_of_room p y hw hroom).symm]
+    rw [show (p.toModel).toRing y = (p.toRing y).toModel from (toModel_toRing p y hw hcap).symm]
     -- …and `toModel` reads that state field by field, so the two sides are the same value.
     rfl
+
+/-! ### The count companions
+
+`Aligned` relates the scheduler's work count to `inFlight`, so what the executor's transactions need from the
+pool is not where an item came from but that the count moved by exactly one. These are those statements, for
+the three ways the pool's own count moves. -/
+
+omit [Inhabited α] in
+/-- The placement rule writes the ring and `inject`, and nothing else: a field it does not write reads
+through it unchanged. -/
+theorem toRing_lifo (p : Pool α cap) (x : α) : (p.toRing x).lifo = p.lifo := by
+  unfold Pool.toRing
+  split <;> rfl
+
+/-- **Placement holds one more item.** With room the ring appends; when full it moves the newer half to
+`inject` and appends. Either way exactly one more is held, because the eviction is a *move*.
+
+The arithmetic is done on the specification's side, where the ring is a list: this is `toModel_inFlight`
+twice and `toModel_toRing`, which is why the full ring needs nothing more here than the drain's read-out
+already gives. -/
+theorem toRing_inFlight (p : Pool α cap) (x : α) (hw : p.ring.WF) (hcap : 0 < cap) :
+    (p.toRing x).inFlight = p.inFlight + 1 := by
+  rw [toModel_inFlight p, toModel_inFlight (p.toRing x), toModel_toRing p x hw hcap]
+  exact Model.toRing_inFlight (p.toModel) x
+
+/-- **A take off the ring-or-inject path holds one fewer item.** Whichever arm serves it removes exactly
+one, from the ring or from `inject` — the `none` arm is the one that had nothing to remove. -/
+theorem takeFromRing_inFlight (p : Pool α cap) (hw : p.ring.WF)
+    (h : (p.takeFromRing).1.isSome) : (p.takeFromRing).2.inFlight + 1 = p.inFlight := by
+  unfold Pool.takeFromRing at h ⊢
+  cases hp : p.ring.pop with
+  | mk a b =>
+    cases a with
+    | some x =>
+      have hpos : 0 < p.ring.size := by
+        have hsome : (p.ring.pop).1.isSome := by rw [hp]; rfl
+        exact pop_isSome_size hsome
+      have hps : b.size + 1 = p.ring.size := by
+        have h := pop_size p.ring hw hpos
+        rw [hp] at h
+        exact h
+      simp only [Pool.inFlight]
+      omega
+    | none =>
+      cases hi : p.inject with
+      | cons y rest =>
+        have hlen : p.inject.length = rest.length + 1 := by simp [hi]
+        simp only [Pool.inFlight]
+        omega
+      | nil =>
+        -- The ring was empty and `inject` too, so there was nothing for the take to return.
+        have hcontra : ¬ (p.takeFromRing).1.isSome := by simp [Pool.takeFromRing, hp, hi]
+        exact absurd h hcontra
+
+omit [Inhabited α] in
+/-- The flush moves the slot's task into `inject` and changes nothing else — a move, so the count is the
+same. It is only true when the slot really held that task. -/
+theorem flush_inFlight {p : Pool α cap} {x : α} (hl : p.lifo = some x) :
+    ({ p with lifo := none, inject := p.inject ++ [x] } : Pool α cap).inFlight = p.inFlight := by
+  simp_all [Pool.inFlight]
+  omega
+
+/-- **A reported take holds one fewer item**, whichever way the decision went: the slot arm removes the
+slot's task, the queue arms remove one from the ring or `inject`, and the flush moves the slot's task into
+`inject` first — a move, so it changes nothing. -/
+theorem takeReport_inFlight (p : Pool α cap) (hw : p.ring.WF) (h : (p.takeReport).item.isSome) :
+    (p.takeReport).pool.inFlight + 1 = p.inFlight := by
+  by_cases hpolls : p.lifoPolls < p.lifoCap
+  · cases hl : p.lifo with
+    | some x =>
+      simp [Pool.takeReport, Pool.inFlight, hpolls, hl]
+      omega
+    | none =>
+      have h' : (p.takeFromRing).1.isSome := by simpa [Pool.takeReport, hpolls, hl] using h
+      simpa [Pool.takeReport, Pool.inFlight, hpolls, hl] using takeFromRing_inFlight p hw h'
+  · cases hl : p.lifo with
+    | some x =>
+      -- The allowance is spent with the slot occupied: the slot moves to `inject` (the count is unchanged)
+      -- and then the ring-or-inject take removes one. Which pool that is gets identified once, rather than
+      -- unfolded into the arithmetic.
+      have h' : (({ p with lifo := none, inject := p.inject ++ [x] } : Pool α cap).takeFromRing).1.isSome := by
+        simpa [Pool.takeReport, hpolls, hl] using h
+      have hc := takeFromRing_inFlight ({ p with lifo := none, inject := p.inject ++ [x] } : Pool α cap) hw h'
+      have hf := flush_inFlight (p := p) hl
+      have hgoal : (p.takeReport).pool
+          = ({ p with lifo := none, inject := p.inject ++ [x] } : Pool α cap).takeFromRing.2 := by
+        simp [Pool.takeReport, hpolls, hl]
+      rw [hgoal]
+      omega
+    | none =>
+      have h' : (p.takeFromRing).1.isSome := by simpa [Pool.takeReport, hpolls, hl] using h
+      have hgoal : (p.takeReport).pool = (p.takeFromRing).2 := by
+        simp [Pool.takeReport, hpolls, hl]
+      rw [hgoal]
+      exact takeFromRing_inFlight p hw h'
+
+/-- **Submission holds one more item**, full ring included. -/
+theorem inFlight_submit (p : Pool α cap) (x : α) (hw : p.ring.WF) (hcap : 0 < cap) :
+    (p.submit x).inFlight = p.inFlight + 1 := by
+  have h : (p.submit x).inFlight = (p.toRing x).inFlight := rfl
+  rw [h, toRing_inFlight p x hw hcap]
+
+/-- **A spawn holds one more item.** The slot is written either way, and the task it displaced is placed
+rather than dropped. -/
+theorem spawn_inFlight (p : Pool α cap) (x : α) (hw : p.ring.WF) (hcap : 0 < cap) :
+    (p.spawn x).inFlight = p.inFlight + 1 := by
+  cases hl : p.lifo with
+  | none =>
+    simp [Pool.spawn, Pool.inFlight, hl]
+    omega
+  | some y =>
+    have hring := toRing_inFlight p y hw hcap
+    simp [Pool.spawn, Pool.inFlight, hl, toRing_lifo] at hring ⊢
+    omega
 
 end LeanIn.Sched

@@ -279,6 +279,16 @@ theorem toRing_bounded {p : Pool α} {x : α} (hb : p.Bounded) (hcap : 2 ≤ p.c
       rw [List.length_take, Nat.min_eq_left hdiv]
     omega
 
+/-- **The placement rule holds one more item**: the halves partition the ring and the new task is added, so
+the count grows by exactly one. -/
+theorem toRing_inFlight (p : Pool α) (x : α) : (p.toRing x).inFlight = p.inFlight + 1 := by
+  have h := toRing_len p x
+  have hl : (p.toRing x).lifo = p.lifo := by
+    unfold Pool.toRing
+    split <;> rfl
+  simp only [Pool.inFlight, hl]
+  omega
+
 theorem submit_bounded {p : Pool α} {x : α} (hb : p.Bounded) (hcap : 2 ≤ p.cap) :
     (p.submit x).Bounded := by
   unfold Pool.submit Pool.toRing Pool.Bounded
@@ -397,6 +407,7 @@ a proof that depended on one would be circular. `#print axioms` is the check. -/
 #print axioms LeanIn.Model.submit_conserves
 #print axioms LeanIn.Model.submit_bounded
 #print axioms LeanIn.Model.toRing_len
+#print axioms LeanIn.Model.toRing_inFlight
 #print axioms LeanIn.Model.spawn_conserves
 #print axioms LeanIn.Model.spawn_bounded
 #print axioms LeanIn.Model.take_conserves
