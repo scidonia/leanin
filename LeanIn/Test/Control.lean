@@ -1,5 +1,6 @@
 import Std
 import LeanIn.Sched.Basic
+import LeanIn.Sched.Executor
 
 /-!
 # Runtime controls for the bridge axioms
@@ -204,6 +205,54 @@ def executorSingle : IO UInt32 := do
   IO.println s!"exec|single|caller={callerTid}|body={← bodyTid.get}|sibling={← siblingTid.get}|waker={← wakerTid.get}|result={v}|order={String.intercalate "," order}"
   return 0
 
+/-- **SC3 — the executor's operation records against the pure model's.**
+
+The script is `tests/ModelOracle.lean`'s, repeated here because that oracle is a fixture outside the library
+and cannot be imported; the fixture checks that both sides produce the same number of records, and it is
+nine. Each outcome is *computed* from the executor's own state after the transaction, exactly as the oracle's
+is computed from the model's — neither side types an expected answer, so a match is evidence about the
+executor rather than agreement between two copies of a fixture.
+
+`take` advances the pool and the scheduler together or neither, and the record says which: a task with
+`taken<n>`, or `-` with `none`. -/
+inductive TraceOp where
+  | submit (task : Nat)
+  | enqueue (task : Nat)
+  | take
+  | park
+
+/-- The fixed script, position 0 to 8. -/
+def traceScript : List TraceOp :=
+  [.submit 0, .submit 1, .park, .take, .take, .park, .enqueue 2, .take, .take]
+
+def executorTrace : IO UInt32 := do
+  let e ← Sched.Executor.new Nat 256 1
+  let mut pos : Nat := 0
+  for o in traceScript do
+    match o with
+    | .submit t =>
+      e.submit t
+      let st ← e.snapshot
+      IO.println s!"exec|trace|op=submit|pos={pos}|task={t}|out=inflight{st.1.inFlight}"
+    | .enqueue t =>
+      -- An external delivery: the same transaction as a submit, under the name the oracle uses for it.
+      e.submit t
+      let st ← e.snapshot
+      IO.println s!"exec|trace|op=enqueue|pos={pos}|task={t}|out=inflight{st.1.inFlight}"
+    | .take =>
+      let got ← e.take
+      let st ← e.snapshot
+      match got with
+      | some x => IO.println s!"exec|trace|op=take|pos={pos}|task={x}|out=taken{st.1.taken}"
+      | none   => IO.println s!"exec|trace|op=take|pos={pos}|task=-|out=none"
+    | .park =>
+      let granted ← e.park
+      let st ← e.snapshot
+      if granted then IO.println s!"exec|trace|op=park|pos={pos}|task=-|out=parked{st.2.parked}"
+      else IO.println s!"exec|trace|op=park|pos={pos}|task=-|out=none"
+    pos := pos + 1
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -211,6 +260,7 @@ def main (args : List String) : IO UInt32 := do
   IO.println "controls for the bridge axioms"
   match args with
   | "--executor-single" :: _ => return ← executorSingle
+  | "--executor-trace" :: _ => return ← executorTrace
   | _ => pure ()
   IO.println "  A3 (release without ownership) and A6 (thread creation) are not tested — see the header."
   IO.println ""

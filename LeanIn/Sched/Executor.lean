@@ -93,6 +93,7 @@ def Executor.stop (e : Executor α cap) : IO Unit :=
     let st ← get
     set ({ st with sched := st.sched.stop })
 
+omit [Inhabited α] in
 theorem Aligned.submit_of_room (st : State α cap) (h : st.Aligned) (x : α)
     (hroom : st.pool.ring.size < cap) :
     ({ st with pool := st.pool.submit x, sched := st.sched.enqueue } : State α cap).Aligned := by
@@ -103,6 +104,15 @@ theorem Aligned.submit_of_room (st : State α cap) (h : st.Aligned) (x : α)
   rw [hp]
   simp only [Scheduler.enqueue]
   omega
+
+/-- **The whole state as the specification sees it**, for a client that needs more than the two counts:
+`inFlight`, `taken` and `parked` all come from here. Using the projection rather than a bespoke accessor is
+deliberate -- it is the same function the refinement is stated over, so a record read through it cannot
+disagree with the model about what the implementation holds. -/
+def Executor.snapshot (e : Executor α cap) : IO (Model.Pool α × Model.Sched) :=
+  e.state.atomically do
+    let st ← get
+    return st.toModel
 
 /-- What the executor currently holds, for an observer outside the critical section. -/
 def Executor.observe (e : Executor α cap) : IO (Nat × Nat) :=

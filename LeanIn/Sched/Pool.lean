@@ -135,14 +135,16 @@ theorem toModel_inFlight (p : Pool α cap) : p.inFlight = p.toModel.inFlight := 
 theorem toModel_tick (p : Pool α cap) : (p.tick).toModel = (p.toModel).tick := by
   simp [Pool.tick, Pool.toModel, Model.Pool.tick]
 
+omit [Inhabited α] in
 /-- **Submission with room holds one more item.** `Ring.push` moves `size` and nothing else, so the
 accounting follows without any invariant — no `Consistent` hypothesis, because nothing is *removed*. -/
 theorem inFlight_submit_of_room (p : Pool α cap) (x : α) (hroom : p.ring.size < cap) :
     (p.submit x).inFlight = p.inFlight + 1 := by
   by_cases h : p.ring.size < cap
-  · simp only [Pool.submit, if_pos h, Pool.inFlight, Ring.push]
+  · simp only [Pool.submit, ite_eq_left h, Pool.inFlight, Ring.push]
     omega
   · exact absurd hroom h
+
 
 /-- **Submission with room.** The ring has space, so both sides append at the back and count the push.
 This is the `Impl.push ⊑ Model.push` case that needs no eviction, and `push_toList` is the whole of the
