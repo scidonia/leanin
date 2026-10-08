@@ -95,14 +95,28 @@ axiom unlock_spec {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} :
 The runtime call is the *whole* park-and-resume: it releases the mutex, blocks, and re-acquires before
 returning. So on return the lock is held again.
 
-**Known simplification.** The model's `wait` step covers only the park half (`afterWait` releases and
-enrols the waiter); the resume is a separate `spurious`/notify step. The axiom therefore states only
-the half the caller observes, and the waiter-set bookkeeping across a full park/resume cycle is left
-for the model refinement in M2. This is a real gap in the model, not a gap in the axiom. -/
+**The call spans a path, and the axiom states its endpoints.** To its caller `wait` is one
+operation; in the model it is three steps — park (`afterWait` releases the lock and enrols the waiter),
+resume, re-acquire — which `World.wait_cycle_reachable` exhibits and `World.afterWait_releases` shows
+cannot be collapsed into one, since the model's own `wait` step leaves the lock free.
+
+Both conjuncts are what the *caller* observes on return: it holds the lock again, and it has stopped
+being a waiter. The second is not decoration. Without it nothing downstream could conclude that a
+`wait` had ended, which is the only thing the call is for; and with only the first the axiom is
+satisfied by a world in which the caller is still enrolled — a state no machine can be in, since it
+returned.
+
+**What the refinement still owes, and where it lives.** The model does not *force* the resumed waiter
+to be the thread that re-acquires — `World.reacquisition_is_anyone` shows any thread may take the freed
+lock — so a `wait` obligation must carry that linkage explicitly rather than let the matching endpoint
+stand in for it. That obligation belongs to the refinement of the scheduler's wake and await paths in
+M3, not to the model refinement in M2: M2 closed, and what it delivered was the waiter *list* (enrol and
+de-enrolment), not the cycle. -/
 axiom wait_spec {cv : Std.Condvar} {m : Std.BaseMutex} {w w' : World} {c : CondvarId}
     {l : LockId} {t : Tid} :
     IsCondvar cv w c → IsLock m w l → (w.locks l).owner = some t →
-    Runs t (Std.Condvar.wait cv m) w () w' → (w'.locks l).owner = some t
+    Runs t (Std.Condvar.wait cv m) w () w' →
+    (w'.locks l).owner = some t ∧ t ∉ (w'.condvars c).waiters
 
 /-- **A5 — notification, and its absence of memory.** `lean_io_condvar_notify_one`
 (`mutex.cpp:62`) → `std::condition_variable::notify_one`.
@@ -137,5 +151,8 @@ proving that the model's properties are not assumed. -/
 
 #print axioms LeanIn.notifyOne_no_waiters
 #print axioms LeanIn.reacquisition_while_others_wait
+#print axioms LeanIn.wait_cycle_reachable
+#print axioms LeanIn.afterWait_releases
+#print axioms LeanIn.reacquisition_is_anyone
 
 end LeanIn
