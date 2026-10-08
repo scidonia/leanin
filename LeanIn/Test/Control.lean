@@ -495,6 +495,55 @@ def runtimeTail : IO UInt32 := do
   IO.println s!"dedicat : 10000 dedicated tasks, one thread each, ran in {(t6 - t5) / 1000}us"
   return 0
 
+/-- **Shared mutable state, and what each design has to pay for it.**
+
+Three measurements, because the interesting question is not "who is faster" but "what does the *same* shared
+state cost under each discipline":
+
+* Each side runs the same counter with the strongest discipline its design *requires*: the pool's tasks run on
+  eight threads, so it must hold a mutex; this runtime has one carrier, so a plain `IO.Ref` is already correct
+  and it pays nothing. The final count is printed on both sides, so a lost update would be visible rather than
+  assumed away — and a third measurement shows why the pool cannot drop its lock: a wider window (fewer tasks,
+  more increments each) loses updates without it.
+Not measured here, and deliberately: a task that holds a blocking lock across a yield wedges the carrier, so
+demonstrating it means hanging a process. It is structural rather than empirical — the second task's `lock`
+cannot return, because the only thread that could release it is inside that call — and it belongs in a
+scenario with a watchdog, not in a diagnostic.
+
+Diagnostic: `lake exe controls --runtime-shared`. -/
+def runtimeShared : IO UInt32 := do
+  let n := 10000
+  -- The pool, with the lock its eight threads require.
+  let t0 ← IO.monoNanosNow
+  let m ← Std.Mutex.new (0 : Nat)
+  let ts ← (List.range n).mapM (fun _ => IO.asTask (m.atomically do set ((← get) + 1)) _root_.Task.Priority.default)
+  for t in ts do let _ ← IO.wait t
+  let poolCount ← m.atomically get
+  let t1 ← IO.monoNanosNow
+  -- This runtime, with nothing but a ref: one carrier, so there is nothing to guard against.
+  let r ← IO.mkRef (0 : Nat)
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let body : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO do r.set ((← r.get) + 1)
+  let t2 ← IO.monoNanosNow
+  let _ ← Runtime.run e (do
+    let hs ← (List.range n).mapM (fun _ => LeanIn.Task.Async.spawn body)
+    for h in hs do let _ ← LeanIn.Task.Async.await h
+    pure ())
+  let oursCount ← r.get
+  let t3 ← IO.monoNanosNow
+  IO.println s!"shared  : pool+mutex {(t1 - t0) / 1000}us count={poolCount} / leanin+ref {(t3 - t2) / 1000}us count={oursCount}"
+  -- …and the control for the pool's lock: same shape, wider window, no lock.
+  let wide := 200000
+  let raw ← IO.mkRef (0 : Nat)
+  let ts2 ← (List.range 4).mapM (fun _ => IO.asTask (do
+    for _ in List.range wide do
+      raw.set ((← raw.get) + 1)) _root_.Task.Priority.default)
+  for t in ts2 do let _ ← IO.wait t
+  let rawCount ← raw.get
+  IO.println s!"shared  : pool WITHOUT its lock: {rawCount} of {4 * wide} (lost {4 * wide - rawCount}) — so the lock is not optional there"
+
+  return 0
+
 /-- **SC6 — real work on the runtime, and the thread identities it ran on.**
 
 One carrier: the driver, the spawned child's body, and the continuation that resumed after the external
@@ -658,6 +707,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-threads" :: _ => return ← runtimeThreads
   | "--runtime-bench" :: _ => return ← runtimeBench
   | "--runtime-tail" :: _ => return ← runtimeTail
+  | "--runtime-shared" :: _ => return ← runtimeShared
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"
