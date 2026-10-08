@@ -3,10 +3,12 @@
 A Tokio-inspired concurrency library and work-stealing scheduler for **Lean 4**, with the algorithms
 taken from Tokio's Rust source and machine-checked proofs for the properties that matter.
 
-**Status: planning.** The design decisions are settled (D0–D7 in
-[`docs/decisions.md`](docs/decisions.md)) and the roadmap in [`PLAN.md`](PLAN.md) follows from them.
-Three questions remain open (O1–O3); one of them gates the interface, so no library code has been
-written yet beyond the measurement harness.
+**Status: M2 closed, M3 under way.** D0–D10 are settled and O1–O3 are closed
+([`docs/decisions.md`](docs/decisions.md)). The pure model is implemented and machine-checked
+(`LeanIn/Model/`, `LeanIn/Theory/World.lean`) with an executable probe for its vacuity;
+`LeanIn/Theory/Bridge.lean` states the nine primitive contracts about the native operations, each with a
+control, three of them with native trace scenarios under `tests/`; `LeanIn/Data/Ring.lean` is M2b; and
+M3's first behaviour scenario passes, against a contract written before the code it now checks.
 
 ## Start here
 

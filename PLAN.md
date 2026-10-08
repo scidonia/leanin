@@ -21,9 +21,15 @@ ______________________________________________________________________
 **M0 is complete.** D0–D10 in [`docs/decisions.md`](docs/decisions.md) are all closed — including the
 `Task`-as-waker bridge, which was the last unverified assumption and is now spiked with a passing
 observation ([`evidence.md`](evidence.md) §5). The interface in
-[`docs/interface.md`](docs/interface.md) is therefore freezable, and M1 can start.
+[`docs/interface.md`](docs/interface.md) is freezable, and M1's Lean theory is `LeanIn/Theory/`.
 
-No library code exists yet, by design: the plan is model-first, and the model is M2.
+**M2 is closed and M3 has started**, which is worth saying where this section used to say no library code
+existed. The pure model is implemented and machine-checked — `LeanIn/Model/{Pool,Scheduler}.lean` and
+`LeanIn/Theory/World.lean`, with `lake exe dynamics` probing each contract's hypotheses for vacuity — and
+`LeanIn/Data/Ring.lean` is M2b. `LeanIn/Theory/Bridge.lean` states the nine primitive contracts, each with
+a control; `tests/bridge-contract.sh` runs three native scenarios against them; and M3's spine is
+`LeanIn/Sched/Basic.lean`, whose first scenario `tests/executor-contract.sh SC1` passes against a contract
+written before the code it now checks.
 
 Two findings did the shaping, and both were surprises:
 
