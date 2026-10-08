@@ -382,7 +382,10 @@ def runtimeBench : IO UInt32 := do
   let k := 5
   IO.println s!"runtime bench: {n} tasks, {blockers} x {d}ms sleep, best of {k}"
 
-  -- Shape 1: `n` independent tasks, each taking the same mutex once, spawned and then joined.
+  -- Shape 1: `n` independent units of work, each taking the same mutex once, spawned and then joined. The
+  -- baseline is Lean's native `Task` at default priority -- a C++ task object pushed to the runtime's worker
+  -- pool and joined with `lean_io_wait` -- which is the fastest unit of scheduled work Lean has, and not the
+  -- same programming model as `Std.Async` or this runtime: its body runs to completion, it cannot yield.
   let stockTiny ← bestMicros k do
     let m ← Std.Mutex.new (0 : Nat)
     let ts ← (List.range n).mapM (fun _ =>
@@ -398,7 +401,7 @@ def runtimeBench : IO UInt32 := do
       for h in hs do let _ ← LeanIn.Task.Async.await h
       pure ())
     pure ()
-  IO.println s!"{n} tasks, spawn+join   : stock pool {stockTiny}us / leanin {oursTiny}us"
+  IO.println s!"{n} tasks, spawn+join   : native Task (default prio) {stockTiny}us / leanin {oursTiny}us"
   -- The native *green* baseline: `Async.block` drives Lean's async runtime on this thread, and `async`/`await`
   -- are its task, so this is the closest analogue of the runtime above rather than of the pool.
   let stockGreen ← bestMicros k do
@@ -570,6 +573,11 @@ def runtimeOps : IO UInt32 := do
   let cv ← Std.Condvar.new
   let notifyNs ← best do for _ in List.range k do cv.notifyOne
   let joinNs ← best do for _ in List.range k do let _ ← LeanIn.Task.Join.new (α := Unit)
+  -- What the "pool" baseline in the benchmark measures, one unit of it: a native `Task` with a trivial body,
+  -- spawned at default priority and joined.
+  let nativeNs ← best do for _ in List.range k do
+    let t ← IO.asTask (pure ()) _root_.Task.Priority.default
+    let _ ← IO.wait t
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1
   let item : LeanIn.Task.Item := ⟨pure ()⟩
   let spawnNs ← best do for _ in List.range k do e.spawn item
@@ -584,7 +592,7 @@ def runtimeOps : IO UInt32 := do
   let steadyNs ← best do for _ in List.range k do
     e4.spawn item
     let _ ← e4.tryTake
-  IO.println s!"ops: ref set/get {refNs}ns | mutex section {mutexNs}ns | notify (nobody parked) {notifyNs}ns"
+  IO.println s!"ops: native Task spawn+join {nativeNs}ns | ref set/get {refNs}ns | mutex section {mutexNs}ns | notify (nobody parked) {notifyNs}ns"
   IO.println s!"ops: Join.new {joinNs}ns | Executor.spawn {spawnNs}ns | Executor.submit {submitNs}ns | Executor.tryTake {workNs}ns | spawn+take (steady) {steadyNs}ns"
   return 0
 
