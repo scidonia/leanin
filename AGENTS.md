@@ -44,8 +44,17 @@
   queue push / `Pool.submit` (FIFO), not the LIFO slot; external
   completion uses inject. All producers go through one internal
   scheduling-destination decision. Check `#print axioms` for each new
-  theorem; no `sorry`, invented serializability axiom or
-  claimed end-to-end Lean-IO theorem substitutes for a proof.
+  theorem, and know what it does not see: an assumption stated as
+  an `opaque` predicate has a hidden value and is not an axiom, so
+  `#print axioms` never names it. Visibility
+  is not content, though: an `axiom` predicate is named and can
+  still say nothing, entailing nothing -- which is how a comment
+  claiming injectivity sat beside a declaration that entailed no
+  such thing, and two runtime objects aliased one model index.
+  Write the proposition you actually need, as a definition with
+  content, and require it where it is used. No `sorry`, invented
+  serializability axiom or claimed end-to-end Lean-IO theorem
+  substitutes for a proof.
   Compare scripted executor records with independently computed
   model records and fail on the first mismatch.
 - After runtime source exists, search implemented `LeanIn/Task`,

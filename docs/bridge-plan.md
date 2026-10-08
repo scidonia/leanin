@@ -6,6 +6,10 @@ records what those statements can and cannot carry, the single decision the rest
 corrections that decision implies, and the larger undertaking that would replace them with a
 machine-checked correspondence.
 
+**Status.** C1, C4, C7 and the method rule C10 are implemented and verified. C6 is half done — its
+composability half holds, its no-aliasing half did not, and C11 is what corrects that. C12 corrects an
+incompleteness in C4. The table records each, and what became of the rest.
+
 It is the second half of a pair. `LeanIn_Bridge_Axioms_Handoff.txt` at the repository root argues for
 an execution contract, written from `Bridge.lean` alone — `World.lean` and the scheduler were not
 available to it, which it says. Its direction is right. This document records which of its requirements
@@ -52,33 +56,91 @@ cannot be taken away during the call, so A1, A2's success case and A4 are safe; 
 taken away, so A3 and the failure case of A2 are not. Under (b) both become correct as written, at the
 cost of an explicit relation between the returned world and `w'`.
 
-**Recommended: (b), with the interval made explicit.** State the operation's own effect over `w'`, and
-state separately how the returned world relates to it — the handoff's "map harmless untracked effects to
-stuttering", and its requirement that environment steps are attributed to the environment. That keeps
-the event statements correct *and* keeps the ability to say what happened in between.
+**Chosen: (b).** The operation's own effect is stated over `w'`; other threads acting during the call
+are separate transitions, and `Step` — a relation over single actions — is where they live. The
+convention is stated once above `Runs` rather than re-derived per axiom.
 
-Everything in the next section is a consequence of this choice. It is worth making it once, in the file,
-in a comment above `Runs`, rather than re-deriving it per axiom.
+**Three of the nine items in the next section retire with that choice**, and it is worth being explicit
+about it, because they were conditions on the reading we rejected rather than defects of the file:
+
+- **C2 and C3 need no statement change.** Under (b) a release *is* `owner = none` in the operation's own
+  post-state, and a failed `tryLock` *is* "no ownership change by this operation". They were corrections
+  to (a), and the reason (a) was rejected is precisely that the returned world cannot carry them.
+- **C5 folds into C8.** Its soundness objection — concurrent enrolment breaking a cardinality bound —
+  was an interval objection. What survives is an *adequacy* question about which episode leaves, which
+  is the episode representation C8 asks for.
+
+The remaining items are the work, and they are independent of each other except where noted.
 
 ## The corrections
 
 Each is small once the decision above is made. None of them requires the programme in the next section.
 
-| # | what | where | the failure it prevents |
+| # | what | where | status |
 |---|---|---|---|
-| C1 | Record the meaning of `w'` for the whole file | `Bridge.lean`, above `Runs` | C2–C5 are otherwise re-litigated per axiom |
-| C2 | State `unlock`'s effect as a release, not as "the returned world is unowned" | `unlock_spec` | another carrier may acquire before the call returns |
-| C3 | Scope A2's failure case to "no ownership change *by this operation*" | `tryLock_spec` | same; a concurrent acquisition changes the returned world |
-| C4 | Record the clock sample, or relate successive ordered reads directly | `clock_spec`, `World` | two reads are related only to a clock that never moves, so no monotonicity — and no budget — is derivable. `Control.controlClock` tests a property the axiom does not state |
-| C5 | Use a membership or episode form for `notifyOne`, not a cardinality bound | `notifyOne_spec` | two concurrent enrolments during the call interval break `length ≤ length + 1`, and cardinality says nothing about *which* episode left |
-| C6 | Make the object correspondence a stable per-object map, and have every axiom re-establish it | `Bridge.lean`, `World` | No conclusion in the file mentions `IsLock`, so after any call you no longer know that `m` is the lock at `l`. **The axioms are not composable**: no multi-step refinement can be built from them today. This is why nothing downstream consumes them |
-| C7 | Name the actors: a native carrier or waker thread, as against a green task | `World`, `Bridge` | `abbrev Tid := Nat` carries no meaning. Ownership of `Std.BaseMutex` and `Std.Condvar` is native-thread-level — `WakerSpike`'s `inboxPush` takes the same mutex from a pool worker — and no green task owns a mutex. The handoff's `CarrierId` is the right distinction |
-| C8 | Model waiters as a set or as episodes, with the invariant stated | `World` | duplicates are representable and have already cost one defect: `afterSpurious` used `List.erase`, which removes only the first occurrence, so a doubly-enrolled thread that woke spuriously stayed a waiter |
-| C9 | Say whether any claim depends on data read under the lock | `Bridge`, `docs/interface.md` | ownership fields do not establish visibility; the model tracks owners and waiters, not memory contents |
+| **C1** | State what `w'` denotes, once, for the whole file | `Bridge.lean`, above `Runs` | **done** — (b), with the reason (a) was rejected recorded there |
+| **C4** | Record the clock sample, so successive reads are comparable | `clock_spec`, `World.lastSample` | **done** — three conjuncts: model time does not move, the reading is recorded, and it is never behind the previous sample |
+| **C6** | Carry the object correspondence outside the world | `Rep`, `IsLock`, `IsCondvar` | **half done, and the other half was a defect — see C11.** Composability is done and `calls_compose` is its guard: three axioms on the same objects, which did not compile before. The *no aliasing* half was claimed and not delivered |
+| **C7** | Say what an actor is | `World.lean`, `abbrev Tid` | **done** — a native thread, carrier or waker, never a green task |
+| **C10** | Declare assumption-predicates with `axiom`, never `opaque` | — | **done, and insufficient on its own — see C11.** Found by testing the audit rather than reading it. Visibility is not content: an `axiom` predicate is named by `#print axioms` and can still say nothing |
+| **C11** | State an assumption *and enforce it where it is needed*: `Rep.NonAliasing` is a local, pairwise condition | `Rep`, `distinct_mutexes_are_distinct_locks` | **done** — the guard is a theorem that relates two mutexes, so the hypothesis is required and consumed rather than suppressed |
+| **C12** | Non-clock operations preserve the clock state | `World.SameClock`, six axioms | **done** — `readings_monotone_across_a_call` is the guard: it did not follow before |
+| C2, C3, C5 | — | — | **retired or folded** with the choice of (b); see above |
+| **C8** | Model waiters as a set or as episodes, with the invariant stated | `World.Condvar` | **open** — the largest remaining item: it changes the four waiter transitions and every A4 theorem |
+| **C9** | Say whether any claim depends on data read under the lock | `Bridge`, `docs/interface.md` | **open** — documentation, no code |
 
-C6 is the one that matters most. It is not a cosmetic gap: it is the reason the axioms are currently
-unusable, and it is the same point the handoff makes when it asks for a stable per-object map instead of
-independent world-indexed claims.
+C6 was the one that mattered most, and it was the reason the axioms were unusable rather than merely
+incomplete: no conclusion mentioned `IsLock`, so after a first call the representation was lost and no
+second call on that object could be stated. `calls_compose` is a regression guard as much as a
+demonstration — make the representation world-indexed again and it stops compiling.
+
+### C10 — an assumption stated as an `opaque` predicate is invisible to the audit
+
+Found by testing rather than reading, and it matters more than its size suggests. `opaque` gives a
+declaration a hidden *value*, so it is not an axiom and `#print axioms` never names it:
+
+    theorem uses_rep_wf {r : Rep} (h : Rep.WF r) : Rep.WF r := h
+    #print axioms uses_rep_wf          -- "does not depend on any axioms"
+    #print axioms uses_a_bridge_axiom  -- "depends on axioms: [lock_spec]"
+
+So the standing condition on the representation, first written as an `opaque`, would have been an
+unstated assumption — invisible to the one check that exists to enumerate the trusted base, and in
+direct conflict with the standard in `PLAN.md` §8 that nothing in the trusted base is unstated. The
+rule is recorded in `AGENTS.md`, and it applies to every assumption-predicate rather than to this one.
+C11 is the rest of it: stating an assumption is not the same as enforcing it.
+
+### Two defects the first version carried
+
+**The representation condition was named, not stated.** It was declared `axiom Rep.WF (r : Rep) : Prop`
+— an *uninterpreted* proposition. The comment said distinct live objects keep distinct indices; the
+declaration said nothing, so Lean could derive nothing from it, a constant `lockOf` sending every mutex
+to one index satisfied it, and two independent runtime mutexes could alias a single model lock while
+successive `lock_spec` applications overwrote one model owner. That is the failure this document exists
+to describe, inside the change that describes it: *a comment promising more than the declaration
+carries.* Making it an `axiom` (C10) had made it auditable without making it true, which hid the gap
+rather than exposing it.
+
+Replacing it with content was not enough either. The second version defined `Rep.Injective` — global
+injectivity over every `Std.BaseMutex` — which is stronger than the runtime guarantees, since the
+allocator may reuse a freed object's address and the guarantee holds only for objects that are
+simultaneously live. Worse, it was **not enforced**: it was attached to a theorem combining one mutex
+with one condvar, whose indices index *different* maps of `World`, so a coincidence between them denotes
+nothing and neither half of the condition was used. The unused hypothesis showed up as a suppressed
+linter warning, which is the tell that it guarded nothing.
+
+What stands now is local and consumed: `Rep.NonAliasing r m₁ m₂` says two *mutexes* occupy different
+model locks; `distinct_mutexes_are_distinct_locks` is a theorem relating two mutexes, so the hypothesis
+is required there and used rather than suppressed; and the operation axioms do not carry it, because no
+single operation relates two runtime objects. A use that relates two of them supplies it, or holds two
+runtime mutexes whose shared model lock reports one owner — the correspondence failing, not the model
+being wrong.
+
+**Monotonicity held only for adjacent readings.** The clock fix related a reading to the previous
+*sample*, but the other six axioms left that sample unconstrained: a mutex call between two readings
+could reset it, and the second reading's bound — "never behind the previous sample" — was then vacuous.
+Any budget with a bridged operation between its start and end readings could conclude nothing. The fix
+adds `World.SameClock` to the six non-clock contracts, and `readings_monotone_across_a_call` is the
+guard: a reading, a lock, a reading, and the inequality between them, which did not follow before.
 
 ## The programme, separated
 
@@ -110,7 +172,7 @@ correct it, so it belongs with the owner of the plan, not in a repair.
 
 ## The evidence, and its limits
 
-The findings above come from reading the seven axioms, `World.lean`, `Control.lean` and
+The defects above come from reading the seven axioms, `World.lean`, `Control.lean` and
 `LeanIn_Bridge_Axioms_Handoff.txt`, together with the repairs already landed.
 
 Two limits are worth stating plainly:
@@ -126,7 +188,7 @@ Two limits are worth stating plainly:
 
 ## Open questions
 
-1. What `w'` denotes (the decision above), or an explicit delegation of it.
+1. ~~What `w'` denotes~~ — decided: (b), recorded above `Runs`.
 2. Whether the execution-contract programme enters scope now, later, or not at all.
 3. Whether native actor and wait-episode identities belong in the model or only in the bridge.
 4. Whether `LeanIn_Bridge_Axioms_Handoff.txt` belongs in the repository at its current path, under a
