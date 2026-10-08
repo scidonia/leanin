@@ -75,11 +75,16 @@ the pool holds. -/
 def Executor.submitBase (e : Executor α cap) (x : α) : BaseIO Unit :=
   e.state.atomically do
     let st ← get
+    let wasParked := st.sched.parked ≠ 0
     set ({ st with pool := st.pool.submit x, sched := st.sched.enqueue })
     -- The notify is inside the critical section, which is the discipline the whole protocol rests on: a
     -- worker's predicate is re-checked under this lock, so a wakeup cannot slip between the check and the
     -- wait. `Sched.enqueue` already unparked a worker in the *state*; this is what wakes the thread.
-    e.cv.notifyOne
+    --
+    -- Only when a worker *was* parked, which is what Tokio's `schedule_local` does and what the state
+    -- already tells us: with nobody parked there is no thread to wake, and a worker that parks later
+    -- re-checks the predicate under this same lock and finds the work, so nothing can be lost by skipping it.
+    if wasParked then e.cv.notifyOne
 
 /-- Submit, or an external event delivering work: the one above, in `IO`. -/
 def Executor.submit (e : Executor α cap) (x : α) : IO Unit := do e.submitBase x
@@ -119,8 +124,9 @@ slot is what keeps a chained task on the core that just ran its parent, and it i
 def Executor.spawnBase (e : Executor α cap) (x : α) : BaseIO Unit :=
   e.state.atomically do
     let st ← get
+    let wasParked := st.sched.parked ≠ 0
     set ({ st with pool := st.pool.spawn x, sched := st.sched.enqueue })
-    e.cv.notifyOne
+    if wasParked then e.cv.notifyOne
 
 /-- Local spawn: the one above, in `IO`. -/
 def Executor.spawn (e : Executor α cap) (x : α) : IO Unit := do e.spawnBase x

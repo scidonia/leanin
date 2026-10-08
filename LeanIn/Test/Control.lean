@@ -544,6 +544,50 @@ def runtimeShared : IO UInt32 := do
 
   return 0
 
+/-- **What one operation costs.** The end-to-end benchmarks say we are slower; these say which operation is
+paying for it, in nanoseconds, best of three.
+
+Each row is one call, so a task's cost is the sum of the rows it uses: a spawn-and-join task takes one submit
+or spawn, one `work` per step, usually an `await` (two cell locks) and a `resume`. The comparison rows are the
+primitives Tokio-style designs do *not* pay: a mutex critical section, a condvar notification with nobody
+parked, and a `Join` (whose own `Std.Mutex` is built with it).
+
+Diagnostic: `lake exe controls --runtime-ops`. -/
+def runtimeOps : IO UInt32 := do
+  let k := 20000
+  let best (x : IO Unit) : IO Nat := do
+    let mut b := 0
+    for _ in List.range 2 do
+      let t0 ← IO.monoNanosNow
+      x
+      let t1 ← IO.monoNanosNow
+      if b == 0 || t1 - t0 < b then b := t1 - t0
+    return b / k        -- b is nanoseconds, so this is ns per operation
+  let r ← IO.mkRef (0 : Nat)
+  let refNs ← best do for _ in List.range k do r.set ((← r.get) + 1)
+  let m ← Std.Mutex.new (0 : Nat)
+  let mutexNs ← best do for _ in List.range k do m.atomically do set ((← get) + 1)
+  let cv ← Std.Condvar.new
+  let notifyNs ← best do for _ in List.range k do cv.notifyOne
+  let joinNs ← best do for _ in List.range k do let _ ← LeanIn.Task.Join.new (α := Unit)
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let item : LeanIn.Task.Item := ⟨pure ()⟩
+  let spawnNs ← best do for _ in List.range k do e.spawn item
+  let e2 ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let submitNs ← best do for _ in List.range k do e2.submit item
+  let e3 ← Sched.Executor.new LeanIn.Task.Item 256 1
+  for _ in List.range k do e3.submit item
+  let workNs ← best do for _ in List.range k do let _ ← e3.tryTake
+  -- The steady state the benchmarks run in: enqueue a step and consume it, so the ring never saturates.
+  -- The rows above measure a *burst* -- 20 000 items through a 256-slot ring -- which is a different cost.
+  let e4 ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let steadyNs ← best do for _ in List.range k do
+    e4.spawn item
+    let _ ← e4.tryTake
+  IO.println s!"ops: ref set/get {refNs}ns | mutex section {mutexNs}ns | notify (nobody parked) {notifyNs}ns"
+  IO.println s!"ops: Join.new {joinNs}ns | Executor.spawn {spawnNs}ns | Executor.submit {submitNs}ns | Executor.tryTake {workNs}ns | spawn+take (steady) {steadyNs}ns"
+  return 0
+
 /-- **SC6 — real work on the runtime, and the thread identities it ran on.**
 
 One carrier: the driver, the spawned child's body, and the continuation that resumed after the external
@@ -708,6 +752,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-bench" :: _ => return ← runtimeBench
   | "--runtime-tail" :: _ => return ← runtimeTail
   | "--runtime-shared" :: _ => return ← runtimeShared
+  | "--runtime-ops" :: _ => return ← runtimeOps
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"
