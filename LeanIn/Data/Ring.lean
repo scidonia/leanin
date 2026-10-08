@@ -138,6 +138,12 @@ theorem push_toList (r : Ring α cap) (x : α) (hw : r.WF) (hroom : r.size < cap
       rw [hw.1]; exact Nat.mod_lt _ hcap
     simp [Array.getElem?_setIfInBounds_self_of_lt hw']
 
+/-- **The ghost view has as many elements as the ring reports.** Not conditional on `WF`: `toList` maps
+over `List.range r.size`, so a slot holding `none` contributes its `default` rather than disappearing —
+which is why `dense` is needed for *element* reasoning and is not needed here. -/
+theorem toList_length (r : Ring α cap) : r.toList.length = r.size := by
+  simp [Ring.toList]
+
 /-- **Density does work.** A non-empty ring can always be popped — exactly the `dense` conjunct of
 `WF`, and false without it: a slot holding `none` would satisfy the weaker form. -/
 theorem pop_isSome (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).1.isSome := by

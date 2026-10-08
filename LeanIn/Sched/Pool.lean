@@ -119,4 +119,29 @@ def Pool.submit (p : Pool α cap) (x : α) : Pool α cap :=
              inject := p.inject ++ evict,
              pushed := p.pushed + 1 }
 
+/-! ### Agreement with the specification
+
+The first three obligations of `interface.md` §6's refinement, stated against `toModel`. The overflow's
+commutation is not here: it is stated over `Ring.drain`'s read-out-and-refill, and the lemma tying that to
+`take`/`drop` does not exist yet. -/
+
+/-- **The accounting agrees.** `inFlight` reads the container's `size`; the model reads its list's length.
+`toList_length` is what makes those the same quantity rather than two counters that happen to move together. -/
+theorem toModel_inFlight (p : Pool α cap) : p.inFlight = p.toModel.inFlight := by
+  unfold Pool.inFlight Pool.toModel Model.Pool.inFlight
+  rw [toList_length]
+
+/-- A tick refreshes the allowance on both sides. -/
+theorem toModel_tick (p : Pool α cap) : (p.tick).toModel = (p.toModel).tick := by
+  simp [Pool.tick, Pool.toModel, Model.Pool.tick]
+
+/-- **Submission with room.** The ring has space, so both sides append at the back and count the push.
+This is the `Impl.push ⊑ Model.push` case that needs no eviction, and `push_toList` is the whole of the
+ring's part. -/
+theorem toModel_submit_of_room (p : Pool α cap) (x : α)
+    (hw : p.ring.WF) (hroom : p.ring.size < cap) :
+    (p.submit x).toModel = (p.toModel).submit x := by
+  have hlen := toList_length p.ring
+  simp [Pool.submit, Pool.toModel, Model.Pool.submit, hroom, hlen, push_toList p.ring x hw hroom]
+
 end LeanIn.Sched
