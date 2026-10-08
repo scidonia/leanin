@@ -126,7 +126,16 @@ def Executor.work (e : Executor α cap) : IO (Option α) :=
   e.state.atomicallyOnce e.cv
     (pred := do
       let st ← get
-      return st.pool.inFlight ≠ 0 ∨ st.sched.stopping)
+      if st.pool.inFlight ≠ 0 ∨ st.sched.stopping then return true
+      else
+        -- Nothing to take, so this worker is about to park — and it says so *while still holding the
+        -- lock*, in the same critical section that will wait. A submit cannot slip between the check and
+        -- the park, which is the whole content of the model's `park` having no transition while work is
+        -- held. Guarded on `parked = 0` so a spurious wake does not record a second park for the same
+        -- worker; the `k` below clears it. One worker is `parked := 1`, which is M3's single carrier.
+        if st.sched.parked = 0 then
+          set ({ st with sched := { st.sched with parked := 1 } })
+        return false)
     (k := do
       let st ← get
       match st.pool.take with
@@ -134,7 +143,9 @@ def Executor.work (e : Executor α cap) : IO (Option α) :=
       | (some x, p') =>
         match st.sched.take with
         | none    => return none
-        | some s' => set ({ st with pool := p', sched := s' }); return (some x))
+        -- Waking to take work means the worker is no longer parked, in the same critical section as the
+        -- take, so the state never shows a worker both parked and holding work.
+        | some s' => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some x))
 
 /-- **The whole state as the specification sees it**, for a client that needs more than the two counts:
 `inFlight`, `taken` and `parked` all come from here. Using the projection rather than a bespoke accessor is
