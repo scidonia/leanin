@@ -59,10 +59,28 @@
             nativeBuildInputs = prev.nativeBuildInputs ++ [ pkgs.gitMinimal ];
           });
 
+          # `nice -n 19` cannot be spelled as a PATH entry, so each pinned tool is
+          # wrapped by its own store package. `nix develop` puts the shell's own
+          # entries ahead of the caller's PATH, which comes last, so a wrapper listed
+          # here wins over both the toolchain's binary and any host `lean`/`lake`.
+          niceLean = pkgs.writeShellScriptBin "lean" ''
+            if [ "''${LEANIN_LEAN_NICE:-1}" = "0" ]; then exec ${lean4}/bin/lean "$@"; fi
+            exec ${pkgs.coreutils}/bin/nice -n 19 ${lean4}/bin/lean "$@"
+          '';
+          niceLake = pkgs.writeShellScriptBin "lake" ''
+            if [ "''${LEANIN_LEAN_NICE:-1}" = "0" ]; then exec ${lean4}/bin/lake "$@"; fi
+            exec ${pkgs.coreutils}/bin/nice -n 19 ${lean4}/bin/lake "$@"
+          '';
+
           leaninShell = pkgs.mkShell {
             name = "leanin";
 
             packages = [
+              # The wrappers must precede `lean4`: the shell's PATH is built in
+              # `packages` order, and that ordering is what makes `nice -n 19` win
+              # over the toolchain's own binaries.
+              niceLean
+              niceLake
               lean4
               pkgs.git
               pkgs.coreutils
@@ -71,59 +89,18 @@
             ];
 
             shellHook = ''
-              # The host may have an unrelated elan/lean on PATH; the pinned
-              # toolchain must win, otherwise `lake` would resolve `lean-toolchain`
-              # through elan and try to download a toolchain during an offline run.
-              export PATH="${lean4}/bin''${PATH:+:$PATH}"
+              # A function beats a PATH entry, so an exported `lean`/`lake` function
+              # inherited from the caller's environment would shadow the wrappers, in
+              # this shell and in every child shell that re-imports it.
+              unset -f lake lean
 
-              # Lean elaborates with every core it can find, which on a working
-              # desktop starves interactive audio and editors for minutes at a time.
-              # `lake` and `lean` are therefore wrapped to run under `nice -n 19` by
-              # default. The wrapper execs the pinned binary by absolute path, so the
-              # tool, its version, arguments, output and exit status are the pinned
-              # ones and only the scheduling priority differs.
-              #
-              # Targets are written from `${lean4}/bin`, never from a
-              # `command -v` lookup: a lookup can return an exported shell function's
-              # name, or some other host tool of the same name, and a wrapper built
-              # from that re-enters itself instead of reaching the pinned binary.
-              # Installation is all-or-nothing for the same kind of reason: a shell
-              # that announces low-priority Lean and then runs it at normal priority
-              # is reporting success for something it did not do.
-              #
-              # LEANIN_LEAN_NICE=0 is the only opt-out: set it before entering the
-              # shell for a diagnostic shell that must see an unmodified PATH.
-              if [ "''${LEANIN_LEAN_NICE:-1}" != "0" ]; then
-                leanin_nice_dir="''${TMPDIR:-/tmp}/leanin-lean-nice"
-                leanin_nice_failure=""
-                mkdir -p "$leanin_nice_dir" || leanin_nice_failure="mkdir -p $leanin_nice_dir"
-                if [ -z "$leanin_nice_failure" ]; then
-                  for leanin_tool in lake lean; do
-                    printf '#!/bin/sh\nexec nice -n 19 %s "$@"\n' "${lean4}/bin/$leanin_tool" \
-                      >"$leanin_nice_dir/$leanin_tool" &&
-                      chmod +x "$leanin_nice_dir/$leanin_tool" ||
-                      { leanin_nice_failure="installing the $leanin_tool wrapper in $leanin_nice_dir"; break; }
-                  done
-                fi
-                if [ -z "$leanin_nice_failure" ]; then
-                  export PATH="$leanin_nice_dir:$PATH"
-                  # The pinned toolchain must win, which the PATH entry above only
-                  # achieves against executables: in bash a function beats a PATH
-                  # entry, so an inherited `lake` function would shadow the shim and
-                  # silently run an unniced, possibly unrelated tool. These
-                  # definitions close that hole. `export -n` matters: redefining an
-                  # imported exported function would otherwise inherit its export
-                  # attribute and hand the function to every child shell, so clearing
-                  # it is what keeps child processes resolving through the shim.
-                  lake() { command "${pkgs.coreutils}/bin/nice" -n 19 "${lean4}/bin/lake" "$@"; }
-                  lean() { command "${pkgs.coreutils}/bin/nice" -n 19 "${lean4}/bin/lean" "$@"; }
-                  export -nf lake lean
-                else
-                  printf 'leanin: the low-priority Lean shim could not be installed: %s\n' "$leanin_nice_failure" >&2
-                  printf 'leanin: Lean would run at normal priority, which this shell does not do\n' >&2
-                  printf 'leanin: set LEANIN_LEAN_NICE=0 if an unshimmed shell is what you want\n' >&2
-                fi
-              fi
+              # Say so if a change to the PATH order ever puts the toolchain's own
+              # `lean` first, rather than silently dropping the priority wrapping.
+              case "$(command -v lean)" in
+                ${niceLean}/bin/lean) ;;
+                *) printf 'leanin: lean resolves to %s, not the wrapper %s\n' \
+                     "$(command -v lean)" "${niceLean}/bin/lean" >&2 ;;
+              esac
 
               printf 'leanin: %s\n' "$(lean --version)"
             '';
