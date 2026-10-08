@@ -6,6 +6,13 @@
   compile library, model, proofs and executables. A build is not
   evidence that runtime behavior or the Lean source-to-IO
   correspondence is proved.
+- The flake's `lean4` is an `overrideAttrs` of nixpkgs' derivation,
+  which no binary cache serves -- `cache.nixos.org` answers 404 for
+  its outputs -- so a store that lacks it compiles Lean from source,
+  which here ran past an hour unfinished across three attempts.
+  Until the store has it, run the same commands with the toolchain
+  `lean-toolchain` names, which `elan` provides at the same version,
+  and say which of the two ran.
 - Follow the executable-control idiom in `LeanIn/Test/Control.lean`
   and `Controls.lean`: run `nix develop -c lake exe controls` for
   primitive bridge observations, retain each control's stated
