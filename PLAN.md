@@ -252,13 +252,14 @@ be inhabited by some reachable state and not by others, so the theorems are not 
 
 **Goal:** the container the spec describes, and the laws tying it to the spec.
 
-`Pool.ring : List α` is the ghost view, not an implementation. The container is a fixed store plus the
-index of the oldest live element plus a live count.
+`Pool.ring : List α` is the ghost view, not an implementation. The container is a fixed-size `Array`
+of slots plus the index of the oldest live element plus a live count -- `Array` and not `List`, because
+`Array.set` updates in place while `List.set` copies a prefix, and the ring exists to move no element.
 
 **Build** — `LeanIn/Data/Ring.lean`
 - `Ring` with `slots`, `head`, `size`;
 - `Ring.toList` — the ghost view, oldest first, so every downstream proof is about a list;
-- `Ring.WF` — the store's length is `cap`, the live count fits, **and the live range is dense** (no
+- `Ring.WF` — the store's size is `cap`, the live count fits, **and the live range is dense** (no
   holes), so `toList` yields real elements rather than defaults;
 - `push` / `pop`.
 
@@ -276,8 +277,8 @@ laws in their own file.
 
 **Landed** — `LeanIn/Data/Ring.lean`. The container, with every law proved:
 
-- `Ring` (fixed store, head index, live count), `Ring.toList` (the ghost view), `Ring.WF` (with the
-  `join`-guarded density conjunct), `push`, `pop`;
+- `Ring` (fixed-size `Array` store, head index, live count), `Ring.toList` (the ghost view, the only
+  place a `List` appears), `Ring.WF` (with the `join`-guarded density conjunct), `push`, `pop`;
 - **`slot_ne`** — distinct live indices occupy distinct slots. Everything modular is here;
 - **`push_toList`**, **`pop_toList`** — the laws tying the container to the spec;
 - **`push_wf`**, **`pop_wf`** — the invariant is preserved, without which the laws would be one-shot;
@@ -298,13 +299,33 @@ well-formed; a ring whose live count exceeds its capacity is *not*, so `WF` dist
 holding of everything; and a push followed by a pop can always proceed.
 
 The first one **found a real defect**. `emptyRing` was defined with `slots := []`, but `WF` requires
-`slots.length = cap` — so `emptyRing Nat 4` was never well-formed and every law instantiating it was
-about nothing. It is now `List.replicate cap none`. A gap I nearly left as "outstanding" turned out to
+`slots.size = cap` — so `emptyRing Nat 4` was never well-formed and every law instantiating it was
+about nothing. It is now `Array.replicate cap none`. A gap I nearly left as "outstanding" turned out to
 be hiding a bug in the very definition the checks existed to validate.
 
 Getting the checks to typecheck also needed a technique worth recording: **use defeq coercion, not
 `simp`**. `(emptyRing Nat 4).size` reduces to `0` definitionally but is not a `simp` target, so
 `have : i < 0 := hi` works where `simp [emptyRing] at hi` leaves a goal behind.
+
+**The store was a `List` at first, and that was the wrong container.** A ring exists to move no element,
+and `List.set` copies the prefix up to the index, so the cost is the distance from the front — average
+`cap / 2` — while `Array.set` updates in place when the array is uniquely referenced. Measured against
+the previous list-backed implementation, same loop and same workload, both producing checksum
+`19795624800` (`cap = 1024`, 200 000 push/pop pairs):
+
+| store | time |
+|---|---|
+| `Array (Option α)` | 384 ms |
+| `List (Option α)` | 2571 ms |
+
+The store is now `Array (Option α)`, and `push`/`pop` write through `Array.setIfInBounds`, which stays
+total and independent of `WF` (`Array.set` demands a bound proof). The `List` survives only in
+`Ring.toList`, the ghost view, where its algebraic lemmas keep the proofs short — the same split Lean's
+own containers use, and the reason D12's `Array`-with-a-`List`-view shape is the house pattern rather
+than an invention. The migration was mechanical: the three update lemmas map one-to-one onto the ones
+already in use (`List.length_set` → `Array.size_setIfInBounds`, `List.getElem?_set_ne` →
+`Array.getElem?_setIfInBounds_ne`, `List.getElem?_set_self` → `Array.getElem?_setIfInBounds_self_of_lt`),
+so all five laws still prove with the same axiom audit.
 
 **Exit criteria** — the laws hold, the checks distinguish, and the ghost view is the only representation
 any downstream proof mentions.
