@@ -196,37 +196,60 @@ theorem Aligned.takeReport (st : State α cap) (h : st.Aligned) (hw : st.pool.ri
   dsimp only
   omega
 
+/-- **Take without the parking machinery.** `some (some x)` when it took work, `some none` when the pool is
+empty *and* stopping, `none` when it is empty but still running — so the caller knows to park.
+
+This is the shape Tokio's worker loop has, and it is the shape a worker should have: take, and only park when
+there was nothing to take. The take is one critical section and nothing else; parking is not on this path at
+all. A take that returns nothing implies `inFlight = 0`, because `Pool.take` flushes an occupied LIFO slot
+before serving the ring, so the predicate below re-checks exactly the condition this could not decide. -/
+def Executor.tryTake (e : Executor α cap) : IO (Option (Option α)) :=
+  e.state.atomically do
+    let st ← get
+    match st.pool.take with
+    | (none, _) => return (if st.sched.stopping then some none else none)
+    | (some x, p') =>
+      match st.sched.take with
+      | none    => return none
+      | some s' => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some (some x))
+
 /-- **One step of a worker: take work, or park until there is some.** The predicate is re-checked under
 the same lock a submit notifies under, which is what makes the model's check-and-park atomicity real: a
 worker that finds nothing parks *inside* this critical section rather than between two of them, so a wakeup
 cannot be lost in the gap.
 
 `none` means the pool was stopping. A take advances the pool and the scheduler together, exactly as
-`Executor.take` does — the two halves of the alignment cannot come apart here either. -/
-def Executor.work (e : Executor α cap) : IO (Option α) :=
-  e.state.atomicallyOnce e.cv
-    (pred := do
-      let st ← get
-      if st.pool.inFlight ≠ 0 ∨ st.sched.stopping then return true
-      else
-        -- Nothing to take, so this worker is about to park — and it says so *while still holding the
-        -- lock*, in the same critical section that will wait. A submit cannot slip between the check and
-        -- the park, which is the whole content of the model's `park` having no transition while work is
-        -- held. Guarded on `parked = 0` so a spurious wake does not record a second park for the same
-        -- worker; the `k` below clears it. One worker is `parked := 1`, which is M3's single carrier.
-        if st.sched.parked = 0 then
-          set ({ st with sched := { st.sched with parked := 1 } })
-        return false)
-    (k := do
-      let st ← get
-      match st.pool.take with
-      | (none, _) => return none
-      | (some x, p') =>
-        match st.sched.take with
-        | none    => return none
-        -- Waking to take work means the worker is no longer parked, in the same critical section as the
-        -- take, so the state never shows a worker both parked and holding work.
-        | some s' => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some x))
+`Executor.take` does — the two halves of the alignment cannot come apart here either.
+
+**The common case does not reach the park.** `tryTake` runs first, and only when it reports an empty pool that
+is still running does this park — which is once per drained queue rather than once per item. -/
+def Executor.work (e : Executor α cap) : IO (Option α) := do
+  match ← e.tryTake with
+  | some r => return r
+  | none   =>
+    e.state.atomicallyOnce e.cv
+      (pred := do
+        let st ← get
+        if st.pool.inFlight ≠ 0 ∨ st.sched.stopping then return true
+        else
+          -- Nothing to take, so this worker is about to park — and it says so *while still holding the
+          -- lock*, in the same critical section that will wait. A submit cannot slip between the check and
+          -- the park, which is the whole content of the model's `park` having no transition while work is
+          -- held. Guarded on `parked = 0` so a spurious wake does not record a second park for the same
+          -- worker; the `k` below clears it. One worker is `parked := 1`, which is M3's single carrier.
+          if st.sched.parked = 0 then
+            set ({ st with sched := { st.sched with parked := 1 } })
+          return false)
+      (k := do
+        let st ← get
+        match st.pool.take with
+        | (none, _) => return none
+        | (some x, p') =>
+          match st.sched.take with
+          | none    => return none
+          -- Waking to take work means the worker is no longer parked, in the same critical section as the
+          -- take, so the state never shows a worker both parked and holding work.
+          | some s' => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some x))
 
 /-- **The whole state as the specification sees it**, for a client that needs more than the two counts:
 `inFlight`, `taken` and `parked` all come from here. Using the projection rather than a bespoke accessor is
