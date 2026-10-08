@@ -266,6 +266,48 @@ theorem pop_wf (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).2.WF 
         simp only [Array.getElem?_setIfInBounds_ne hne]
         exact hw.2.2 (i + 1) (by omega)
 
+/-! ### Shedding from the back, by index
+
+Tokio's `push_overflow` removes the newer half of a full queue by **claiming it with indices** and copying those
+tasks out, with no read-out and no refill (`queue.rs`, "Add back the first half of tasks"). The same move is
+available here and is cheaper still, because `WF` constrains only the live range: a slot outside `[head, head +
+size)` is never read by `toList`, and `push` recycles it in order as the ring wraps. So shedding the back of the
+live range is **one assignment to `size`** — nothing is copied, shifted or re-filled, and the values that leave
+are read exactly once by whoever needs them. -/
+
+/-- **Keep the first `k` live elements and shed the rest.** The index trick: the shed elements leave by moving
+the live count, so only the caller's read of what it still holds costs anything.
+
+`min k r.size` rather than `k`, so a caller cannot demand more than is there. -/
+def Ring.keepFirst (r : Ring α cap) (k : Nat) : Ring α cap :=
+  { r with size := min k r.size }
+
+/-- `map` commutes with `take`, in the direction the next lemma needs. Proved here rather than cited: the core
+lemma for this has different names across versions, and it is four cases. -/
+theorem map_take {β : Type} (f : Nat → β) : ∀ (l : List Nat) (n : Nat),
+    (l.map f).take n = (l.take n).map f
+  | [], 0 => rfl
+  | [], _ + 1 => rfl
+  | _ :: _, 0 => rfl
+  | a :: l, n + 1 => by
+    show f a :: (l.map f).take n = f a :: (l.take n).map f
+    rw [map_take f l n]
+
+/-- **Shedding from the back does not disturb the front.** The kept ring's view is the first `min k size` of the
+old view — the split the specification states as `take`. -/
+theorem keepFirst_toList (r : Ring α cap) (k : Nat) :
+    (r.keepFirst k).toList = r.toList.take (min k r.size) := by
+  unfold Ring.keepFirst Ring.toList
+  simp only [map_take, List.take_range, Nat.min_assoc, Nat.min_self]
+
+/-- Shedding keeps well-formedness: the live range is a prefix of what it was. -/
+theorem keepFirst_wf (r : Ring α cap) (k : Nat) (hw : r.WF) : (r.keepFirst k).WF := by
+  have hle : r.size ≤ cap := hw.2.1
+  refine ⟨hw.1, by simp only [Ring.keepFirst]; omega, ?_⟩
+  intro i hi
+  simp only [Ring.keepFirst] at hi
+  exact hw.2.2 i (by omega)
+
 /-! ### Draining
 
 A ring can only pop its front, so emptying it means popping `size` times. `drain` is that loop, and the
