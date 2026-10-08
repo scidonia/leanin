@@ -216,6 +216,16 @@ theorem push_wf (r : Ring α cap) (x : α) (hw : r.WF) (hroom : r.size < cap) :
         rw [hw.1]; exact Nat.mod_lt _ hcap
       simp [Array.getElem?_setIfInBounds_self_of_lt hw']
 
+/-- **Popping leaves one fewer element.** The companion to `pop_toList` for reasoning about counts rather
+than order: `pop_toList` gives the sequence, `toList_length` turns it into arithmetic, and this is what the
+pool's `take` needs to say that it holds one fewer item afterwards. -/
+theorem pop_size (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).2.size + 1 = r.size := by
+  obtain ⟨x, _, hlist⟩ := pop_toList r hw hpos
+  have h := congrArg List.length hlist
+  simp only [List.length_cons] at h
+  rw [toList_length, toList_length] at h
+  omega
+
 theorem pop_wf (r : Ring α cap) (hw : r.WF) (hpos : 0 < r.size) : (r.pop).2.WF := by
   have hcap : 0 < cap := Nat.lt_of_lt_of_le hpos hw.2.1
   have hden := hw.2.2 0 hpos
