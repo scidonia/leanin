@@ -398,7 +398,18 @@ def runtimeBench : IO UInt32 := do
       for h in hs do let _ ← LeanIn.Task.Async.await h
       pure ())
     pure ()
-  IO.println s!"{n} tasks, spawn+join   : stock {stockTiny}us / leanin {oursTiny}us"
+  IO.println s!"{n} tasks, spawn+join   : stock pool {stockTiny}us / leanin {oursTiny}us"
+  -- The native *green* baseline: `Async.block` drives Lean's async runtime on this thread, and `async`/`await`
+  -- are its task, so this is the closest analogue of the runtime above rather than of the pool.
+  let stockGreen ← bestMicros k do
+    let m ← Std.Mutex.new (0 : Nat)
+    Std.Async.Async.block do
+      let hs ← (List.range n).mapM (fun _ =>
+        Std.Async.async (m.atomically do set ((← get) + 1)))
+      for h in hs do let _ ← Std.Async.await h
+      pure ()
+  IO.println s!"{n} tasks, spawn+join   : Std.Async {stockGreen}us"
+
 
   -- Shape 2: blocking work. Each task sleeps, which on one carrier stops everything.
   let stockSleep ← bestMicros k do
