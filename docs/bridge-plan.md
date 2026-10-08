@@ -104,9 +104,11 @@ demonstration — make the representation world-indexed again and it stops compi
 Found by testing rather than reading, and it matters more than its size suggests. `opaque` gives a
 declaration a hidden *value*, so it is not an axiom and `#print axioms` never names it:
 
-    theorem uses_rep_wf {r : Rep} (h : Rep.WF r) : Rep.WF r := h
-    #print axioms uses_rep_wf          -- "does not depend on any axioms"
-    #print axioms uses_a_bridge_axiom  -- "depends on axioms: [lock_spec]"
+```
+theorem uses_rep_wf {r : Rep} (h : Rep.WF r) : Rep.WF r := h
+#print axioms uses_rep_wf          -- "does not depend on any axioms"
+#print axioms uses_a_bridge_axiom  -- "depends on axioms: [lock_spec]"
+```
 
 So the standing condition on the representation, first written as an `opaque`, would have been an
 unstated assumption — invisible to the one check that exists to enumerate the trusted base, and in
@@ -186,8 +188,7 @@ having, since neither is evidence for the other's claim on its own.
 `lock 1, wait 1, lock 0` as "the cycle" — one thread parking while a *different* thread takes the lock,
 so a predicate one thread's acquisition satisfies was standing in for another thread's cycle. It then
 reported **nothing at all**, because the trace walker dropped the world preceding each action, so every
-path check was aligned against the wrong successor state. It then accepted `lock 0, wait 0, lock 0,
-spurious 0`, with the resume arriving *after* the re-acquisition — and the order is part of the claim,
+path check was aligned against the wrong successor state. It then accepted `lock 0, wait 0, lock 0, spurious 0`, with the resume arriving *after* the re-acquisition — and the order is part of the claim,
 because that is what a `wait` call does.
 
 A probe that reports success for a witness which is not the thing claimed is the same defect class as
@@ -276,7 +277,7 @@ Two limits are worth stating plainly:
 ## Open questions
 
 1. ~~What `w'` denotes~~ — decided: (b), recorded above `Runs`.
-2. Whether the execution-contract programme enters scope now, later, or not at all.
-3. Whether native actor and wait-episode identities belong in the model or only in the bridge.
-4. Whether `LeanIn_Bridge_Axioms_Handoff.txt` belongs in the repository at its current path, under a
+1. Whether the execution-contract programme enters scope now, later, or not at all.
+1. Whether native actor and wait-episode identities belong in the model or only in the bridge.
+1. Whether `LeanIn_Bridge_Axioms_Handoff.txt` belongs in the repository at its current path, under a
    name in the repository's style, or outside it.
