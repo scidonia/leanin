@@ -150,10 +150,15 @@ instance : MonadAsync Task Async
 instance : MonadAwait Task Async
 ```
 
-`race`, `concurrently` and `background` are then written **once, generically**, against
-`MonadAsync`/`MonadAwait` — which is the point of the classes existing. `Async` here is
-**continuation-based** (`await` registers a continuation and yields; it never blocks a thread), which
-is what makes a single-carrier executor possible at all.
+`concurrently` and `background` are then written **once, generically**, against
+`MonadAsync`/`MonadAwait` — which is the point of the classes existing, and they are the two combinators this
+pair of classes can in fact express. `Async` here is **continuation-based** (`await` registers a continuation
+and yields; it never blocks a thread), which is what makes a single-carrier executor possible at all.
+
+`race` is not one of them, and building the layer is what settled that: "whichever handle becomes ready
+first" needs an operation that awaits *any* of several, while `await` names one. Tokio reaches the same place
+through a `JoinSet` and `select`, so the operation exists to be added — but adding it is an interface
+decision, and until it is made `race` is in [§5](#5-deliberately-absent) rather than here.
 
 **Leaf operations are not ours.** Timers, sockets, DNS, signals and processes stay in `Std.Async` and
 are reached across one bridge: an external event attaches a continuation that pushes into `inject`
@@ -167,6 +172,9 @@ ______________________________________________________________________
 
 Each of these is a decision, not an oversight:
 
+- **No `race`.** Awaiting the first of several handles needs a `select`-shaped operation, because `await`
+  names one handle; the surface has no such operation, so §4's combinators are `concurrently` and
+  `background`. The loser's cancellation is a separate absence and not the reason for this one.
 - **No bare `wait`.** Only `awaitUntil`-shaped operations, because A4 permits spurious wakeups. A
   `Condvar.wait` without a predicate should be unrepresentable in `leanin`'s API.
 - **No fairness or priority guarantee.** A1 gives none and A6 gives none. Nothing in the interface may
