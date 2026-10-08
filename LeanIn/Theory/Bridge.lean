@@ -30,12 +30,15 @@ namespace LeanIn
 
 /-! ### The uninterpreted pieces -/
 
-/-- The interpretation. `Runs op w r w'` means: executing the `BaseIO` operation `op` in world `w`
-terminates with result `r` in world `w'`.
+/-- The interpretation. `Runs t op w r w'` means: **thread `t`** executes the `BaseIO` operation
+`op` in world `w`, terminating with result `r` in world `w'`.
 
-**This is where the semantics gap lives.** It is `opaque` because there is no operational semantics
-for `BaseIO` to define it against; naming it is what lets the axioms below be *stated* at all. -/
-opaque Runs {α : Type} (op : BaseIO α) (w : World) (r : α) (w' : World) : Prop
+The acting thread is a *parameter* rather than a hypothesis, because the model's steps name their actor
+(`Act.lock l t`, `Act.unlock l t`, `Act.wait c l t`) and a bridge that omits it cannot say what any of
+them says about a particular thread. Its absence was not cosmetic: with `t` free, A1 and A2 said "the
+owner is `some t` for every `t`", which is unsayable about a machine with two threads, and A2's `false`
+case had no way to conclude that *the caller* had failed. -/
+opaque Runs {α : Type} (t : Tid) (op : BaseIO α) (w : World) (r : α) (w' : World) : Prop
 
 /-- Representation: the runtime lock `m` is the model lock at index `l`. Opaque, because the runtime
 object is a C++ `std::mutex` behind an `external` — there is no Lean structure to inspect. -/
@@ -56,16 +59,25 @@ Stated as a property of the returned world rather than an equality with `afterLo
 world is not forced to be *only* what the model says — the mutex is free to have other effects the
 model does not track. -/
 axiom lock_spec {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} :
-    IsLock m w l → Runs (Std.BaseMutex.lock m) w () w' → (w'.locks l).owner = some t
+    IsLock m w l → Runs t (Std.BaseMutex.lock m) w () w' → (w'.locks l).owner = some t
 
 /-- **A2 — non-blocking acquisition.** `lean_io_basemutex_try_lock` (`mutex.cpp:33`) →
 `std::mutex::try_lock`.
 
-`true` means it acquired; `false` means it did not, and it must not have blocked. -/
+`true` means *the caller* acquired; `false` means it did not, and it must not have blocked.
+
+**Both conjuncts of the `false` case are load-bearing, and preservation is the weaker one.** Ownership
+unchanged alone does not say the caller failed: a world in which the caller already held the lock and
+`tryLock` returned `false` satisfies it, and that is exactly the case the standard leaves undefined —
+the A2 control in `Test/Control.lean` says so in as many words. So the axiom carries the non-ownership
+precondition the standard requires, and concludes both that the owner is unchanged **and** that it is
+not the caller. Without the second conjunct nothing downstream could use a failed `tryLock` to
+establish anything, which is the whole point of `false`. -/
 axiom tryLock_spec {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} {b : Bool} :
-    IsLock m w l → Runs (Std.BaseMutex.tryLock m) w b w' →
+    IsLock m w l → (w.locks l).owner ≠ some t →
+    Runs t (Std.BaseMutex.tryLock m) w b w' →
     (b = true → (w'.locks l).owner = some t) ∧
-    (b = false → (w'.locks l).owner = (w.locks l).owner)
+    (b = false → (w'.locks l).owner = (w.locks l).owner ∧ (w'.locks l).owner ≠ some t)
 
 /-- **A3 — release.** `lean_io_basemutex_unlock` (`mutex.cpp:37`) → `std::mutex::unlock`.
 
@@ -73,7 +85,7 @@ Requires ownership — releasing without holding is undefined behaviour, which i
 transition for it (`unlock_without_ownership_has_no_transition`). -/
 axiom unlock_spec {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} :
     IsLock m w l → (w.locks l).owner = some t →
-    Runs (Std.BaseMutex.unlock m) w () w' → (w'.locks l).owner = none
+    Runs t (Std.BaseMutex.unlock m) w () w' → (w'.locks l).owner = none
 
 /-! ### A4–A5 — the condition variable -/
 
@@ -90,7 +102,7 @@ for the model refinement in M2. This is a real gap in the model, not a gap in th
 axiom wait_spec {cv : Std.Condvar} {m : Std.BaseMutex} {w w' : World} {c : CondvarId}
     {l : LockId} {t : Tid} :
     IsCondvar cv w c → IsLock m w l → (w.locks l).owner = some t →
-    Runs (Std.Condvar.wait cv m) w () w' → (w'.locks l).owner = some t
+    Runs t (Std.Condvar.wait cv m) w () w' → (w'.locks l).owner = some t
 
 /-- **A5 — notification, and its absence of memory.** `lean_io_condvar_notify_one`
 (`mutex.cpp:62`) → `std::condition_variable::notify_one`.
@@ -98,14 +110,14 @@ axiom wait_spec {cv : Std.Condvar} {m : Std.BaseMutex} {w w' : World} {c : Condv
 Deliberately weak: notification never *adds* a waiter, and it wakes at most the ones already there.
 That it can be **lost entirely** when nobody is waiting is not a concession — it is proved, as
 `notifyOne_no_waiters` in `World.lean`. -/
-axiom notifyOne_spec {cv : Std.Condvar} {w w' : World} {c : CondvarId} :
-    IsCondvar cv w c → Runs (Std.Condvar.notifyOne cv) w () w' →
+axiom notifyOne_spec {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid} :
+    IsCondvar cv w c → Runs t (Std.Condvar.notifyOne cv) w () w' →
     (w'.condvars c).waiters.length ≤ (w.condvars c).waiters.length
 
 /-- **A5 — broadcast.** `lean_io_condvar_notify_all` (`mutex.cpp:67`). Same shape: it can only empty
 the set, never fill it. The shutdown path relies on this. -/
-axiom notifyAll_spec {cv : Std.Condvar} {w w' : World} {c : CondvarId} :
-    IsCondvar cv w c → Runs (Std.Condvar.notifyAll cv) w () w' →
+axiom notifyAll_spec {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid} :
+    IsCondvar cv w c → Runs t (Std.Condvar.notifyAll cv) w () w' →
     (w'.condvars c).waiters.length ≤ (w.condvars c).waiters.length
 
 /-! ### A7 — the clock -/
@@ -115,8 +127,8 @@ axiom notifyAll_spec {cv : Std.Condvar} {w w' : World} {c : CondvarId} :
 Reading the clock does not move it in the model, and the value returned is never behind the model's
 notion of elapsed time. Both halves matter: the first keeps reads side-effect-free, the second is what
 makes a budget meaningful. -/
-axiom clock_spec {w w' : World} {n : Nat} :
-    Runs (IO.monoNanosNow : BaseIO Nat) w n w' → w'.clock = w.clock ∧ n ≥ w.clock
+axiom clock_spec {w w' : World} {n : Nat} {t : Tid} :
+    Runs t (IO.monoNanosNow : BaseIO Nat) w n w' → w'.clock = w.clock ∧ n ≥ w.clock
 
 /-! ### The audit
 
