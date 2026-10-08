@@ -26,7 +26,8 @@ namespace LeanIn.Test
 /-- The actions available to a search, over one lock and one condvar, for the given threads. -/
 def actions (tids : List Nat) : List Act :=
   tids.map (Act.lock 0) ++ tids.map (Act.unlock 0) ++ tids.map (fun t => Act.wait 0 0 t) ++
-  tids.map (fun t => Act.spurious 0 t) ++ [Act.notifyOne 0, Act.notifyAll 0, Act.tick]
+  tids.map (fun t => Act.spurious 0 t) ++ tids.map (fun t => Act.notifyOne 0 t) ++
+  [Act.notifyAll 0, Act.tick]
 
 /-- All action sequences of exactly length `n`. -/
 def seqs (as : List Act) : Nat → List (List Act)
@@ -52,7 +53,7 @@ def showAct : Act → String
   | .lock l t     => s!"lock {l} by {t}"
   | .unlock l t   => s!"unlock {l} by {t}"
   | .wait _ l t   => s!"wait {l} by {t}"
-  | .notifyOne _  => "notifyOne"
+  | .notifyOne _ t => s!"notifyOne {t}"
   | .notifyAll _  => "notifyAll"
   | .spurious _ t => s!"spurious {t}"
   | .tick         => "tick"
@@ -132,6 +133,10 @@ def main : IO UInt32 := do
     (fun w => (w.condvars 0).waiters.isEmpty) tids n
   check "and so is a non-empty one, so that control is not a marker matching nothing"
     (fun w => !(w.condvars 0).waiters.isEmpty) tids n
+  IO.println ""
+  IO.println "  the invariant the waiter model needs: a thread cannot be enrolled twice"
+  check "VIOLATION reachable: a thread enrolled twice on one condvar (no machine state)"
+    (fun w => (w.condvars 0).waiters.length != (w.condvars 0).waiters.eraseDups.length) tids n
   IO.println ""
   IO.println "  the park/resume cycle, which is a path and not a single state"
   IO.println "  (parks, releases the lock, takes it again, and is no longer enrolled)"

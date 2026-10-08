@@ -96,7 +96,9 @@ inductive Act where
   | lock      (l : LockId) (t : Tid)
   | unlock    (l : LockId) (t : Tid)
   | wait      (c : CondvarId) (l : LockId) (t : Tid)
-  | notifyOne (c : CondvarId)
+  /-- Waking one waiter, **naming it**: the runtime call names no waiter, so the choice is the
+  action's, exactly as for `spurious`. -/
+  | notifyOne (c : CondvarId) (t : Tid)
   | notifyAll (c : CondvarId)
   | spurious  (c : CondvarId) (t : Tid)
   /-- Time passing. Not an operation any thread performs; it exists so that "the clock advanced" is a
@@ -116,8 +118,15 @@ def afterWait (w : World) (c : CondvarId) (l : LockId) (t : Tid) : World :=
   { w with locks    := upd w.locks l { owner := none },
            condvars := upd w.condvars c { waiters := (w.condvars c).waiters ++ [t] } }
 
-def afterNotifyOne (w : World) (c : CondvarId) : World :=
-  { w with condvars := upd w.condvars c { waiters := (w.condvars c).waiters.drop 1 } }
+/-- Waking one waiter, **naming it**.
+
+`notify_one` unblocks *one of* the threads waiting, and names none, so the model's action carries the
+choice — exactly as `spurious` does. That is what makes the model's freedom match the runtime's: every
+choice is a distinct transition, rather than the model silently picking the head and so claiming a fact
+the machine does not provide. Waking a thread that is not enrolled removes nothing, which is the lost
+notification of A5 and not an error. -/
+def afterNotifyOne (w : World) (c : CondvarId) (t : Tid) : World :=
+  { w with condvars := upd w.condvars c { waiters := (w.condvars c).waiters.erase t } }
 
 def afterNotifyAll (w : World) (c : CondvarId) : World :=
   { w with condvars := upd w.condvars c { waiters := [] } }
@@ -139,14 +148,91 @@ def afterSpurious (w : World) (c : CondvarId) (t : Tid) : World :=
 def step (w : World) : Act → Option World
   | .lock l t      => if (w.locks l).owner = none then some (afterLock w l t) else none
   | .unlock l t    => if (w.locks l).owner = some t then some (afterUnlock w l) else none
-  | .wait c l t    => if (w.locks l).owner = some t then some (afterWait w c l t) else none
-  | .notifyOne c   => some (afterNotifyOne w c)
+  | .wait c l t    => if (w.locks l).owner = some t ∧ t ∉ (w.condvars c).waiters
+                      then some (afterWait w c l t) else none
+  | .notifyOne c t => some (afterNotifyOne w c t)
   | .notifyAll c   => some (afterNotifyAll w c)
   | .spurious c t  => if t ∈ (w.condvars c).waiters then some (afterSpurious w c t) else none
   | .tick          => some { w with clock := w.clock + 1 }
 
 /-- The transition relation. One constructor, so every proof below is a `simp` on `step`. -/
 def Step (w : World) (a : Act) (w' : World) : Prop := step w a = some w'
+
+/-- **The waiter invariant: no thread is enrolled twice on one condvar.**
+
+A thread is either parked or running, so a second enrolment would mean it was both. The model *could*
+represent it — the sequence `lock 0 by 0 → wait 0 by 0 → lock 0 by 0 → wait 0 by 0` reaches
+`waiters = [0, 0]`, which `nix develop -c lake exe dynamics` reports as reachable — and that is what made
+a spurious waiter's removal ambiguous: `List.erase` removes only the first occurrence, so one of the two
+survived and the thread stayed enrolled after waking. With this invariant stated, `erase` removes *the*
+occurrence and the removal is exact. -/
+def World.WaitersNodup (w : World) : Prop := ∀ c, (w.condvars c).waiters.Nodup
+
+/-- **Every transition preserves the waiter invariant.** Only `wait`, `notifyOne`, `notifyAll` and
+`spurious` touch a waiter set at all, and `wait` is the one that could break the invariant — which is why
+its precondition now includes that its caller is not already enrolled. A thread cannot be parked twice,
+so the step that would represent it is not available. -/
+theorem step_preserves_nodup {w : World} {a : Act} {w' : World}
+    (hw : w.WaitersNodup) (h : Step w a w') : w'.WaitersNodup := by
+  unfold Step at h
+  cases a with
+  | lock l t =>
+      simp only [step] at h
+      split at h
+      · injection h with h; subst h; exact hw
+      · exact absurd h (by simp)
+  | unlock l t =>
+      simp only [step] at h
+      split at h
+      · injection h with h; subst h; exact hw
+      · exact absurd h (by simp)
+  | tick =>
+      injection h with h; subst h; exact hw
+  | wait c l t =>
+      simp only [step] at h
+      split at h
+      · rename_i hp
+        injection h with h; subst h
+        intro c'
+        unfold World.WaitersNodup at hw
+        by_cases hcc : c' = c
+        · subst hcc
+          simp only [afterWait, upd_self]
+          exact List.nodup_append.mpr
+            ⟨hw c', by simp, by
+              intro a ha b hb hEq
+              exact hp.2 ((hEq.trans (List.mem_singleton.mp hb)) ▸ ha)⟩
+        · simp only [afterWait, upd_of_ne w.condvars hcc]
+          exact hw c'
+      · exact absurd h (by simp)
+  | notifyOne c t =>
+      injection h with h; subst h
+      intro c'
+      unfold World.WaitersNodup at hw
+      by_cases hcc : c' = c
+      · subst hcc; simp only [afterNotifyOne, upd_self]
+        exact (hw c').erase t
+      · simp only [afterNotifyOne, upd_of_ne w.condvars hcc]
+        exact hw c'
+  | notifyAll c =>
+      injection h with h; subst h
+      intro c'
+      by_cases hcc : c' = c
+      · subst hcc; simp [afterNotifyAll]
+      · simp only [afterNotifyAll, upd_of_ne w.condvars hcc]
+        exact hw c'
+  | spurious c t =>
+      simp only [step] at h
+      split at h
+      · injection h with h; subst h
+        intro c'
+        unfold World.WaitersNodup at hw
+        by_cases hcc : c' = c
+        · subst hcc; simp only [afterSpurious, upd_self]
+          exact (hw c').filter (· != t)
+        · simp only [afterSpurious, upd_of_ne w.condvars hcc]
+          exact hw c'
+      · exact absurd h (by simp)
 
 /-! ### A1 — mutual exclusion is structural -/
 
@@ -182,21 +268,21 @@ theorem unlock_without_ownership_has_no_transition {w : World} {l : LockId} {t :
 This is the theorem that forces every park/wake protocol to carry its own state: the primitive cannot
 remember that a notification was issued, so a worker that parks after a notify sleeps forever unless
 the state it re-checks under the same lock says otherwise. -/
-theorem notifyOne_no_waiters {w : World} {c : CondvarId}
-    (h : (w.condvars c).waiters = []) : ((afterNotifyOne w c).condvars c).waiters = [] := by
+theorem notifyOne_no_waiters {w : World} {c : CondvarId} {t : Tid}
+    (h : (w.condvars c).waiters = []) : ((afterNotifyOne w c t).condvars c).waiters = [] := by
   simp [afterNotifyOne, h]
 
 /-- The **affirmative control** for `notifyOne_no_waiters`: the same detector must fire when the thing
 is present, or a marker that matches nothing passes forever. Here a waiter really is removed. -/
 theorem notifyOne_removes_waiter {w : World} {c : CondvarId} {t : Tid}
-    (h : (w.condvars c).waiters = t :: []) : ((afterNotifyOne w c).condvars c).waiters = [] := by
+    (h : (w.condvars c).waiters = [t]) : ((afterNotifyOne w c t).condvars c).waiters = [] := by
   simp [afterNotifyOne, h]
 
-/-- The control from the other side: a *non-empty* waiter list is genuinely shortened, not merely
-reported as such. Two waiters leave one. -/
+/-- The control from the other side: a non-empty waiter list is genuinely shortened, and by **the
+named waiter** — the other one is left. Two waiters, one woken, one still enrolled. -/
 theorem notifyOne_removes_exactly_one {w : World} {c : CondvarId} {t₁ t₂ : Tid}
-    (h : (w.condvars c).waiters = t₁ :: t₂ :: []) :
-    ((afterNotifyOne w c).condvars c).waiters = [t₂] := by
+    (h : (w.condvars c).waiters = [t₁, t₂]) :
+    ((afterNotifyOne w c t₁).condvars c).waiters = [t₂] := by
   simp [afterNotifyOne, h]
 
 /-- `notifyAll` clears the set outright, which is what the shutdown path relies on. -/
@@ -216,8 +302,9 @@ theorem spurious_wakeup_permitted {w : World} {c : CondvarId} {t : Tid}
 the lock. So waiters appear without a notification and disappear without one — neither direction is
 constrained, which is exactly why predicates must be re-checked. -/
 theorem wait_parks_and_releases {w : World} {c : CondvarId} {l : LockId} {t : Tid}
-    (h : (w.locks l).owner = some t) : Step w (.wait c l t) (afterWait w c l t) := by
-  simp [Step, step, h]
+    (h : (w.locks l).owner = some t) (hn : t ∉ (w.condvars c).waiters) :
+    Step w (.wait c l t) (afterWait w c l t) := by
+  simp [Step, step, h, hn]
 
 /-! ### A4 — the cycle a `wait` call spans
 
@@ -234,13 +321,13 @@ theorem afterWait_releases {w : World} {c : CondvarId} {l : LockId} {t : Tid} :
 /-- **The whole cycle, as the model reaches it**: park, resume, re-acquire. The endpoint is what the
 caller observes on return — it holds the lock again, and it is no longer a waiter. -/
 theorem wait_cycle_reachable {w : World} {c : CondvarId} {l : LockId} {t : Tid}
-    (h : (w.locks l).owner = some t) :
+    (h : (w.locks l).owner = some t) (hn : t ∉ (w.condvars c).waiters) :
     ∃ w₁ w₂ w₃ : World,
       Step w (.wait c l t) w₁ ∧ Step w₁ (.spurious c t) w₂ ∧ Step w₂ (.lock l t) w₃ ∧
       (w₃.locks l).owner = some t ∧ t ∉ (w₃.condvars c).waiters := by
   refine ⟨afterWait w c l t, afterSpurious (afterWait w c l t) c t,
           afterLock (afterSpurious (afterWait w c l t) c t) l t, ?_, ?_, ?_, ?_, ?_⟩
-  · simp [Step, step, h]
+  · simp [Step, step, h, hn]
   · simp [Step, step, afterWait, List.mem_append]
   · simp [Step, step, afterWait, afterSpurious]
   · simp [afterLock, upd_self]
@@ -251,11 +338,11 @@ parking left the lock free. So `owner = some t` on return is a scheduler decisio
 obligation must identify the re-acquiring thread rather than let the matching endpoint stand in for
 it. -/
 theorem reacquisition_is_anyone {w : World} {c : CondvarId} {l : LockId} {t t' : Tid}
-    (h : (w.locks l).owner = some t) :
+    (h : (w.locks l).owner = some t) (hn : t ∉ (w.condvars c).waiters) :
     ∃ w₁ w₂ : World,
       Step w (.wait c l t) w₁ ∧ Step w₁ (.lock l t') w₂ ∧ (w₂.locks l).owner = some t' := by
   refine ⟨afterWait w c l t, afterLock (afterWait w c l t) l t', ?_, ?_, ?_⟩
-  · simp [Step, step, h]
+  · simp [Step, step, h, hn]
   · simp [Step, step, afterWait]
   · simp [afterLock, upd_self]
 

@@ -17,7 +17,11 @@
   cannot make about itself. A path claim needs a predicate that
   requires the *same* actor at both ends and the stages in order --
   three versions of the cycle predicate were wrong, and each was
-  found by running the probe, not by reading it.
+  found by running the probe, not by reading it. Add a violation
+  check before the fix it is meant to detect: the waiter invariant's
+  check reported a duplicate enrolment within four actions before
+  the model closed it, which is what makes the later clean run
+  evidence rather than a claim.
 - Put externally observable executor scenarios in
   `tests/*contract.md` and their executable checks in the
   adjacent shell fixture. Run an individual check with

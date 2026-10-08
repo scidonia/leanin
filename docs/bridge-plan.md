@@ -87,7 +87,7 @@ Each is small once the decision above is made. None of them requires the program
 | **C12** | Non-clock operations preserve the clock state | `World.SameClock`, six axioms | **done** — `readings_monotone_across_a_call` is the guard: it did not follow before |
 | **C13** | Contract the two creation primitives | `newMutex_spec`, `newCondvar_spec` | **done** — two of the eight native operations had no contract at all. The *state* a fresh object is in is stated; *identity* is not, and cannot be without liveness and allocation identities in the model, which is why `Rep.NonAliasing` stays a hypothesis rather than a consequence |
 | C2, C3, C5 | — | — | **retired or folded** with the choice of (b); see above |
-| **C8** | Model waiters as a set or as episodes, with the invariant stated | `World.Condvar` | **open** — the largest remaining item: it changes the four waiter transitions and every A4 theorem |
+| **C8** | Model waiters as a set or as episodes, with the invariant stated | `World.Condvar`, `World.WaitersNodup` | **done** — the invariant is stated and proved preserved, `wait` refuses a caller already enrolled, and `notifyOne` names the waiter it wakes. The probe's violation check went from *reachable* to *not reached*, which is the evidence |
 | **C9** | Say whether any claim depends on data read under the lock | `Bridge`, `docs/interface.md` | **open** — documentation, no code |
 
 C6 was the one that mattered most, and it was the reason the axioms were unusable rather than merely
@@ -189,6 +189,22 @@ because that is what a `wait` call does.
 A probe that reports success for a witness which is not the thing claimed is the same defect class as
 everything else in this document, and reading all three would have found none of them. That is the
 argument for the instrument existing in the first place.
+
+**The waiter invariant was closed the same way, and this is what the probe is for.** `World.WaitersNodup`
+says no thread is enrolled twice on one condvar. The probe's violation check was written *before* the
+fix and found `lock 0 by 0 → wait 0 by 0 → lock 0 by 0 → wait 0 by 0` in four actions — a state no
+machine can be in, since a thread is either parked or running. Three changes close it: the invariant is
+stated and proved preserved by every transition (`step_preserves_nodup`); `wait` now refuses a caller
+that is already enrolled, which is the precondition that preserves it; and `notifyOne` names the waiter
+it wakes, because `notify_one` unblocks *one of* those waiting and names none, so the choice belongs to
+the action — as it already did for `spurious` — instead of the model silently picking the head and so
+claiming a fact the machine does not provide. The same probe now reports *not reached*.
+
+**Why episodes were not needed**, since the handoff prefers them: a fresh identity per `wait` invocation
+would matter if one carrier could have two invocations in flight, and it cannot — a carrier is either
+parked or running. A set of carrier identities is therefore exact here, and `WaitersNodup` is the
+invariant that makes it so. An earlier attempt to model this without the invariant is what produced the
+`List.erase` defect this item exists to close.
 
 ## The programme, separated
 
