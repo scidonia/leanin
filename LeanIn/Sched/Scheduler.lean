@@ -61,6 +61,14 @@ of checking the work state and parking under the same lock. `none` is a refused 
 def Scheduler.park (s : Scheduler) : Option Scheduler :=
   if s.work = 0 ∧ s.parked < s.total then some { s with parked := s.parked + 1 } else none
 
+/-- **A granted park leaves the work count alone.** Only `parked` moves, which is why parking cannot
+break the alignment between the two halves. -/
+theorem Scheduler.park_work (s s' : Scheduler) (h : s.park = some s') : s'.work = s.work := by
+  rw [Scheduler.park] at h
+  split at h
+  · injection h with h; subst h; rfl
+  · exact absurd h (by simp)
+
 /-- A worker completes one item of work. -/
 def Scheduler.take (s : Scheduler) : Option Scheduler :=
   if 0 < s.work then some { s with work := s.work - 1 } else none

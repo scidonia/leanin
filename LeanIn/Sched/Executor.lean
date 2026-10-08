@@ -93,6 +93,17 @@ def Executor.stop (e : Executor α cap) : IO Unit :=
     let st ← get
     set ({ st with sched := st.sched.stop })
 
+theorem Aligned.submit_of_room (st : State α cap) (h : st.Aligned) (x : α)
+    (hroom : st.pool.ring.size < cap) :
+    ({ st with pool := st.pool.submit x, sched := st.sched.enqueue } : State α cap).Aligned := by
+  have hp : (st.pool.submit x).inFlight = st.pool.inFlight + 1 :=
+    inFlight_submit_of_room st.pool x hroom
+  unfold State.Aligned at h ⊢
+  show (st.sched.enqueue).work = (st.pool.submit x).inFlight
+  rw [hp]
+  simp only [Scheduler.enqueue]
+  omega
+
 /-- What the executor currently holds, for an observer outside the critical section. -/
 def Executor.observe (e : Executor α cap) : IO (Nat × Nat) :=
   e.state.atomically do
