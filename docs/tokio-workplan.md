@@ -91,8 +91,11 @@ sleeping `d` finish in about `d`, not N × d (`spike` already measures 64 × 100
 ### W4 — The blocking pool (PLAN.md M4)
 
 **Deliverable.** `LeanIn/Runtime/Blocking.lean`: a bounded pool of carrier threads off the executor's queue,
-with its own queue and shutdown, for the leaves that genuinely block (DNS, files until/unless a completion
-backend arrives, any foreign call).
+with its own queue and shutdown, for the leaves that genuinely block: file I/O, the synchronous APIs
+(`IO.FS`, `IO.sleep`), foreign or CPU-heavy calls. **Not DNS** — D11 records that `uv_getaddrinfo` runs on
+libuv's own pool (`uv/dns.cpp:73`), so that leaf is already off-carrier, and Lean binds no general threadpool
+API of its own to duplicate. The remit is narrower than "anything slow", and this is the line to check when a
+leaf is added.
 
 **Why Tokio.** `spawn_blocking` and `block_in_place`. It is also the only route to I/O concurrency we have,
 since one carrier that blocks runs nothing else.
