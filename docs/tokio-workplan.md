@@ -85,8 +85,26 @@ can await anything `Std.Async` produces.
 
 **Acceptance.** A scenario where an off-carrier completion wakes a *parked* carrier: the resumed step runs on
 the carrier's thread, the completor's thread is observed to differ, and nothing of ours runs on it — SC6
-generalised, with its detector control. And a `MonadAwait` instance for `Std.Async.Async` so the leaves compose
-in `do` notation.
+generalised, with its detector control.
+
+**Met.** `LeanIn/Runtime/Leaf.lean` holds `awaitTask`, `awaitPromise` and `awaitAsync`; SC6 is routed through
+them rather than owning its own; and the boundary above is verified by grep — `Std.Async` appears nowhere in the
+library outside that file.
+
+One part of the item changed on contact, which is worth recording where the item is: there is **no `MonadLift`
+instance** for `Std.Async.Async`, and there cannot be one as specified. A registration is a `Task` that has to be
+kept alive, so the conversions take a registry the caller owns, and runtime-scoped state is not something an
+instance can carry. They are explicit calls, and the finding sits with them.
+
+Two smaller things settled by building. `awaitAsync` needs no `joinTask` — `toRawBaseIO` yields the `MaybeTask`
+unwrapped — and the outbound direction was measured with W3's criterion early:
+
+```
+sleep   : 4 x 50ms via Std.Async on carrier 347780: 51ms (serial would be 200ms)
+```
+
+Four libuv timers overlapping on one carrier: the first time this runtime drives libuv, and the shape W3 has to
+show for a timer to be a timer rather than a blocked thread.
 
 **And a boundary that this item defines for the rest of the tree.** Today the runtime calls no `Std.Async`
 anywhere — the only mention of it under `LeanIn/` is a comment — so it uses no libuv; the platform library is

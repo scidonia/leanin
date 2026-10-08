@@ -2,6 +2,7 @@ import Std
 import LeanIn.Sched.Basic
 import LeanIn.Sched.Executor
 import LeanIn.Runtime.Basic
+import LeanIn.Runtime.Leaf
 
 /-!
 # Runtime controls for the bridge axioms
@@ -338,22 +339,6 @@ def argValue (args : List String) (key : String) : Option String :=
   args.findSome? fun a =>
     if a.startsWith (key ++ "=") then some ((a.drop (key.length + 1)).toString) else none
 
-/-- Wait for a stock `Task` without blocking: the continuation is registered on the task and only **enqueues**
-when it fires — wherever it fires. That is the inside of the O3 bridge, and it is why an external completion
-never runs our code on its own thread. A continuation whose task is dropped is not a continuation, so the
-hook is kept alive by the caller. -/
-def awaitTask {α : Type} (hooks : IO.Ref (List (_root_.Task Unit))) (external : IO.Ref UInt64)
-    (t : _root_.Task (Except IO.Error α)) : LeanIn.Task.Async α := ⟨fun k resume => do
-  let hooked ← BaseIO.bindTask t (fun r => do
-    external.set (← IO.getTID)
-    match r with
-    | Except.ok v => resume ⟨k v⟩
-    -- `interface.md` §5 has no error channel on a task, so a stock task's failure has nowhere to go: it is
-    -- an unhandled defect and says so, rather than being dropped and leaving the awaiter parked forever.
-    | Except.error e => panic! s!"awaitTask: the external task failed: {e}"
-    return _root_.Task.pure ())
-  hooks.modify (· ++ [hooked])⟩
-
 
 /-- The best of `k` runs of `x`, in microseconds. Best rather than mean: the thing being measured is the
 runtime's own cost, and a mean would mostly report what the rest of the machine was doing. -/
@@ -620,6 +605,23 @@ def runtimeOps : IO UInt32 := do
   IO.println s!"ops: Join.new {joinNs}ns | Executor.spawn {spawnNs}ns | Executor.submit {submitNs}ns | Executor.tryTake {workNs}ns | spawn+take (steady) {steadyNs}ns"
   return 0
 
+/-- Throwaway, for W1's outbound direction and W3's acceptance: do `Std.Async`'s leaves work through the seam,
+and do timers overlap on one carrier? Four tasks each awaiting a 50ms `Std.Async.sleep` should take about 50ms,
+not 200 — which is what distinguishes a timer from `IO.sleep` (which blocks the thread). -/
+def runtimeSleep : IO UInt32 := do
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let hooks ← Runtime.Hooks.new
+  let carrier ← IO.getTID
+  let t0 ← IO.monoNanosNow
+  let _ ← Runtime.run e (do
+    let hs ← (List.range 4).mapM (fun _ =>
+      LeanIn.Task.Async.spawn (Runtime.awaitAsync hooks (Std.Async.sleep 50)))
+    for h in hs do let _ ← LeanIn.Task.Async.await h
+    pure ())
+  let t1 ← IO.monoNanosNow
+  IO.println s!"sleep   : 4 x 50ms via Std.Async on carrier {carrier}: {(t1 - t0) / 1000000}ms (serial would be 200ms)"
+  return 0
+
 /-- **SC6 — real work on the runtime, and the thread identities it ran on.**
 
 One carrier: the driver, the spawned child's body, and the continuation that resumed after the external
@@ -634,18 +636,20 @@ def runtimeThreads : IO UInt32 := do
   let caller ← IO.getTID
   let steps ← IO.mkRef ([] : List UInt64)
   let external ← IO.mkRef (0 : UInt64)
-  let hooks ← IO.mkRef ([] : List (_root_.Task Unit))
+  let hooks ← Runtime.Hooks.new
   let step : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO do
     steps.modify (· ++ [← IO.getTID])
   -- A child spawned from inside the body and awaited, and an external completion from the pool.
   let child : LeanIn.Task.Async Nat := do
     let _ ← step
     return 11
-  let ext ← IO.asTask (do IO.sleep 20; return (5 : Nat)) _root_.Task.Priority.dedicated
+  -- The completion is observed where it happens: in the task's own body, on the pool worker running it, so
+  -- the conversion in `LeanIn.Runtime.Leaf` can be used unmodified.
+  let ext ← IO.asTask (do external.set (← IO.getTID); IO.sleep 20; return (5 : Nat)) _root_.Task.Priority.dedicated
   let prog : LeanIn.Task.Async Nat := do
     let h ← LeanIn.Task.Async.spawn child
     let a ← LeanIn.Task.Async.await h
-    let b ← awaitTask hooks external ext
+    let b ← Runtime.awaitTask hooks ext
     let _ ← step
     return (a + b)
   let v ← Runtime.run e prog
@@ -784,6 +788,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-bench" :: _ => return ← runtimeBench
   | "--runtime-tail" :: _ => return ← runtimeTail
   | "--runtime-shared" :: _ => return ← runtimeShared
+  | "--runtime-sleep" :: _ => return ← runtimeSleep
   | "--runtime-ops" :: _ => return ← runtimeOps
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
