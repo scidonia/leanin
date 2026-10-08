@@ -33,6 +33,11 @@ now says.
 
 namespace LeanIn
 
+-- The pure model lives under `LeanIn.Model`, matching its file path, because M3's implementation is
+-- `LeanIn.Sched`: a model structure declared directly under `LeanIn` would share that namespace with it,
+-- which is what happened silently until the collision was looked for.
+namespace Model
+
 /-- The scheduler state, abstracted to what the wake protocol needs. -/
 structure Sched where
   /-- Work available anywhere: every worker's ring, LIFO slot, and the inject queue. -/
@@ -225,7 +230,9 @@ example : ({(default : Sched) with work := 0, parked := 0, total := 4}).park
 example : ({(default : Sched) with work := 0}).take = none := by simp [Sched.take]
 
 -- The audit: the protocol's theorems rest on nothing beyond Lean's own axioms.
-#print axioms LeanIn.reachable_live
-#print axioms LeanIn.enqueue_live
+#print axioms LeanIn.Model.reachable_live
+#print axioms LeanIn.Model.enqueue_live
+
+end Model
 
 end LeanIn

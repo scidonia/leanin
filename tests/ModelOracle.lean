@@ -35,7 +35,7 @@ positions over the same task identities, so the records are comparable pairwise.
 
 namespace ModelOracle
 
-open LeanIn
+open LeanIn Model
 
 /-- One step of the fixed script. -/
 inductive Op where

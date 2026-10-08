@@ -30,6 +30,11 @@ business. A single `Pool` here is what one worker sees under its own lock.
 
 namespace LeanIn
 
+-- The pure model lives under `LeanIn.Model`, matching its file path, because M3's implementation is
+-- `LeanIn.Sched`: a model structure declared directly under `LeanIn` would share that namespace with it,
+-- which is what happened silently until the collision was looked for.
+namespace Model
+
 structure Pool (α : Type) where
   /-- The bounded FIFO ring: submitted at the back, taken from the front. -/
   ring      : List α := []
@@ -263,9 +268,11 @@ example : ({(emptyPool Nat) with lifo := some 7}).take.1 = some 7 := by
 None of the model's theorems should rest on the bridge axioms — the pool is *about* the primitives, so
 a proof that depended on one would be circular. `#print axioms` is the check. -/
 
-#print axioms LeanIn.take_returns_if_present
-#print axioms LeanIn.submit_conserves
-#print axioms LeanIn.submit_bounded
-#print axioms LeanIn.take_conserves
+#print axioms LeanIn.Model.take_returns_if_present
+#print axioms LeanIn.Model.submit_conserves
+#print axioms LeanIn.Model.submit_bounded
+#print axioms LeanIn.Model.take_conserves
+
+end Model
 
 end LeanIn
