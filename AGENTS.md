@@ -22,6 +22,18 @@
   check reported a duplicate enrolment within four actions before
   the model closed it, which is what makes the later clean run
   evidence rather than a claim.
+- Bridge contract scenarios live in `tests/bridge-contract.md` with
+  their executable checks in `tests/bridge-contract.sh`, driven at
+  the public `bridgecontrols` executable: run one with
+  `nix develop -c bash tests/bridge-contract.sh BT1`. Records are
+  the carriers' own annotations, because the primitives have no
+  observation hooks, so such a scenario can state ordering and
+  ownership and cannot see anything a carrier does not name. A
+  trace test can falsify a contract and cannot establish adequacy,
+  and must say which. Mutations that exercise the checker must
+  change a *field*: it addresses records by field, so reordering
+  lines changes nothing and must be accepted, and a mutation that
+  changes nothing is reported rather than counted as a pass.
 - Put externally observable executor scenarios in
   `tests/*contract.md` and their executable checks in the
   adjacent shell fixture. Run an individual check with

@@ -58,6 +58,38 @@ theorem lock_sets_only_the_index_it_names {r : Rep} {m : Std.BaseMutex} {w w' : 
     (w'.locks l).owner = some t :=
   (lock_spec hL h).1
 
+/-- **The wait cycle, observed natively**, with each carrier recording what it did and when.
+
+`ns` is a field on every record because the relations are stated over it: the sibling's acquisition must
+fall between the caller's park and its resume, and the caller's resume must follow the sibling's
+notification. Those hold by construction rather than by luck, and the mutex is what does it — the caller
+holds the lock while it reads the predicate and releases it only inside the wait, so the sibling cannot set
+the predicate in the gap, and the caller cannot leave the wait before the predicate is open. The sibling is
+`dedicated` so it has its own native carrier whatever the pool width is. -/
+def bridgeWaitCycle : IO Unit := do
+  let m ← Std.BaseMutex.new
+  let cv ← Std.Condvar.new
+  let ready ← IO.mkRef false
+  let note (actor op holds : String) : IO Unit := do
+    let ns ← IO.monoNanosNow
+    IO.println s!"bridge|wait-cycle|ns={ns}|actor={actor}|op={op}|holds={holds}"
+  let sibling ← IO.asTask (do
+    Std.BaseMutex.lock m
+    note "sibling" "acquired" "yes"
+    ready.set true
+    Std.Condvar.notifyAll cv
+    note "sibling" "notified" "yes"
+    Std.BaseMutex.unlock m
+    note "sibling" "released" "no") Task.Priority.dedicated
+  Std.BaseMutex.lock m
+  note "caller" "acquired" "yes"
+  note "caller" "parking" "yes"
+  Std.Condvar.waitUntil cv m (do return (← ready.get))
+  note "caller" "resumed" "yes"
+  Std.BaseMutex.unlock m
+  note "caller" "released" "no"
+  let _ ← IO.wait sibling
+
 /-- Entry point. The proofs are checked when this module compiles; the report names what they establish and
 what the countermodel is for. -/
 def bridgeControlsMain : IO UInt32 := do
@@ -66,6 +98,10 @@ def bridgeControlsMain : IO UInt32 := do
   IO.println "                and one broadcast emptied every model condvar (both proved above)"
   IO.println "  guarded form: a witness at one representation supports one index, and no other"
   IO.println "  the parameter is structural: removing it from `Runs` breaks the guarded form's types"
+  IO.println ""
+  IO.println "the wait cycle, observed natively (records are `bridge|wait-cycle|...`)"
+  bridgeWaitCycle
+  IO.println "  the limit of a trace test: it can FALSIFY this contract; it cannot establish adequacy."
   return 0
 
 #print axioms LeanIn.lock_sets_only_the_index_it_names
