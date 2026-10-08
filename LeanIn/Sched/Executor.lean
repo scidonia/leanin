@@ -18,9 +18,10 @@ Three transactions, and the projection that makes them comparable:
 | `take` | `Pool.take`, and `Sched.take` only when it returned a task | |
 | `park` | unchanged | `Sched.park`, refused while work is held |
 
-`Aligned` is the relation those transactions preserve and the reason `take`'s two halves cannot come apart:
-the scheduler's work count and the pool's held work are one quantity. Under one lock it is an invariant; it
-is the same equation `tests/ModelOracle.lean` checks after every step of its script.
+`Aligned` -- the scheduler's work count and the pool's held work being one quantity -- is what `take`'s two
+halves must not come apart through. **Its preservation is owed, not proved**: the transactions below are
+*written* to respect it, and nothing yet checks that they do. It is the same equation
+`tests/ModelOracle.lean` checks after every step of its script, which is where the check currently lives.
 
 The carrier loop, the waker and the records are not here. This is the state and its critical sections.
 -/
