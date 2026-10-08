@@ -1,0 +1,63 @@
+import Std
+import LeanIn.Task.Basic
+
+/-!
+# The single-carrier runtime
+
+`interface.md` §3's `blockOn` and §4's task layer wired to `Sched.Executor`: the executor holds `Item`s, the
+caller drives them on its own thread, and nothing is handed to a pool worker.
+
+The one scheduling function this file owns is `resumeOf`, and it is where `interface.md` §3's rule lives: a
+step that yields re-schedules itself and a `spawn` inside a body schedules its child, both **locally** — the
+executor's LIFO slot — so a chain stays on the core its parent ran on. A spawn from *outside* a body has no
+slot to use and takes the ring instead, which is the other half of the same rule.
+
+No worker threads, no pool: an item is taken and run on the caller, and `Executor.work` parks that thread when
+nothing is ready — which is exactly why a completion arriving from another thread may only *enqueue*.
+-/
+
+namespace LeanIn.Runtime
+
+/-- The runtime's executor: it holds task steps. -/
+abbrev Executor (cap : Nat) := Sched.Executor Task.Item cap
+
+/-- **How an item schedules**: enqueue a step on the current worker, the local route. `BaseIO`, because this
+is the function a waker calls — see `Task.Async`. -/
+def resumeOf (e : Executor cap) : Task.Item → BaseIO Unit := fun it => e.spawnBase it
+
+/-- **Spawn from outside a body**: the ring, because there is no current worker's slot to use — the interface's
+"or inject if called from outside". -/
+def spawn (e : Executor cap) (a : Task.Async α) : IO (Task.Task α) := do
+  let cell ← Task.Join.new
+  e.submit ⟨a.step (fun v => Task.Join.resolve cell v) (resumeOf e)⟩
+  return ⟨cell⟩
+
+/-- **Drive the executor on the caller's thread** until `finished` holds.
+
+This is the single-carrier claim as code: there is no other thread to hand the wait to, so the caller runs the
+item itself and parks in `work` when nothing is ready. That park is the protocol's — the predicate is re-checked
+under the same lock a submit notifies under — so a completion arriving while this thread is parked wakes it
+rather than being lost. -/
+def blockOn (e : Executor cap) (finished : IO Bool) : IO Unit := do
+  let mut go := true
+  while go do
+    if ← finished then go := false
+    else
+      match ← e.work with
+      | some it => it.run
+      | none    => go := false
+
+/-- Run one computation to completion on the caller's thread and return its value.
+
+The completion is a cell the computation's own last step writes, so the driver's stop condition is the value
+arriving rather than a clock or a count. If the driver stops for another reason — the pool stopping — the
+missing value is reported rather than filled in with a default. -/
+def run (e : Executor cap) (a : Task.Async α) : IO α := do
+  let done ← IO.mkRef (none : Option α)
+  e.submit ⟨a.step (fun v => done.set (some v)) (resumeOf e)⟩
+  blockOn e (do return (← done.get).isSome)
+  match ← done.get with
+  | some v => return v
+  | none   => throw (IO.userError "Runtime.run: the driver stopped before the computation finished")
+
+end LeanIn.Runtime

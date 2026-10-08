@@ -288,6 +288,41 @@ trace.
 
 ______________________________________________________________________
 
+### SC6 — real work runs on one carrier, and a pool worker only ever enqueues
+
+**Actor.** A Lean executable client running a program on the single-carrier runtime.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC6`, which invokes
+`lake exe controls --runtime-threads`. The client drives `Runtime.blockOn` on the thread it was started on,
+and reads the thread identity *inside* every step the runtime ran.
+
+**Given.** A fresh runtime, and a program that spawns a child, awaits it, awaits a second value delivered by a
+stock `Task` completing on a pool worker, and reads its own thread identity in each body.
+
+**When.** The client drives the runtime on the calling thread until the program's value arrives. No
+`IO.asTask` in this mode belongs to the runtime; the one that exists is the external completion.
+
+**Then.** There is exactly one `exec|runtime|` record, and its fields are exactly `caller`, `steps`,
+`external`, `value` and `remaining` in that order with nonempty values.
+
+`steps` is the thread each task step ran on, in order, and **every entry equals `caller`** — the driver, the
+spawned child's body and the continuation that resumed after the external completion are one thread.
+`external` is the thread the completion ran on and is **not** `caller`: the measurement is not vacuous,
+because a second thread was in the picture, was observed, and only enqueued. `value` is the program's own sum
+of what the child returned and what the external completion delivered, and `remaining` is 0.
+
+The "every step ran on the carrier" detector is exercised inside the same invocation: it accepts a step list
+of one thread and rejects a list carrying another, which is the near miss a runtime that quietly handed a body
+to the pool would produce. A control that does not hold is a fixture defect reported separately from the
+`Then`.
+
+**Why.** "One carrier" is a claim about where our code runs, and a thread identity is the only way to check it
+from outside. It is worth separating from "there is only one thread": the external completion genuinely runs
+elsewhere — that is what the O3 bridge is for — and what this check asserts is that nothing *of ours* runs
+there.
+
+______________________________________________________________________
+
 ### SC5 — the bounded ring, the LIFO allowance and the overflow keep every staged identity
 
 **Actor.** A Lean executable client of LeanIn's public queue and task scheduling operations.

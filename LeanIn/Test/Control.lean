@@ -1,6 +1,7 @@
 import Std
 import LeanIn.Sched.Basic
 import LeanIn.Sched.Executor
+import LeanIn.Runtime.Basic
 
 /-!
 # Runtime controls for the bridge axioms
@@ -36,11 +37,11 @@ def controlTryLock : IO Unit := do
   let m ← Std.BaseMutex.new
   Std.BaseMutex.lock m
   let t₀ ← IO.monoNanosNow
-  let held ← IO.asTask (do return (← Std.BaseMutex.tryLock m)) Task.Priority.dedicated
+  let held ← IO.asTask (do return (← Std.BaseMutex.tryLock m)) _root_.Task.Priority.dedicated
   let bHeld ← IO.wait held
   let t₁ ← IO.monoNanosNow
   Std.BaseMutex.unlock m
-  let free ← IO.asTask (do return (← Std.BaseMutex.tryLock m)) Task.Priority.dedicated
+  let free ← IO.asTask (do return (← Std.BaseMutex.tryLock m)) _root_.Task.Priority.dedicated
   let bFree ← IO.wait free
   let heldOk := match bHeld with | .ok false => true | _ => false
   let freeOk := match bFree with | .ok true => true | _ => false
@@ -61,7 +62,7 @@ def controlNotifyLost (delayMs : UInt32) : IO Unit := do
   let waiter ← IO.asTask (do
     Std.BaseMutex.lock m
     Std.Condvar.wait cv m
-    Std.BaseMutex.unlock m) Task.Priority.dedicated
+    Std.BaseMutex.unlock m) _root_.Task.Priority.dedicated
   IO.sleep delayMs
   let stillParked ← IO.getTaskState waiter
   Std.Condvar.notifyAll cv
@@ -97,14 +98,14 @@ def controlMutualExclusion (threads iters : Nat) : IO (Nat × Nat) := do
   let unguarded ← (List.range threads).mapM (fun _ => IO.asTask (do
       for _ in List.range iters do
         let v ← r.get
-        r.set (v + 1)) Task.Priority.dedicated)
+        r.set (v + 1)) _root_.Task.Priority.dedicated)
   for t in unguarded do let _ ← IO.wait t
   let raw ← r.get
 
   let m ← Std.Mutex.new (0 : Nat)
   let guarded ← (List.range threads).mapM (fun _ => IO.asTask (do
       for _ in List.range iters do
-        m.atomically do set ((← get) + 1)) Task.Priority.dedicated)
+        m.atomically do set ((← get) + 1)) _root_.Task.Priority.dedicated)
   for t in guarded do let _ ← IO.wait t
   let exact ← m.atomically get
 
@@ -126,7 +127,7 @@ def controlPredicateRecheck (delayMs : UInt32) : IO Unit := do
   let waiter ← IO.asTask (do
     Std.BaseMutex.lock m
     Std.Condvar.waitUntil cv m (do return (← ready.get))
-    Std.BaseMutex.unlock m) Task.Priority.dedicated
+    Std.BaseMutex.unlock m) _root_.Task.Priority.dedicated
   IO.sleep delayMs
   Std.Condvar.notifyAll cv                    -- wakes it, but the predicate is still false
   IO.sleep delayMs
@@ -163,7 +164,7 @@ def executorSingle : IO UInt32 := do
   -- The fake completion: a stock Task that blocks until the gate is released, then returns a value.
   let completion ← IO.asTask (do
     gate.atomicallyOnce gateCv (pred := do return (← get)) (k := do return ())
-    return (7 : Nat)) Task.Priority.default
+    return (7 : Nat)) _root_.Task.Priority.default
   -- What the completion's continuation enqueues when it fires: the awaited task's resume, not the
   -- body again. Hoisted out of the `BaseIO` continuation so its type is the job's, not that monad's.
   let resume : Sched.Job := do
@@ -187,7 +188,7 @@ def executorSingle : IO UInt32 := do
       q.lock.atomically do
         set ((← get) ++ [resume])
         q.cv.notifyOne
-      return Task.pure ())
+      return _root_.Task.pure ())
     hooks.modify (· ++ [hooked])
     return false
   -- The sibling: polled on the caller too, and it releases the gate the completion waits on.
@@ -279,7 +280,7 @@ def executorPark (cap : Nat) : IO UInt32 := do
   let w1 ← IO.asTask (do
     match ← e1.work with
     | some _ => got1.set true
-    | none   => pure ()) Task.Priority.dedicated
+    | none   => pure ()) _root_.Task.Priority.dedicated
   match ← IO.wait w1 with
   | .ok _    => if ← got1.get then record "pre-notify=completed"
   | .error e => IO.println s!"executor-park: order 1 errored: {e}"
@@ -293,7 +294,7 @@ def executorPark (cap : Nat) : IO UInt32 := do
   let w2 ← IO.asTask (do
     match ← e2.work with
     | some _ => got2.set true
-    | none   => pure ()) Task.Priority.dedicated
+    | none   => pure ()) _root_.Task.Priority.dedicated
   let parked ← IO.mkRef false
   let mut tries := 0
   while !(← parked.get) && tries < 1000 do
@@ -316,7 +317,7 @@ def executorPark (cap : Nat) : IO UInt32 := do
     while go do
       match ← e3.work with
       | some x => seen.modify (· ++ [x])
-      | none   => go := false) Task.Priority.dedicated
+      | none   => go := false) _root_.Task.Priority.dedicated
   let queued : List Nat := [31, 32]
   for t in queued do e3.submit t
   e3.stop
@@ -336,6 +337,84 @@ def executorPark (cap : Nat) : IO UInt32 := do
 def argValue (args : List String) (key : String) : Option String :=
   args.findSome? fun a =>
     if a.startsWith (key ++ "=") then some ((a.drop (key.length + 1)).toString) else none
+
+/-- Wait for a stock `Task` without blocking: the continuation is registered on the task and only **enqueues**
+when it fires — wherever it fires. That is the inside of the O3 bridge, and it is why an external completion
+never runs our code on its own thread. A continuation whose task is dropped is not a continuation, so the
+hook is kept alive by the caller. -/
+def awaitTask {α : Type} (hooks : IO.Ref (List (_root_.Task Unit))) (external : IO.Ref UInt64)
+    (t : _root_.Task (Except IO.Error α)) : LeanIn.Task.Async α := ⟨fun k resume => do
+  let hooked ← BaseIO.bindTask t (fun r => do
+    external.set (← IO.getTID)
+    match r with
+    | Except.ok v => resume ⟨k v⟩
+    -- `interface.md` §5 has no error channel on a task, so a stock task's failure has nowhere to go: it is
+    -- an unhandled defect and says so, rather than being dropped and leaving the awaiter parked forever.
+    | Except.error e => panic! s!"awaitTask: the external task failed: {e}"
+    return _root_.Task.pure ())
+  hooks.modify (· ++ [hooked])⟩
+
+/-- **SC6 — real work on the runtime, and the thread identities it ran on.**
+
+One carrier: the driver, the spawned child's body, and the continuation that resumed after the external
+completion are the *same* thread, and the client starts no thread of its own. The external completion is the
+affirmative control that makes that measurement mean something: it finishes on a pool worker, its thread is
+recorded, and all that thread does is enqueue — so the record can tell "one carrier" from "one thread because
+nothing else was in the picture".
+
+Every identity is read where it happens: inside the step that ran, and inside the completion that fired. -/
+def runtimeThreads : IO UInt32 := do
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let caller ← IO.getTID
+  let steps ← IO.mkRef ([] : List UInt64)
+  let external ← IO.mkRef (0 : UInt64)
+  let hooks ← IO.mkRef ([] : List (_root_.Task Unit))
+  let step : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO do
+    steps.modify (· ++ [← IO.getTID])
+  -- A child spawned from inside the body and awaited, and an external completion from the pool.
+  let child : LeanIn.Task.Async Nat := do
+    let _ ← step
+    return 11
+  let ext ← IO.asTask (do IO.sleep 20; return (5 : Nat)) _root_.Task.Priority.dedicated
+  let prog : LeanIn.Task.Async Nat := do
+    let h ← LeanIn.Task.Async.spawn child
+    let a ← LeanIn.Task.Async.await h
+    let b ← awaitTask hooks external ext
+    let _ ← step
+    return (a + b)
+  let v ← Runtime.run e prog
+  let st ← e.snapshot
+  let ids := (← steps.get).map toString
+  IO.println s!"exec|runtime|caller={caller}|steps=[{String.intercalate "," ids}]|external={← external.get}|value={v}|remaining={st.1.inFlight}"
+  return 0
+
+/-- **A first program on the runtime** — M3's test bullet, "run real work; confirm the executor uses one
+thread and no pool workers", as an observation.
+
+Every identity it prints was read *inside* the computation: the caller's, the one the spawned child's body saw,
+and the one the awaiting continuation resumed on. On a single-carrier runtime all three are the same thread —
+and nothing here starts one, since this mode contains no `IO.asTask` at all, which is the half of the claim a
+thread identity alone cannot make. -/
+def runtimeSmoke : IO UInt32 := do
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let caller ← IO.getTID
+  let childTid ← IO.mkRef (0 : UInt64)
+  let awaitTid ← IO.mkRef (0 : UInt64)
+  let child : LeanIn.Task.Async Nat := do
+    let tid ← LeanIn.Task.Async.ofIO IO.getTID
+    let _ ← LeanIn.Task.Async.ofIO (childTid.set tid)
+    return 7
+  let prog : LeanIn.Task.Async (UInt64 × UInt64 × Nat) := do
+    let h ← LeanIn.Task.Async.spawn child
+    let v ← LeanIn.Task.Async.await h
+    let tid ← LeanIn.Task.Async.ofIO IO.getTID
+    let _ ← LeanIn.Task.Async.ofIO (awaitTid.set tid)
+    let c ← LeanIn.Task.Async.ofIO childTid.get
+    let a ← LeanIn.Task.Async.ofIO awaitTid.get
+    return (c, a, v)
+  let (c, a, v) ← Runtime.run e prog
+  IO.println s!"exec|runtime|caller={caller}|child={c}|awaiter={a}|value={v}"
+  return 0
 
 /-- **SC4's scripted input.** The identity each position delivers, decided by the seed and the script name —
 so the same inputs are reproducible from the seed, and the alternate script is a different *input* rather
@@ -463,6 +542,8 @@ def main (args : List String) : IO UInt32 := do
   | "--executor-trace" :: _ => return ← executorTrace
   | "--executor-park" :: _ => return ← executorPark 256
   | "--executor-queue" :: _ => return ← executorQueue
+  | "--runtime-smoke" :: _ => return ← runtimeSmoke
+  | "--runtime-threads" :: _ => return ← runtimeThreads
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

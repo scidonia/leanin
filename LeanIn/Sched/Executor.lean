@@ -65,9 +65,14 @@ def Executor.new (α : Type) (cap : Nat) (workers : Nat) : IO (Executor α cap) 
   return { state := ← Std.Mutex.new { pool := emptyPool α cap, sched := Scheduler.initial workers },
            cv := ← Std.Condvar.new }
 
-/-- Submit, or an external event delivering work: the pool takes it *and* the scheduler records it, as one
-step. Reading `inFlight` afterwards is the work the pool holds. -/
-def Executor.submit (e : Executor α cap) (x : α) : IO Unit :=
+/-- **Submit, without the real-world token.** The body of `submit`, split out because a *waker* runs in
+`BaseIO`: a continuation registered on a stock `Task` cannot call an `IO` action, and enqueuing is the one
+thing a waker does. Everything here — the state lock, the condvar — is `BaseIO`-compatible, so nothing is
+duplicated: `submit` is this plus the token.
+
+The pool takes the work *and* the scheduler records it, as one step; reading `inFlight` afterwards is the work
+the pool holds. -/
+def Executor.submitBase (e : Executor α cap) (x : α) : BaseIO Unit :=
   e.state.atomically do
     let st ← get
     set ({ st with pool := st.pool.submit x, sched := st.sched.enqueue })
@@ -75,6 +80,9 @@ def Executor.submit (e : Executor α cap) (x : α) : IO Unit :=
     -- worker's predicate is re-checked under this lock, so a wakeup cannot slip between the check and the
     -- wait. `Sched.enqueue` already unparked a worker in the *state*; this is what wakes the thread.
     e.cv.notifyOne
+
+/-- Submit, or an external event delivering work: the one above, in `IO`. -/
+def Executor.submit (e : Executor α cap) (x : α) : IO Unit := do e.submitBase x
 
 /-- **Take one item of work, and report the decision.** The pool and the scheduler advance together, or
 neither does — a pool that returned a task while the scheduler removed no work would break `Aligned`, and one
@@ -108,11 +116,14 @@ worker, as one step — `Sched.enqueue`, exactly as `submit` does it.
 
 The difference from `submit` is only *where* the pool puts it, which is the whole point of the operation: the
 slot is what keeps a chained task on the core that just ran its parent, and it is why the allowance exists. -/
-def Executor.spawn (e : Executor α cap) (x : α) : IO Unit :=
+def Executor.spawnBase (e : Executor α cap) (x : α) : BaseIO Unit :=
   e.state.atomically do
     let st ← get
     set ({ st with pool := st.pool.spawn x, sched := st.sched.enqueue })
     e.cv.notifyOne
+
+/-- Local spawn: the one above, in `IO`. -/
+def Executor.spawn (e : Executor α cap) (x : α) : IO Unit := do e.spawnBase x
 
 /-- Park: refused while work is held, granted otherwise. The check and the park are one critical section,
 which is exactly what the model's `park` encodes and the only reason a wakeup cannot be lost between them:

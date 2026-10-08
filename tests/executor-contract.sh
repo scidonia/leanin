@@ -941,6 +941,97 @@ check_sc4() {
     "$seed" "$fail_pos" "$fail_task" "$fail_out"
 }
 
+# steps_on <bracketed identity list> <carrier> — true when the list is nonempty and every entry is the
+# carrier. The syntax is the one id_sequence_is accepts, checked here for the same reasons: a dropped,
+# empty, doubled or extra entry is rejected before any entry is compared.
+steps_on() {
+  local list="$1" carrier="$2" inner e
+  case "$list" in
+    '['*']')
+      inner="${list#"["}"
+      inner="${inner%"]"}"
+      ;;
+    *) return 1 ;;
+  esac
+  case "$inner" in '' | ',' | ','* | *',' | *',,'*) return 1 ;; esac
+  local IFS=','
+  for e in $inner; do
+    [ "$e" = "$carrier" ] || return 1
+  done
+  return 0
+}
+
+# --- SC6 — real work runs on one carrier, and a pool worker only ever enqueues ————————————————————————
+check_sc6() {
+  local out status line caller steps external value remaining
+  local -a records=()
+  # The two numbers the program's own value is the sum of, named here because the contract names them.
+  local child_value=11 external_value=5
+  local expect_value=$((child_value + external_value))
+
+  # The measurement's own control, before the invocation is read: the detector must accept a list of one
+  # thread and reject a list carrying another, or a runtime that quietly handed a body to the pool would pass.
+  steps_on '[9,9]' '9' ||
+    setup_error "the carrier-only step detector rejects a list of one thread" \
+      "steps: [[9,9]]" \
+      "the detector's own control, not the SC6 Then"
+  if steps_on '[9,8]' '9'; then
+    setup_error "the carrier-only step detector accepted a step that ran on another thread" \
+      "steps: [[9,8]]" \
+      "the detector's own control, not the SC6 Then"
+  fi
+  printf 'SC6 control: the carrier-only detector accepted two steps on one thread and rejected a foreign one\n'
+
+  out="$(bounded lake exe controls --runtime-threads)"
+  status=$?
+  check_status SC6 "$status" "lake exe controls --runtime-threads"
+  require_header "$out"
+
+  mapfile -t records < <(grep '^exec|runtime|' <<<"$out" || true)
+  [ "${#records[@]}" -eq 1 ] ||
+    fail "SC6 Then: the runtime did not report where its steps ran" \
+      "expected exactly one exec|runtime| record, saw ${#records[@]}"
+  line="${records[0]}"
+
+  record_is "${line#exec|runtime|}" caller steps external value remaining ||
+    fail "SC6 Then: the runtime did not report where its steps ran" \
+      "the record is not exactly caller/steps/external/value/remaining with nonempty values: [$line]"
+
+  caller="$(field caller "$line")" ||
+    fail "SC6 Then: the runtime did not report where its steps ran" "no single nonempty caller field: [$line]"
+  steps="$(field steps "$line")" ||
+    fail "SC6 Then: the runtime did not report where its steps ran" "no single nonempty steps field: [$line]"
+  external="$(field external "$line")" ||
+    fail "SC6 Then: the runtime did not report where its steps ran" "no single nonempty external field: [$line]"
+  value="$(field value "$line")" ||
+    fail "SC6 Then: the runtime did not report where its steps ran" "no single nonempty value field: [$line]"
+  remaining="$(field remaining "$line")" ||
+    fail "SC6 Then: the runtime did not report where its steps ran" "no single nonempty remaining field: [$line]"
+
+  # Every step the runtime ran, on the thread the caller started it on.
+  steps_on "$steps" "$caller" ||
+    fail "SC6 Then: a task step ran off the caller's thread" \
+      "steps=$steps caller=$caller" \
+      "the single-carrier claim is that the driver, every body and every resumption are one thread"
+
+  # …and the measurement is not vacuous: another thread was in the picture and was observed.
+  [ "$external" != "$caller" ] ||
+    fail "SC6 Then: no other thread was observable, so the thread identities establish nothing" \
+      "external=$external caller=$caller" \
+      "the external completion must have run on a pool worker"
+
+  [ "$value" = "$expect_value" ] ||
+    fail "SC6 Then: the awaited values did not both arrive" \
+      "value=$value" \
+      "expected the child's $child_value plus the external completion's $external_value"
+
+  [ "$remaining" = "0" ] ||
+    fail "SC6 Then: the runtime held work when the program finished" "remaining=$remaining"
+
+  printf 'SC6 ok: steps=%s all on caller=%s; external=%s is another thread; value=%s; remaining=%s\n' \
+    "$steps" "$caller" "$external" "$value" "$remaining"
+}
+
 # --- the queue expectation the SC5 checks read, derived from the pool model ————————————————————————
 # Every number here is the model's, not an invocation's. The script has two phases. Phase one submits
 # 0..256 before taking any, then drains that whole batch. `cap` is 256 (`LeanIn/Model/Pool.lean:52`)
@@ -1224,8 +1315,9 @@ SC2) check_sc2 ;;
 SC3) check_sc3 ;;
 SC4) check_sc4 ;;
 SC5) check_sc5 ;;
+SC6) check_sc6 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6\n' >&2
   exit 2
   ;;
 esac
