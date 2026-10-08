@@ -145,14 +145,14 @@ alone. -/
 axiom newMutex_spec {r : Rep} {w w' : World} {l : LockId} {t : Tid} {m : Std.BaseMutex} :
     IsLock r m l →
     Runs r t (Std.BaseMutex.new : BaseIO Std.BaseMutex) w m w' →
-    (w'.locks l).owner = none ∧ w.SameClock w'
+    (w'.locks l).owner = none ∧ w.SameClock w' ∧ w.FrameLock l w'
 
 /-- **A0 — condvar creation.** A completed `new` yields a condvar with no waiters, and leaves the clock
 alone. -/
 axiom newCondvar_spec {r : Rep} {w w' : World} {c : CondvarId} {t : Tid} {cv : Std.Condvar} :
     IsCondvar r cv c →
     Runs r t (Std.Condvar.new : BaseIO Std.Condvar) w cv w' →
-    (w'.condvars c).waiters = [] ∧ w.SameClock w'
+    (w'.condvars c).waiters = [] ∧ w.SameClock w' ∧ w.FrameCondvar c w'
 
 /-! ### A1–A2 — the mutex -/
 
@@ -167,7 +167,7 @@ world is not forced to be *only* what the model says — the mutex is free to ha
 model does not track. -/
 axiom lock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} :
     IsLock r m l → Runs r t (Std.BaseMutex.lock m) w () w' →
-    (w'.locks l).owner = some t ∧ w.SameClock w'
+    (w'.locks l).owner = some t ∧ w.SameClock w' ∧ w.FrameLock l w'
 
 /-- **A2 — non-blocking acquisition.** `lean_io_basemutex_try_lock` (`mutex.cpp:33`) →
 `std::mutex::try_lock`.
@@ -185,7 +185,7 @@ axiom tryLock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t 
     Runs r t (Std.BaseMutex.tryLock m) w b w' →
     (b = true → (w'.locks l).owner = some t) ∧
     (b = false → (w'.locks l).owner = (w.locks l).owner ∧ (w'.locks l).owner ≠ some t) ∧
-    w.SameClock w'
+    w.SameClock w' ∧ w.FrameLock l w'
 
 /-- **A3 — release.** `lean_io_basemutex_unlock` (`mutex.cpp:37`) → `std::mutex::unlock`.
 
@@ -193,7 +193,8 @@ Requires ownership — releasing without holding is undefined behaviour, which i
 transition for it (`unlock_without_ownership_has_no_transition`). -/
 axiom unlock_spec {r : Rep} {m : Std.BaseMutex} {w w' : World} {l : LockId} {t : Tid} :
     IsLock r m l → (w.locks l).owner = some t →
-    Runs r t (Std.BaseMutex.unlock m) w () w' → (w'.locks l).owner = none ∧ w.SameClock w'
+    Runs r t (Std.BaseMutex.unlock m) w () w' →
+    (w'.locks l).owner = none ∧ w.SameClock w' ∧ w.FrameLock l w'
 
 /-! ### A4–A5 — the condition variable -/
 
@@ -218,6 +219,13 @@ carrier may `tick` or read the clock between the stages, and requiring equality 
 exclude exactly those executions. The converse mistake is worth naming too — preserving the clock in an
 *effect* is not the same claim as the *call* taking no time. Sample evolution across a call belongs to its
 trace, and a `SameClock` conjunct here made the two claims identical.
+
+**No frame is attached to the tracked fields either, and for the same reason.** `World.FrameLock` and
+`World.FrameCondvar` belong to the isolated effects, where the world pair is one event. Here the
+environment acquires, releases and notifies between the stages, so a frame over other locks and condvars
+would forbid exactly the executions the trace exists to admit. What this interval promises about the
+tracked fields is what the *caller* observes — it holds the lock again, and its enrolment is gone — and
+nothing about the rest of the world.
 
 Both conjuncts are what the *caller* observes on return: it holds the lock again, and it has stopped
 being a waiter. The second is not decoration. Without it nothing downstream could conclude that a
@@ -264,7 +272,8 @@ axiom notifyOne_spec {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId}
     (((w.condvars c).waiters = [] ∧ (w'.condvars c).waiters = []) ∨
      ∃ front : List Tid, ∃ x : Tid, ∃ back : List Tid,
        (w.condvars c).waiters = front ++ x :: back ∧
-       (w'.condvars c).waiters = front ++ back)
+       (w'.condvars c).waiters = front ++ back) ∧
+    w.FrameCondvar c w'
 
 /-- **A5 — broadcast.** `lean_io_condvar_notify_all` (`mutex.cpp:67`).
 
@@ -286,7 +295,8 @@ axiom notifyAll_spec {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId}
     IsCondvar r cv c → Runs r t (Std.Condvar.notifyAll cv) w () w' →
     w.SameClock w' ∧
     (∀ u, u ∈ (w.condvars c).waiters → u ∉ (w'.condvars c).waiters) ∧
-    (∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters)
+    (∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters) ∧
+    w.FrameCondvar c w'
 
 /-! ### A7 — the clock -/
 
@@ -300,7 +310,8 @@ clock that no read moved, and "the clock never goes backwards" stayed a property
 theorem could use. Equal readings are permitted: the native clock has finite resolution. -/
 axiom clock_spec {w w' : World} {n : Nat} {t : Tid} :
     Runs r t (IO.monoNanosNow : BaseIO Nat) w n w' →
-    w'.clock = w.clock ∧ w'.lastSample = some n ∧ ∀ s, w.lastSample = some s → s ≤ n
+    w'.clock = w.clock ∧ w'.lastSample = some n ∧ (∀ s, w.lastSample = some s → s ≤ n) ∧
+    w.FrameNothing w'
 
 
 /-! ### Composition
@@ -359,10 +370,10 @@ theorem readings_monotone_across_a_call {r : Rep} {m : Std.BaseMutex} {l : LockI
     n₁ ≤ n₂ := by
   have hs : w₂.lastSample = some n₁ := (clock_spec h₁).2.1
   have hpres : w₃.lastSample = w₂.lastSample := by
-    have := (lock_spec hL h₂).2
+    have := (lock_spec hL h₂).2.1
     simp [World.SameClock] at this
     exact this.2
-  have hbound : ∀ s, w₃.lastSample = some s → s ≤ n₂ := (clock_spec h₃).2.2
+  have hbound : ∀ s, w₃.lastSample = some s → s ≤ n₂ := (clock_spec h₃).2.2.1
   exact hbound n₁ (by rw [hpres, hs])
 
 
@@ -376,7 +387,7 @@ satisfies that and trades one waiter's identity for another. -/
 theorem notifyOne_no_additions {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid}
     (hC : IsCondvar r cv c) (h : Runs r t (Std.Condvar.notifyOne cv) w () w') :
     ∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters := by
-  obtain ⟨-, hcase⟩ := notifyOne_spec hC h
+  obtain ⟨-, hcase, -⟩ := notifyOne_spec hC h
   intro u hu
   rcases hcase with ⟨-, hsame⟩ | ⟨front, x, back, hw, hw'⟩
   · exact absurd hu (by simp [hsame])
@@ -390,7 +401,7 @@ where "every waiter is gone" together with "does not grow" would have admitted t
 theorem notifyAll_no_additions {r : Rep} {cv : Std.Condvar} {w w' : World} {c : CondvarId} {t : Tid}
     (hC : IsCondvar r cv c) (h : Runs r t (Std.Condvar.notifyAll cv) w () w') :
     ∀ u, u ∈ (w'.condvars c).waiters → u ∈ (w.condvars c).waiters :=
-  (notifyAll_spec hC h).2.2
+  (notifyAll_spec hC h).2.2.1
 
 /-- The form the two now-replaced axioms used: "does not grow, and loses at most one". Kept as the control
 for the theorems above -- a detector that *matches* the defect while it is present is the only thing that
@@ -421,7 +432,7 @@ theorem notifyOne_selects {r : Rep} {cv : Std.Condvar} {w w' : World} {c : Condv
     (hC : IsCondvar r cv c) (h : Runs r t (Std.Condvar.notifyOne cv) w () w')
     (hne : (w.condvars c).waiters ≠ []) :
     (w'.condvars c).waiters.length + 1 = (w.condvars c).waiters.length := by
-  obtain ⟨-, hcase⟩ := notifyOne_spec hC h
+  obtain ⟨-, hcase, -⟩ := notifyOne_spec hC h
   rcases hcase with ⟨hempty, -⟩ | ⟨front, x, back, hw, hw'⟩
   · exact absurd hempty hne
   · rw [hw, hw', List.length_append, List.length_append, List.length_cons]

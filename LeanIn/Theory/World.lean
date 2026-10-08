@@ -97,6 +97,29 @@ Preserving the clock in an *effect* is also not the same claim as the *call* tak
 it for a call is a property of the call's trace; see `Bridge.CallExec` and `wait_spec`. -/
 def World.SameClock (w w' : World) : Prop := w'.clock = w.clock ∧ w'.lastSample = w.lastSample
 
+/-- **Only the named lock may differ.** Every *other* lock keeps its owner and every condvar keeps its
+waiters: the frame of one isolated effect on `l`, which is to say what the primitive claims to do to the
+rest of the tracked world, namely nothing.
+
+Two things it is not. It is not attached to a call that spans stages — `wait` — where the environment acts
+between the stages and the contract says so through its trace instead. And it is not representation
+validity: a frame says which *fields* a step leaves alone, never that a map identifies live runtime objects
+faithfully. Those stay separate, and validity is the harder of the two. -/
+def World.FrameLock (l : LockId) (w w' : World) : Prop :=
+  (∀ l' ≠ l, (w'.locks l').owner = (w.locks l').owner) ∧
+  (∀ c, (w'.condvars c).waiters = (w.condvars c).waiters)
+
+/-- **Only the named condvar may differ.** Every lock keeps its owner and every *other* condvar keeps its
+waiters. -/
+def World.FrameCondvar (c : CondvarId) (w w' : World) : Prop :=
+  (∀ l, (w'.locks l).owner = (w.locks l).owner) ∧
+  (∀ c' ≠ c, (w'.condvars c').waiters = (w.condvars c').waiters)
+
+/-- **Nothing tracked differs.** -/
+def World.FrameNothing (w w' : World) : Prop :=
+  (∀ l, (w'.locks l).owner = (w.locks l).owner) ∧
+  (∀ c, (w'.condvars c).waiters = (w.condvars c).waiters)
+
 /-- An action.
 
 `spurious` exists because A4 permits it: a waiter may resume with no notification. There is no
