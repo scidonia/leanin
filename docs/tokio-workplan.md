@@ -152,6 +152,25 @@ integration, which changes the size of the largest webserver item. Read-only, an
 **Acceptance.** A written answer, a line per question with a file-and-line anchor, and a verdict on whether W9
 is integration or implementation.
 
+**Met.** `Std.Http.Server` is a complete HTTP/1.1 server and the answer is **integration**.
+
+| question | answer |
+|---|---|
+| how is it driven | it abstracts over a **`Std.Http.Transport`** class (`Std/Http/Transport.lean`): `recv`, `sendAll`, `recvSelector`, `close`, all `Async`-typed. `Socket.Client` is one instance and a channel-backed `Mock` another, so the transport is ours to choose |
+| keep-alive | `Config.enableKeepAlive` (on by default), `maxRequests` per connection, `keepAliveTimeout` 12 s (`Std/Http/Server/Config.lean`) |
+| limits | `maxConnections` 1024, `maxHeaders` 50, `maxHeaderBytes` 64 KiB, `maxUriLength` 8192, per-name and per-value limits, chunk limits (`maxChunkSize` 8 MiB), `maxBodySize` 64 MiB, `maxTrailerHeaders` |
+| timeouts | `headerTimeout` 5 s, named in the source as the defence against slowloris, and `lingeringTimeout` 10 s for bodies, both `Time.Millisecond.Offset` |
+| methods, chunked | `Data/Method.lean` and `Data/Chunk.lean`, with the H1 codec in `Protocol/H1.lean` (56 KB) and `Internal/ChunkedBuffer.lean` |
+| shutdown | a `CancellationContext`, an `activeConnections` counter and a `shutdownPromise`: `shutdown`, `waitShutdown`, `shutdownAndWait`, and the promise resolves only when the count reaches zero — a drain, not a flag |
+| limiting | a `Semaphore` acquired *before* `accept`, so the cap bounds accepted connections rather than queued ones |
+
+Two consequences for the plan. W9 is an integration, and W11 shrinks: the request line, the headers and
+chunked framing with all their limits are inside the H1 codec, so W11 covers only what a router or a body helper
+needs on top. And the limits, timeouts and drain that W5, W6 and W14 were partly for are already *policy of the
+reused server*; what remains ours is that the runtime honours them on our carriers — the one thing to verify by
+running rather than by reading, since `serve`'s accept loop and its per-connection `ContextAsync.background`
+must step on our carriers with nothing inside doing a blocking `Task.get`.
+
 ### W11 — Buffered I/O helpers
 
 **Deliverable.** The reading and writing shapes an HTTP parser assumes, over W1's leaves: `readUntil` against a
@@ -162,6 +181,10 @@ hand-rolls all four.
 
 **Why Tokio.** `AsyncBufReadExt::{read_until, lines}`, `read_exact`, `copy`, `TcpStream::split`, `BufWriter`.
 This is the layer between the socket and the protocol, and it is small.
+
+**Shrunk by W10.** The request line, the headers, chunked framing and their limits all live in the H1 codec
+(`Protocol/H1.lean`, `Data/Chunk.lean`), so this item is only the shapes a router or a body helper needs on top
+of them.
 
 **Acceptance.** A scenario framing two messages with a delimiter that arrives across three writes, with the
 split point inside the delimiter, plus the control that the same detector rejects a partial read taken as
@@ -278,12 +301,16 @@ chain-shape advantage (7.6×) must not regress.
 
 ### W9 — The HTTP surface
 
-**Deliverable.** Either `Std.Http.Server` driven by the runtime — the survey's own verdict is "reuse" — or a
-minimal specified HTTP/1.1 if the project wants the protocol's own contracts.
+**Deliverable.** `Std.Http.Server` driven by the runtime. W10's survey says integration, and the seam is
+`Std.Http.Transport`: an instance whose `recv`, `sendAll` and `recvSelector` are our leaf operations awaited
+through W1, so a connection of ours is what the server is handed. The default `Socket.Client` instance is
+available but not required, and the channel-backed `Mock` instance is what makes the server testable with no
+socket in the picture at all.
 
 **Why Tokio.** This is hyper/axum's role, and it is where "write a web server" actually lands.
 
-**Depends on W10**: whether this item is integration or implementation is what that survey decides.
+**W10 decided this**: integration, through `Transport`, which is why the deliverable is an instance rather
+than a protocol.
 
 **Acceptance.** An end-to-end scenario: a request over a real socket, a byte-exact response, and the framework's
 behaviour contracts with their controls.
