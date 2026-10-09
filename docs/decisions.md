@@ -257,7 +257,6 @@ total and independent of `WF` — `Array.set` demands a bound proof. The `List` 
 `Ring.toList`, where its algebraic lemmas keep the proofs short. That split is the one Lean's own
 containers use.
 
-
 **The transaction releases the cell's hold before it modifies the pool.** `Array.set` copies when the array is
 still referenced elsewhere, and a transaction's `get` leaves exactly one other reference behind — the cell's
 own. So a ring mutation under `Mutex.atomically` copies the slots (2 KB at `cap = 256`), and those copies are
