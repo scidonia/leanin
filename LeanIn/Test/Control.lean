@@ -755,6 +755,10 @@ def runtimeNet : IO UInt32 := do
   let exact := (replies.filter (fun r => r == some payload)).length
   let perturbed := (replies.filter (fun r => r == some (payload.push 0))).length
   let (inFlightAfter, _) ← e.observe
+  -- A shipped-path echo server for the same workload was tried here and backed out: an accept loop with a
+  -- per-connection `background` does not elaborate inside this module (`whnf` heartbeat exhaustion in the
+  -- shipped combinators). The comparison it was for is W16's item, where the server under the harness is a
+  -- variable by design rather than a second copy of the loop living in a diagnostic.
   match outcome with
   | .error err => IO.println s!"net|failed={err}"; return 1
   | .ok () =>
@@ -983,9 +987,33 @@ def runtimeTime : IO UInt32 := do
     let hit ← Runtime.withTimeout hooks 50 (Runtime.never : LeanIn.Task.Async Unit)
     let miss ← Runtime.withTimeout hooks 200 (pure 7)
     return (hit, miss))
+  -- The task layer's first-writer-wins law, and the timeout's own loser actually happening. The two writes are
+  -- issued in order rather than raced, because which of two racing writers wins is a scheduling fact and this
+  -- is a claim about the operation: the first value stays and the second is ignored. The `withTimeout` below
+  -- is the integration half — the computation finishes, its 5 ms timer fires during the 40 ms after it, and
+  -- the late write changes nothing. A `Join.resolve` in either position would raise out of the driver instead,
+  -- so arriving at the print at all is part of the evidence.
+  let (firstWins, lateTimerIgnored) ← Runtime.run e (do
+    let cell ← LeanIn.Task.Join.new
+    LeanIn.Task.Join.resolveFirst cell (some 1)
+    LeanIn.Task.Join.resolveFirst cell (some 2)
+    let first ← LeanIn.Task.Async.await (show LeanIn.Task.Task (Option Nat) from ⟨cell⟩)
+    let late ← Runtime.withTimeout hooks 5 (pure 7)
+    Runtime.sleep hooks 40
+    return (first, late))
+  -- The other path for the same workload: a sleep that occupies the thread it runs on. The `Std.Async` half of
+  -- this comparison is already measured and cited rather than re-run here — `spike` reports 64 concurrent
+  -- `Async.sleep 100` in 102 ms (`docs/evidence.md`), which is the parity this row exists to state — because the
+  -- shipped timer fan-out does not elaborate inside this module. Printed, never asserted.
+  let t3 ← IO.monoNanosNow
+  for _ in List.range n do IO.sleep 50
+  let t4 ← IO.monoNanosNow
   let hitStr := match hit with | none => "none" | some _ => "some"
   let missStr := match miss with | none => "none" | some v => s!"some:{v}"
-  IO.println s!"time|sleepers={n}|overlap={overlap}|lateBeforeWake={lateBeforeWake}|wakes={wakes}|timeoutHit={hitStr}|timeoutMiss={missStr}|sleepUs={(t1 - t0) / 1000}"
+  let firstStr := match firstWins with | none => "none" | some v => s!"some:{v}"
+  let lateStr := match lateTimerIgnored with | none => "none" | some v => s!"some:{v}"
+  IO.println s!"time|sleepers={n}|overlap={overlap}|lateBeforeWake={lateBeforeWake}|wakes={wakes}|timeoutHit={hitStr}|timeoutMiss={missStr}|firstWins={firstStr}|lateTimerIgnored={lateStr}|sleepUs={(t1 - t0) / 1000}"
+  IO.println s!"timebase|blockingSleepUs={(t4 - t3) / 1000}"
   IO.println s!"timectl|blockingOrderOverlaps={blockingOrderOverlaps}|missingWakeWakes={missingWakeWakes}"
   return 0
 

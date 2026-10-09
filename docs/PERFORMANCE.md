@@ -66,6 +66,9 @@ Each multiplier is same-run, as in §2.
 | tail: last of 10 000 tasks started | 14 038 µs after the first | stock pool 46 013 µs | 🟢 **3.3× better** | `--runtime-tail` |
 | shared counter, 10 000 increments | 14 014 µs, a plain `IO.Ref` (correct for one carrier) | stock pool with the mutex its 8 threads require: 49 741 µs | 🟢 **3.5× faster** | `--runtime-shared` |
 | four 50 ms timers on one carrier, via libuv | 51 ms | a serial blocking path: 200 ms | 🟢 **3.9× better** | `--runtime-sleep` |
+| 16 × 50 ms sleeps, one carrier | 51–52 ms | `IO.sleep` on the thread it runs on: 801 ms | 🟢 **15.4× better** | `--runtime-time` |
+| the same 16 sleeps against the shipped timer path | 51–52 ms | 64 × 100 ms in 102 ms | ⚪ parity, and a citation rather than a same-run pair (`docs/evidence.md`) | `spike` |
+| 16 concurrent echo connections on one carrier | 4.8–6.9 ms wall (≈ 2.3–3.3 k connections/s) | — | ⚪ no baseline yet: the shipped server on this workload is W16 | `--runtime-net` |
 | critical section, notification with nobody parked | 27 ns / 1 ns | — | ⚪ no baseline | `--runtime-ops` |
 
 The last three are the interesting ones. The tail row says an idle worker does not have to be a slow one: a task
@@ -177,6 +180,8 @@ thread, which is one thread per task rather than a bounded blocking pool.
 | `nix develop -c lake exe controls --runtime-tail` | how late the last of 10 000 tasks starts, and the stock pool's starvation and dedicated-thread shapes |
 | `nix develop -c lake exe controls --runtime-shared` | the same counter under each design's required discipline, and what the stock pool loses without its lock |
 | `nix develop -c lake exe controls --runtime-sleep` | four 50 ms libuv timers on one carrier — 51 ms, against 200 ms for a serial sleep path |
+| `nix develop -c lake exe controls --runtime-net` | 16 concurrent echo connections on one carrier: the connection count, the server's thread count, whether the client shares it, the byte-identical replies, and the pool alongside |
+| `nix develop -c lake exe controls --runtime-time` | 16 × 50 ms sleeps and their event order, two timeout outcomes, the task layer's first-writer law, and the blocking path for the same sleeps |
 
 ## 7. What these numbers are not
 

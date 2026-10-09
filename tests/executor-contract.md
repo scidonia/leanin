@@ -306,7 +306,8 @@ runs the two timeouts. Each sleeper records `start:i` before it sleeps and `wake
 that it ran.
 
 **Then.** There is exactly one `time|` record, and its fields are exactly `sleepers`, `overlap`,
-`lateBeforeWake`, `wakes`, `timeoutHit`, `timeoutMiss` and `sleepUs` in that order with nonempty values.
+`lateBeforeWake`, `wakes`, `timeoutHit`, `timeoutMiss`, `firstWins`, `lateTimerIgnored` and `sleepUs` in that
+order with nonempty values.
 
 `overlap` is `true`, and it is the whole point: **every one of the `16` starts precedes the first wake**, so the
 sleeps parked on the timer rather than occupying the carrier. That is the clock-free form of "they finish in
@@ -315,11 +316,24 @@ first two starts, and this reading would be `false`. `lateBeforeWake` is `true`:
 sleeper was pending ran before the first wake, which is the same fact seen from the other side. `wakes` equals
 `sleepers`, so every sleeper did wake, and `timeoutHit` is `none` while `timeoutMiss` is `some:7` — the inner
 computation that never finishes times out, the one that finishes immediately does not, and neither outcome
-depends on how long a run takes. `sleepUs` is printed and never asserted, for the reason SC7 gives.
+depends on how long a run takes.
 
-The detector reading those five conditions is exercised inside the same invocation: it accepts a well-formed
-record and rejects five near misses — `overlap=false`, `lateBeforeWake=false`, `wakes` one short, each timeout
-outcome swapped, and `timeoutMiss=none`. Every near miss is built from the record syntax and the expectation,
+`firstWins` and `lateTimerIgnored` are the task layer's first-writer law, which is the only thing W3 added to
+it, and they are recorded rather than left to the timeout cases above. `firstWins` is `some:1`: two writes to one
+cell were issued **in order** — not raced, because which of two racing writers wins is a scheduling fact and
+this is a claim about the operation — and the value that arrives is the first, with the second ignored.
+`lateTimerIgnored` is `some:7`: a `withTimeout` whose computation finished immediately, followed by a 40 ms sleep
+against a 5 ms deadline, so the timer *does* fire — inside the run, after the winner wrote — and the value is
+still the computation's. The reachable defect is exact: the loud `Join.resolve` in either position would raise
+out of the driver instead, so reaching the record at all is part of the evidence, and the near misses for this
+detector are a first value that was overwritten and a late timer that overwrote the winner.
+
+`sleepUs` is printed and never asserted, for the reason SC7 gives.
+
+The detector reading those seven conditions is exercised inside the same invocation: it accepts a well-formed
+record and rejects seven near misses — `overlap=false`, `lateBeforeWake=false`, `wakes` one short, each timeout
+outcome swapped, `timeoutMiss=none`, a `firstWins` of `some:2` where the second writer overwrote the first, and a
+`lateTimerIgnored` of `none` where the timer overwrote the winner. Every near miss is built from the record syntax and the expectation,
 never from the executable's output, and a control that does not hold is a fixture defect rather than this
 `Then`. The executable's own two controls are read from its `timectl|` record and required to hold: its overlap
 detector reads `false` on a deliberately blocking-shaped order (`start,wake,start,wake`), and its wake counter

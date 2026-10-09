@@ -1404,21 +1404,26 @@ check_sc7() {
 
 # time_ok <record> — W3's observations as a detector, so its own control can reuse it rather than a lookalike:
 # every sleeper started before the first one woke, so the sleeps parked on the timer instead of occupying the
-# carrier; the task spawned while all of them slept ran between those two; each sleeper woke exactly once; and
-# each timeout outcome is the one its inner computation must produce.
+# carrier; the task spawned while all of them slept ran between those two; each sleeper woke exactly once; each
+# timeout outcome is the one its inner computation must produce; and the task layer's first-writer law holds,
+# including the timeout's own loser, whose late write must have been ignored rather than overwriting.
 time_ok() {
-  local rec="$1" sl ov lb w hit miss
+  local rec="$1" sl ov lb w hit miss fw lt
   sl="$(field sleepers "$rec")" || return 1
   ov="$(field overlap "$rec")" || return 1
   lb="$(field lateBeforeWake "$rec")" || return 1
   w="$(field wakes "$rec")" || return 1
   hit="$(field timeoutHit "$rec")" || return 1
   miss="$(field timeoutMiss "$rec")" || return 1
+  fw="$(field firstWins "$rec")" || return 1
+  lt="$(field lateTimerIgnored "$rec")" || return 1
   [ "$ov" = "true" ] || return 1
   [ "$lb" = "true" ] || return 1
   [ "$w" = "$sl" ] || return 1
   [ "$hit" = "none" ] || return 1
   [ "$miss" = "some:7" ] || return 1
+  [ "$fw" = "some:1" ] || return 1
+  [ "$lt" = "some:7" ] || return 1
 }
 
 # --- SC8 — timers on our carriers: sleeps that park rather than occupy, and timeouts that fire ————————————
@@ -1439,27 +1444,29 @@ check_sc8() {
       "expected exactly one time| record, saw ${#records[@]}"
   line="${records[0]}"
 
-  record_is "${line#time|}" sleepers overlap lateBeforeWake wakes timeoutHit timeoutMiss sleepUs ||
+  record_is "${line#time|}" sleepers overlap lateBeforeWake wakes timeoutHit timeoutMiss firstWins lateTimerIgnored sleepUs ||
     fail "SC8 Then: timer work on the carrier not observed exactly once" \
-      "the record is not exactly sleepers/overlap/lateBeforeWake/wakes/timeoutHit/timeoutMiss/sleepUs with nonempty values: [$line]"
+      "the record is not exactly sleepers/overlap/lateBeforeWake/wakes/timeoutHit/timeoutMiss/firstWins/lateTimerIgnored/sleepUs with nonempty values: [$line]"
 
   # The detector's own control, from the record syntax and the expectation alone.
-  time_ok 'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=some:7|sleepUs=1' ||
+  time_ok 'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=some:7|firstWins=some:1|lateTimerIgnored=some:7|sleepUs=1' ||
     setup_error "SC8: the timer-observation detector rejected a well-formed record" \
       "the detectors' own control, not the SC8 Then"
   for near in \
-    'sleepers=16|overlap=false|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=some:7|sleepUs=1' \
-    'sleepers=16|overlap=true|lateBeforeWake=false|wakes=16|timeoutHit=none|timeoutMiss=some:7|sleepUs=1' \
-    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=15|timeoutHit=none|timeoutMiss=some:7|sleepUs=1' \
-    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=some|timeoutMiss=some:7|sleepUs=1' \
-    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=none|sleepUs=1'; do
+    'sleepers=16|overlap=false|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=some:7|firstWins=some:1|lateTimerIgnored=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=false|wakes=16|timeoutHit=none|timeoutMiss=some:7|firstWins=some:1|lateTimerIgnored=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=15|timeoutHit=none|timeoutMiss=some:7|firstWins=some:1|lateTimerIgnored=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=some|timeoutMiss=some:7|firstWins=some:1|lateTimerIgnored=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=none|firstWins=some:1|lateTimerIgnored=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=some:7|firstWins=some:2|lateTimerIgnored=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=some:7|firstWins=some:1|lateTimerIgnored=none|sleepUs=1'; do
     if time_ok "$near"; then
       setup_error "SC8: the timer-observation detector accepted a near miss" \
         "record: [$near]" \
         "the detectors' own control, not the SC8 Then"
     fi
   done
-  printf 'SC8 control: rejected sleeps that occupied the carrier, a late task that did not run, a missed wake and either timeout outcome swapped\n'
+  printf 'SC8 control: rejected sleeps that occupied the carrier, a late task that did not run, a missed wake, either timeout outcome swapped, a second writer overwriting the first and a late timer overwriting the winner\n'
 
   ctl="$(grep '^timectl|' <<<"$out" | head -1)"
   [ -n "$ctl" ] ||
@@ -1486,8 +1493,12 @@ check_sc8() {
   bound_field timeout_hit timeoutHit "$line" "SC8 Then"
   bound_field timeout_miss timeoutMiss "$line" "SC8 Then"
 
-  printf 'SC8 ok: sleepers=%s overlap=%s lateBeforeWake=%s wakes=%s timeoutHit=%s timeoutMiss=%s\n' \
-    "$sleepers" "$overlap" "$late_before_wakes" "$wakes" "$timeout_hit" "$timeout_miss"
+  local first_wins late_timer_ignored
+  bound_field first_wins firstWins "$line" "SC8 Then"
+  bound_field late_timer_ignored lateTimerIgnored "$line" "SC8 Then"
+
+  printf 'SC8 ok: sleepers=%s overlap=%s lateBeforeWake=%s wakes=%s timeoutHit=%s timeoutMiss=%s firstWins=%s lateTimerIgnored=%s\n' \
+    "$sleepers" "$overlap" "$late_before_wakes" "$wakes" "$timeout_hit" "$timeout_miss" "$first_wins" "$late_timer_ignored"
 }
 
 case "${1:-}" in

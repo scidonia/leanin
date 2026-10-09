@@ -154,6 +154,14 @@ driver a stock-typed value and put the work back on the pool. What this module d
 driver of *ours* uses (`Conn`); the transport class belongs with the layer that drives it, which is the copy W15
 describes.
 
+**The measurement, and what it does not have.** `--runtime-net` reports sixteen concurrent connections in
+4.8–6.9 ms of wall time on one carrier — roughly 2.3–3.3 k connections a second, against a client that is not
+ours. It has **no baseline**, and that is honest rather than pending: a shipped-path echo server for the same
+workload was written into the diagnostic and backed out, because its accept loop with a per-connection
+`background` does not elaborate there. The comparison this row wants is W16's, where the server under the
+harness is a variable by design; `docs/PERFORMANCE.md` carries the row marked as having no baseline rather than
+leaving it out.
+
 **Acceptance.** A scenario: N concurrent connections, each echoed correctly, every step on the carrier,
 `inFlight` back to 0 at the end. A measurement: connections per second and per-connection round trip, added as
 rows so regressions are visible.
@@ -192,7 +200,16 @@ now tests.
 
 **What is left behind, stated.** A `withTimeout` that returns because its computation finished leaves its timer
 pending until it fires: one parked task, and nothing else. Cancelling it needs a handle on the timer and an
-operation that drops scheduled work, and both are W5's.
+operation that drops scheduled work, and both are W5's. What is *not* left untested is the loser's write:
+`firstWins` and `lateTimerIgnored` in SC8's record are the first-writer law itself, the second of them with the
+timer genuinely firing after the winner wrote — and the loud `resolve` in either position would raise out of the
+driver instead, so reaching the record at all is part of that evidence.
+
+**The comparison, and the one it is missing.** Sixteen 50 ms sleeps on one carrier cost 51 ms against **801 ms**
+for the same sleeps on the thread they run on — 15.4× — which is the "parked, not occupied" claim measured on a
+workload that is the feature's own. Against the shipped timer path the row is *parity* (51 ms against `spike`'s
+64 × 100 ms in 102 ms), and that one is a citation rather than a same-run pair, because the shipped timer
+fan-out does not elaborate inside the test client; it is marked as a crossing in `docs/PERFORMANCE.md`.
 
 ### W10 — The HTTP surface we would actually be reusing
 

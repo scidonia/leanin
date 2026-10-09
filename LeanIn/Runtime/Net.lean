@@ -79,27 +79,19 @@ partial def echoConn (hooks : Hooks) (c : Conn) : Task.Async Unit := do
   | none       => c.shutdown hooks
   | some chunk => c.send hooks chunk; echoConn hooks c
 
-/-- **An accept loop of our own**, spawning a child per connection and waiting for none of them: what a server
-does, and what a caller therefore drives with `Runtime.run` rather than expecting to finish.
+/-- **An accept loop of our own.** It accepts `n` connections — one task each, through `background`, which
+against `MonadAsync` is the local route, so a connection stays on the carrier its accept ran on — and then
+awaits them all.
 
-The child goes through `background`, which against `MonadAsync` is the local route — a connection stays on the
-carrier its accept ran on. -/
-def serveN (hooks : Hooks) (l : Listener) (n : Nat) (body : Conn → Task.Async Unit) : Task.Async Unit := do
-  for _ in List.range n do
-    let client ← l.accept hooks
-    Task.background (body client)
-
-/-- **The same loop, awaited.** For a driver that wants the connections *finished* rather than merely started,
-which is what makes "the executor holds nothing afterwards" an observation rather than a guess. -/
+Awaiting is what makes "the executor holds nothing afterwards" an observation rather than a guess, so this is
+the loop the scenario uses. A fire-and-forget variant existed here and was deleted rather than kept: nothing
+called it, and an untested export is worse than a missing one, since the driver that will want it can add it
+back where it is used. -/
 def serveNJoin (hooks : Hooks) (l : Listener) (n : Nat) (body : Conn → Task.Async Unit) : Task.Async Unit := do
   let hs ← (List.range n).mapM (fun _ => do
     let client ← l.accept hooks
     Task.MonadAsync.spawn (body client))
   hs.forM (fun h => Task.MonadAwait.await h)
-
-/-- The loop with the echo body, which is the shape W2's scenario uses. -/
-def serveEcho (hooks : Hooks) (l : Listener) (n : Nat) : Task.Async Unit :=
-  serveN hooks l n (echoConn hooks)
 
 /-- **The loopback address a scenario binds**: `127.0.0.1` and a port. -/
 def loopback (port : UInt16 := 0) : Std.Net.SocketAddress :=
