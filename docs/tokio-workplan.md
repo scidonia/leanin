@@ -366,8 +366,31 @@ relies on is the parity that actually matters, and it is a short list to check o
 propagating when a task is dropped, the select itself, notification, and the drain at shutdown — the last two
 of which the model already proves.
 
+**The local route, and what it costs.** If upstream latency is unacceptable, the same change can be made first
+in a *namespaced copy* of the modules in question — the precedent is `Vendor/tokio/`, which is a read-only copy
+kept for reference. A copy is editable, so the driver becomes generic here first and the upstream proposal
+follows. The costs are real and belong in the decision: it must be renamed so it cannot collide with the
+toolchain's `Std.Http`, it must be re-diffed whenever the toolchain moves, and it is a fork to be **deleted**
+once upstream lands rather than kept beside it.
+
 **Acceptance.** For the proposal, a written design and a maintainer's reply. For a patch, the evidence W1
 produced for its own boundary: the same driver source typechecks against both `Std.Async`'s types and ours.
+
+### W16 — The HTTP workload, measured on both backends
+
+**Deliverable.** A benchmark of the *server* shape, built so the server under it is a variable rather than part
+of the harness: a client-side row — requests per second, and per-request latency at the median and at the tail
+— that takes a server address, plus a baseline produced today against the shipped `Std.Http.Server`. The
+workload is fixed and written down: connection count, request count, whether connections are kept alive, and
+the response body. A row whose shape changes between runs compares nothing.
+
+**Why.** The reason to make the copy is to run the same server on this runtime, and the only evidence that it
+does is the same harness pointed at both. The client is deliberately *not* ours: it drives TCP over the shipped
+async layer, so the single thing that differs between the two runs is the server's runtime.
+
+**Acceptance.** The baseline row against the shipped server, reproducible from one command; then, once the
+vendored driver exists, the same command against this runtime, differing only in the address it is given. The
+figures enter `docs/PERFORMANCE.md` at that point and not before — that document carries measured rows only.
 
 ### P1, P2 — Two cross-cutting performance items
 
@@ -412,7 +435,8 @@ CPS indirection, which is P1.
 | 13 | **W8** multi-carrier and stealing (O2 first) | | more than one core |
 | 14 | **W15** parameterise the async surface upstream (parallel, gates nothing) | | W9's shape |
 | 15 | **W9** the HTTP surface | | a web server |
-| 16 | **P1** allocation and CPS (P2 landed) | | the benchmark rows |
+| 16 | **W16** the HTTP workload on both backends (needs W9 and the copy) | | the server row |
+| 17 | **P1** allocation and CPS (P2 landed) | | the benchmark rows |
 
 W1 is met, so the order starts at W10 and W2. W10 is read-only and can run beside W2; W2 and W3 give a service
 that answers a request; W11 gives it framing; W5 makes it operable (disconnect, failure, signal); W4 unblocks any
