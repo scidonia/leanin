@@ -254,3 +254,50 @@ theorems about the model, discharged in `Impl` by the serializability argument o
 The model is **executable**, so the first tests are against it — small queues, small schedules,
 enumerated interleavings — before any thread exists. That is the fastest available feedback, and it is
 why the model is not a formality.
+
+For the **service** — the socket accept loop plus one connection body, both in
+[`LeanIn/Runtime/Net.lean`](../LeanIn/Runtime/Net.lean) — the model is
+[`LeanIn/Model/Service.lean`](../LeanIn/Model/Service.lean), and each obligation is paired with the
+declaration it refines and the executor evidence it has:
+
+| Obligation | Model declaration | Executor counterpart |
+|---|---|---|
+| every accepted connection is either completed or closed, never silently dropped | `Service.NoDrop` — `live ++ completed ++ closed` is `Nodup` and has length `admitted` | the connection record's `completed ∪ closed = accepted` as an id multiset, read by SC14-O1 |
+| the number of live connections never exceeds its bound | `Service.Bounded` — `live.length ≤ bound` | `Runtime.serveBounded`'s permit, and the record's `liveHighWater ≤ bound` with the affirmative control `liveHighWater = bound`, read by SC14-O2 |
+| every request gets a response or an error within its deadline — *the answer happens* | `Service.RequestsResolved` — `responded + errored + pending.length = requests` — and `Service.PendingWithinLive` — `∀ i ∈ pending, i ∈ live` | the record's `responded ∪ errored = requests` disjointly, read by SC14-O3 |
+| … *the answer is observed to happen* | — | SC14-O3's clock-free event order: `deadlineFired = yes` alongside the population of both `responded` and `errored` |
+
+The obligations are proved over the model's reachable states: `Service.Reachable` with
+`reachable_invariants` and its per-obligation projections `reachable_noDrop`, `reachable_bounded`,
+`reachable_requests` and `reachable_pendingWithinLive`, the whole guarded by `Service.WF`, and a
+breaking-control per invariant (`abandon_breaks_noDrop`, `acceptBeyondBound_breaks_bounded`,
+`closeDropping_breaks_requests`). `Service.NoDrop` is the partition "every admitted connection appears
+exactly once, in exactly one of `live`/`completed`/`closed`"; `Service.Bounded` is the admission bound
+the loop's permit enforces; and obligation 3's *safety* half is what is proved, while its *liveness*
+half — that a pending request *eventually* reaches its deadline — is not provable from A1–A7 and is not
+claimed ([`primitive-theory.md`](primitive-theory.md) §6).
+
+The operation correspondence is argued per operation, the shape of `Impl.push ⊑ Model.push` above:
+
+| Model | Executor | What is argued |
+|---|---|---|
+| `Service.accept` | the loop's `tryAcquire`-then-`Listener.accept` (`Runtime.serveBounded`) | the loop admits only while a permit is held, so `live.length ≤ bound − permits`, with equality only when no accept is in flight and no body is in its release gap — a permit is held *during* the accept, before a connection exists for it, and a body holds its permit past its end event — and `Service.Bounded` follows; the loop assigns no id, so an admission ordinal is never a connection identity |
+| `Service.request` | the body's `recv` of the staged id | each admission begins at most one request at a time, because the body is serial |
+| `Service.respond` | the body's echo | a returned echo is exactly one `responded` |
+| `Service.deadline` | `withTimeout` returning `none` (`LeanIn/Runtime/Time.lean`) | the deadline transition's executor witness; that the timer *fires* is `Std.Async`'s leaf, not proved here |
+| `Service.complete` | the body's EOF return `.ok` | a connection that returns normally is `completed` |
+| `Service.close` | the body's `.error` (socket failure, a staged failure, EOF before a request) | a connection that terminates without completing is `closed`, and any request it owed is `errored` — `Service.close`'s `pending → errored` |
+
+This correspondence is **argued, not proved**: the refinement theorem `Impl.op ⊑ Model.op` for the
+service's operations is P8's open gap ([`proof-strategy.md`](proof-strategy.md) §3), and the link
+between the two columns is the serializability argument of
+[`primitive-theory.md`](primitive-theory.md) §4, which is itself an argument rather than a theorem.
+SC14 is the executable correspondence test; its clause SC14-O2 is read from the executor's own
+`begin`/`end` annotations, and it is deliberately an order-independent set/inequality detector rather
+than the pairwise-oracle idiom of SC3, because the live server's interleaving is not deterministic. The
+decision, its argued correspondence and the two limits it carries are recorded in
+[`decisions.md`](decisions.md) D15. Both limits are stated plainly there: SC14 exercises only the
+success-path permit release, so the wrapper's error branch is total **by construction** rather than
+observed; and a cancelled body's release step is skipped by `Item.fire`, so a permit can leak — that
+loses admission **liveness** (a service that cancels many bodies can slowly stop admitting), and it does
+not breach `Service.Bounded`, since a leaked permit can only reduce admissions.

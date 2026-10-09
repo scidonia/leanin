@@ -2071,6 +2071,199 @@ check_sc13() {
   done
 }
 
+# multiset_union_is <left> <right> <expected> — true when the two bracketed identity lists together
+# hold exactly the expected bracketed list's ids, with the same multiplicities. Order is not
+# significant; a dropped, doubled, unknown or extra entry changes the combined multiset. Each list is
+# parsed by bracket_elems first, so a malformed field is rejected before any entry is compared.
+multiset_union_is() {
+  local l r e
+  l="$(bracket_elems "$1")" || return 1
+  r="$(bracket_elems "$2")" || return 1
+  e="$(bracket_elems "$3")" || return 1
+  [ "$(printf '%s\n%s\n' "$l" "$r" | sort -n)" = "$(printf '%s\n' "$e" | sort -n)" ]
+}
+
+# multiset_disjoint <left> <right> — true when no id appears in both bracketed lists. Both are parsed
+# by bracket_elems first, so a malformed field is rejected before any membership is compared.
+multiset_disjoint() {
+  local l r
+  l="$(bracket_elems "$1")" || return 1
+  r="$(bracket_elems "$2")" || return 1
+  [ -z "$(printf '%s\n%s\n' "$l" "$r" | sort -n | uniq -d)" ]
+}
+
+# service_noDrop_ok <record> — SC14-O1 as a detector: `completed ∪ closed` is exactly `accepted`, and
+# both paths are populated, so the equality is not carried by one path alone (Service.NoDrop).
+service_noDrop_ok() {
+  local rec="$1" acc comp clo ce cle
+  acc="$(field accepted "$rec")" || return 1
+  comp="$(field completed "$rec")" || return 1
+  clo="$(field closed "$rec")" || return 1
+  ce="$(bracket_elems "$comp")" || return 1
+  cle="$(bracket_elems "$clo")" || return 1
+  [ -n "$ce" ] || return 1
+  [ -n "$cle" ] || return 1
+  multiset_union_is "$comp" "$clo" "$acc"
+}
+
+# service_bounded_ok <record> — SC14-O2 as a detector: the live high-water is within the bound and
+# reaches it, and the mode's second reading of the same count reaches it too (Service.Bounded).
+service_bounded_ok() {
+  local rec="$1" b lhw pap
+  b="$(field bound "$rec")" || return 1
+  lhw="$(field liveHighWater "$rec")" || return 1
+  pap="$(field parkedAtPeak "$rec")" || return 1
+  case "$b$lhw$pap" in *[!0-9]*) return 1 ;; esac
+  [ "$b" -ge 1 ] || return 1
+  [ "$lhw" -le "$b" ] || return 1
+  [ "$lhw" -eq "$b" ] || return 1
+  [ "$pap" -eq "$b" ] || return 1
+  return 0
+}
+
+# service_resolved_ok <record> — SC14-O3 as a detector: `responded ∪ errored` is exactly `requests`,
+# disjointly, the deadline fired, and both outcome paths are populated (Service.RequestsResolved and
+# Service.PendingWithinLive).
+service_resolved_ok() {
+  local rec="$1" req resp err df re ee
+  req="$(field requests "$rec")" || return 1
+  resp="$(field responded "$rec")" || return 1
+  err="$(field errored "$rec")" || return 1
+  df="$(field deadlineFired "$rec")" || return 1
+  [ "$df" = "yes" ] || return 1
+  re="$(bracket_elems "$resp")" || return 1
+  ee="$(bracket_elems "$err")" || return 1
+  [ -n "$re" ] || return 1
+  [ -n "$ee" ] || return 1
+  multiset_disjoint "$resp" "$err" || return 1
+  multiset_union_is "$resp" "$err" "$req"
+}
+
+# service_ok <record> — the whole record, as the detector the near-miss controls exercise: shaped as
+# the named fields, and each of the three obligations read from its own named fields.
+service_ok() {
+  local rec="$1"
+  record_is "$rec" bound offered accepted completed closed liveHighWater parkedAtPeak requests \
+    responded errored deadlineFired carrier runUs || return 1
+  service_noDrop_ok "$rec" || return 1
+  service_bounded_ok "$rec" || return 1
+  service_resolved_ok "$rec" || return 1
+  return 0
+}
+
+# --- SC14 — the service's own obligations on one accept loop: no drop, a bound, resolution ————————————
+check_sc14() {
+  local out status line ctl round k v
+  local bound acc comp clo lhw pap req resp err df
+  local near
+  local -a records=()
+
+  # The detector's own control, from the record syntax and the expectation alone: it must accept a
+  # well-formed record and reject each of the eight near misses a service that dropped a connection,
+  # terminated one twice, invented one, held no bound, never saw the populated state, left a request
+  # unresolved, resolved a request twice, or never exercised the deadline path would produce. The near
+  # misses are written here rather than taken from the mode, because the detector's contract is shaped
+  # by the record syntax; each is the shape that reaches the check it is named for, so a rejection is
+  # attributable to that check rather than to an earlier field-shape or emptiness test.
+  service_ok 'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[1,3]|liveHighWater=2|parkedAtPeak=2|requests=[0,1,2,3,4]|responded=[0,2,4]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1' ||
+    setup_error "SC14: the service detector rejected a well-formed record" \
+      "the detectors' own control, not the SC14 Then"
+  # Row 1 dropped a connection and row 2 terminated one twice: both reach service_noDrop_ok's
+  # union-equals-accepted comparison; row 3 invents a connection and reaches it too, from the other
+  # side (an id accepted does not hold).
+  # Rows 4 and 5 reach service_bounded_ok's liveHighWater <= bound comparison.
+  # Row 6 leaves a request unresolved and reaches service_resolved_ok's union-equals-requests
+  # comparison; row 7 resolves one twice, once each way, and reaches its disjointness check; row 8
+  # keeps errored nonempty so it reaches service_resolved_ok's deadlineFired = yes requirement.
+  for near in \
+    'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2]|closed=[1,3]|liveHighWater=2|parkedAtPeak=2|requests=[0,1,2,3,4]|responded=[0,2,4]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1' \
+    'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[0,1,3]|liveHighWater=2|parkedAtPeak=2|requests=[0,1,2,3,4]|responded=[0,2,4]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1' \
+    'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[1,3,5]|liveHighWater=2|parkedAtPeak=2|requests=[0,1,2,3,4]|responded=[0,2,4]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1' \
+    'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[1,3]|liveHighWater=3|parkedAtPeak=3|requests=[0,1,2,3,4]|responded=[0,2,4]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1' \
+    'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[1,3]|liveHighWater=0|parkedAtPeak=0|requests=[0,1,2,3,4]|responded=[0,2,4]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1' \
+    'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[1,3]|liveHighWater=2|parkedAtPeak=2|requests=[0,1,2,3,4,5]|responded=[0,2,4]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1' \
+    'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[1,3]|liveHighWater=2|parkedAtPeak=2|requests=[0,1,2,3,4]|responded=[0,2,4,1]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1' \
+    'bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[1,3]|liveHighWater=2|parkedAtPeak=2|requests=[0,1,2,3,4]|responded=[0,2,4]|errored=[1,3]|deadlineFired=no|carrier=100|runUs=1'; do
+    if service_ok "$near"; then
+      setup_error "SC14: the service detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC14 Then"
+    fi
+  done
+  printf 'SC14 control: rejected a connection silently dropped, a connection terminated twice, an invented connection, the bound not held, a reader that never saw the populated state, a request left unresolved, a request resolved twice and a reader that never exercised the deadline path\n'
+
+  # Three invocations, each of which must satisfy the Then.
+  for round in 1 2 3; do
+    out="$(bounded lake exe controls --runtime-service --bound=2)"
+    status=$?
+    check_status SC14 "$status" "lake exe controls --runtime-service --bound=2"
+    require_header "$out"
+
+    mapfile -t records < <(grep '^service|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC14 Then: the service behaviour not observed exactly once" \
+        "expected exactly one service| record, saw ${#records[@]} in invocation $round"
+    line="${records[0]}"
+
+    record_is "${line#service|}" bound offered accepted completed closed liveHighWater parkedAtPeak \
+      requests responded errored deadlineFired carrier runUs ||
+      fail "SC14 Then: the service behaviour not observed exactly once" \
+        "the record is not exactly bound/offered/accepted/completed/closed/liveHighWater/parkedAtPeak/requests/responded/errored/deadlineFired/carrier/runUs with nonempty values: [$line]"
+
+    # The mode's own checker readings, read as SC12's and SC13's controls are: a fixture defect if
+    # they do not hold, strictly separately from the Then.
+    ctl="$(grep '^servicectl|' <<<"$out" | head -1)"
+    [ -n "$ctl" ] ||
+      setup_error "SC14: the detector controls are missing" "no servicectl record in the invocation"
+    record_is "${ctl#servicectl|}" recordGood missingId doubled overBound zeroPeak unresolved noDeadline ||
+      setup_error "SC14: the detector-control record is not the expected shape" "control: [$ctl]"
+    for k in recordGood missingId doubled overBound zeroPeak unresolved noDeadline; do
+      bound_field v "$k" "$ctl" "SC14 control"
+      if [ "$k" = "recordGood" ]; then
+        [ "$v" = "accepted" ] ||
+          setup_error "SC14: the checker did not accept a well-formed record" "$k=$v"
+      else
+        [ "$v" = "rejected" ] ||
+          setup_error "SC14: the checker did not reject its near miss" "$k=$v"
+      fi
+    done
+
+    bound_field bound bound "$line" "SC14 Then"
+    bound_field acc accepted "$line" "SC14 Then"
+    bound_field comp completed "$line" "SC14 Then"
+    bound_field clo closed "$line" "SC14 Then"
+    bound_field lhw liveHighWater "$line" "SC14 Then"
+    bound_field pap parkedAtPeak "$line" "SC14 Then"
+    bound_field req requests "$line" "SC14 Then"
+    bound_field resp responded "$line" "SC14 Then"
+    bound_field err errored "$line" "SC14 Then"
+    bound_field df deadlineFired "$line" "SC14 Then"
+
+    # Each obligation is read from its own named fields; all three are evaluated so the two that hold
+    # are observed to hold, and the first that does not is the one reported.
+    local o1bad=0 o2bad=0 o3bad=0
+    service_noDrop_ok "${line#service|}" || o1bad=1
+    service_bounded_ok "${line#service|}" || o2bad=1
+    service_resolved_ok "${line#service|}" || o3bad=1
+    [ "$o1bad" -eq 0 ] ||
+      fail "SC14 Then: an accepted connection was silently dropped or terminated twice" \
+        "obligation: every accepted connection is completed or closed, once each (Service.NoDrop)" \
+        "observed: accepted=$acc completed=$comp closed=$clo"
+    [ "$o2bad" -eq 0 ] ||
+      fail "SC14 Then: the live-connection bound is not held" \
+        "obligation: every live connection is within its bound (Service.Bounded)" \
+        "expected liveHighWater <= bound=$bound and liveHighWater = bound" \
+        "observed: liveHighWater=$lhw parkedAtPeak=$pap accepted=$acc"
+    [ "$o3bad" -eq 0 ] ||
+      fail "SC14 Then: a request was left without a response or an error" \
+        "obligation: every request is resolved within its deadline (Service.RequestsResolved)" \
+        "observed: requests=$req responded=$resp errored=$err deadlineFired=$df"
+
+    printf 'SC14 ok (invocation %s): bound=%s accepted=%s completed=%s closed=%s liveHighWater=%s parkedAtPeak=%s responded=%s errored=%s deadlineFired=%s\n' \
+      "$round" "$bound" "$acc" "$comp" "$clo" "$lhw" "$pap" "$resp" "$err" "$df"
+  done
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -2085,8 +2278,9 @@ SC10) check_sc10 ;;
 SC11) check_sc11 ;;
 SC12) check_sc12 ;;
 SC13) check_sc13 ;;
+SC14) check_sc14 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13|SC14\n' >&2
   exit 2
   ;;
 esac

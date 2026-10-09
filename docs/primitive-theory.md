@@ -193,3 +193,13 @@ promise reach stays the only one and the register is unchanged. `#print axioms` 
 W6 adds no theorem — the semaphore's invariant is stated and deferred in D14, not proved here. The finding
 is the same one D13 made of the blocking pool: a new mechanism over already-registered primitives adds a
 design, not a primitive.
+
+**No change from the bounded accept loop (W14, D15).** `LeanIn/Runtime/Net.lean`'s `serveBounded` adds no
+direct external operation: its whole mechanism is `Task.Sync.Semaphore` — the W6 primitive, itself one `Std.Mutex`
+critical section over pure list and natural-number code, which is **A1**, already on the list — over
+`Listener.accept`, `Conn.recv` and `Conn.send`, which are W1's socket seam, and `Runtime.withTimeout`, which is
+W3's timer leaf (`Std.Async.sleep`). No atomics (the absence above still holds), no new syscall, and no
+`IO.Promise` reach, so `Blocking.lean`'s direct promise reach stays the only one and D7's register is unchanged.
+`#print axioms` for the new theorems names nothing beyond `propext`, `Classical.choice` and `Quot.sound`, and the
+service model itself is pure (no `IO`). The finding is again D13's: a new mechanism over already-registered
+primitives adds a design, not a primitive.

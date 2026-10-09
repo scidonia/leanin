@@ -461,6 +461,94 @@ instance. Until W8, no sync primitive may be read as cross-carrier-safe.
 
 ______________________________________________________________________
 
+### D15 — The service's obligations are proved over the model; their refinement to the executor is argued, with an executable correspondence test.
+
+**What it is, and where it lives.** W14 states the three obligations a *server* has and checks them at the
+executor boundary. The model is [`LeanIn/Model/Service.lean`](../LeanIn/Model/Service.lean), pure and decidable
+over a `Service` state keyed by connection *identities* rather than counts. It carries five invariants:
+`Service.WF` (the well-formedness the others sit on), `Service.NoDrop` (the partition of the admitted ids over
+`live`/`completed`/`closed`), `Service.Bounded` (`live.length ≤ bound`), `Service.RequestsResolved`
+(`responded + errored + pending.length = requests`) and `Service.PendingWithinLive` (`∀ i ∈ pending, i ∈ live`).
+Each is proved over the `Service.Reachable` inductive — `reachable_invariants`, with `reachable_noDrop`,
+`reachable_bounded`, `reachable_requests` and `reachable_pendingWithinLive` as its per-obligation projections —
+and matched by a breaking-control that makes one invariant false (`abandon_breaks_noDrop`,
+`acceptBeyondBound_breaks_bounded`, `closeDropping_breaks_requests`). The three obligations are: (1) every
+accepted connection is either completed or closed and never silently dropped; (2) the number of live connections
+never exceeds its bound; (3) every request gets a response or an error within its deadline. The executor's
+product is `Runtime.serveBounded` ([`LeanIn/Runtime/Net.lean`](../LeanIn/Runtime/Net.lean)), an accept loop that
+admits at most `bound` connections at a time.
+
+**The decision: W14 takes the sanctioned fallback, and does not attempt a refinement theorem.** The model is
+proved; the step from it to the running code is argued in prose with an executable correspondence test — the
+fallback of [`proof-strategy.md`](proof-strategy.md) §5 (T1) and the instrument P8's own row names. The reasons
+are the repository's own: Lean's `IO` has no concurrent semantics (Gap A), so a refinement proof would mean Iris
+over a modelled language that is not Lean's; the serializability argument that links the two columns
+([`primitive-theory.md`](primitive-theory.md) §4) is itself an argument, not a theorem; and proving the model
+while arguing the refinement is honest precisely when the argument is a first-class document with an executable
+correspondence test.
+
+**The mechanism, and why the bound is a permit.** The bound is the service's obligation, and
+`Task.Sync.Semaphore` (W6, D14) is built for the shape: a wake is only a *hint* and a permit is taken in the
+waiter's own step, so the loop can never be handed a permit it then skips. `serveBounded` takes a permit before
+each `Listener.accept`, spawns the body, and releases it when the body ends — on the body's own tail and on a
+caught failure, with a failing `accept` releasing before the failure travels. `EAsync`'s bind short-circuits on
+`error`, so exactly one release runs on every path a body can take. The model's `accept` has no transition at the
+bound; the loop's permit is the same statement in the executor. SC14 reads the bound's projection from the mode's
+own `begin`/`end` annotations, not from a clock.
+
+**The correspondence.** [`interface.md`](interface.md) §6 pairs each obligation with the declaration it refines
+and each model operation with its executor counterpart: `Service.accept` with the loop's
+`tryAcquire`-then-`accept`, `Service.request` with the body's `recv`, `Service.respond` with the echo,
+`Service.deadline` with `withTimeout` returning `none`, `Service.complete` with the body's `.ok`, and
+`Service.close` with the body's `.error`. It is an argued correspondence: the refinement theorem
+`Impl.op ⊑ Model.op` remains open (P8).
+
+**The two limits, stated where the guarantee is read.** Both are findings, not fixes.
+
+1. **Only the success-path permit release is exercised by SC14.** The wrapper releases on the body's own tail,
+   on its error branch for a body that propagates a failure, and on a failing `accept`. The mode's body catches
+   its own failures at the connection boundary, so every body in the scenario returns `.ok` and the wrapper's
+   error branch is unreachable there. Its totality is **by construction** — `EAsync`'s bind short-circuits on
+   error and the failure branch releases before re-raising — not by an observation. A failing body would have
+   changed the scenario's staging and fields, so the limit is recorded rather than demonstrated.
+2. **A cancelled body's release step is skipped by `Item.fire`, so a permit can leak.** Cancellation is explicit
+   and step-scoped (W5, D14): a body whose continuation is cancelled never reaches its release. This only
+   *reduces* admissions — a leaked permit can never push `live` past the bound, so `Service.Bounded` still holds
+   and obligation 2 is **not weakened**; what is lost is the **liveness** of admission, since a service that
+   cancels many bodies can slowly stop admitting. It follows from the cancellation gate, not from a defect in
+   `serveBounded`. SC14 exercises no cancellation.
+
+**What it does not claim.** Not that the executor is a refinement of the model (argued, not proved); not the
+liveness half of "within its deadline" — that a pending request *eventually* reaches its deadline is P9-class and
+not provable from A1–A7 ([`primitive-theory.md`](primitive-theory.md) §6), so obligation 3's `deadline`
+transition is shown to exist, to be enabled exactly for a pending request, and to have an executor witness that
+is observed to fire, and nothing more; not that the connection↔task correspondence composes the executor's own
+single-carrier invariants (`Sched.Executor`'s `State.Aligned`) — the model is deliberately above the pool; not
+cross-carrier ([`interface.md`](interface.md) §5); not HTTP.
+
+**D14's trigger, partially activated and restated.** D14 deferred the semaphore's own invariant
+(`permits + holders = capacity`) with a trigger reading "before ... the sync layer is used by a server whose
+liveness is argued". W14 uses the semaphore at a server boundary, so that trigger is now partly pulled: the
+service-level obligation `Service.Bounded` is what W14 needs and proves, and the semaphore's finer invariant
+stays deferred, because it would add a second statement whose refinement is the same P8 gap and would discharge
+none of W14's acceptance. The remaining trigger is unchanged — take `LeanIn/Model/Sync.lean` before a primitive
+gains a `close`, broadcast or select surface, or before the semaphore's *liveness* (not merely its bound) is
+argued, which is exactly where limit 2 above lives.
+
+**The register and the TCB are unchanged.** `serveBounded` adds no primitive and no citation: its mechanism is
+`Task.Sync.Semaphore` (one `Std.Mutex` critical section, A1) over `Listener.accept`/`Conn.recv`/`Conn.send`
+(W1's socket seam) and `Runtime.withTimeout` (W3's timer leaf, `Std.Async.sleep`). No atomics, no `IO.Promise`
+reach, no new syscall, so D7's register is unchanged and `Blocking.lean`'s direct promise reach stays the only
+one; [`primitive-theory.md`](primitive-theory.md) §6 records the non-change, and `#print axioms` for the new
+theorems is clean.
+
+**_Trigger to take the refinement theorem._** Build a deterministic service driver whose accept/completion
+interleaving is fixed by construction, or find a concurrent `IO` semantics to host the refinement — then replace
+the argued correspondence with `Impl.op ⊑ Model.op` and the SC14 detector with a pairwise comparison against a
+`tests/ServiceOracle.lean`. SC14's detector shape is what is available at W14 and is not faked as more.
+
+______________________________________________________________________
+
 ## Open
 
 None. All decisions are closed; D9 should be revisited once the interface has seen use.

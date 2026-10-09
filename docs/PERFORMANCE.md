@@ -83,11 +83,22 @@ Each multiplier is same-run, as in §2.
 | those 16 waits issued one after another on one thread | — | 801 ms | ⚪ **not a baseline**: this is what *not* overlapping them costs, which is the reason the row above exists | `--runtime-time` |
 | the same 16 sleeps against the shipped *timer* path | 51–52 ms | 64 × 100 ms in 102 ms | ⚪ parity, and a citation rather than a same-run pair (`docs/evidence.md`) | `spike` |
 | 16 concurrent echo connections on one carrier | 4.8–11 ms of wall time across runs (≈ 1.5–3.3 k connections/s) | — | ⚪ no baseline yet: the shipped server on this workload is W16 | `--runtime-net` |
+| bounded accept path (`Runtime.serveBounded`): one 5-connection run, bound 2 | 101 630–102 766 µs for the whole run; 20 326–20 553 µs per connection; 48–49 connections/s | — | ⚪ no baseline: the loop is new, and the run's wall time is dominated by the staged 100 ms deadline (id 1's `Runtime.never`), not by admission — the row is what the command reproduces, not an accept-throughput figure | `--runtime-service` |
 | a stop with a connection in flight, draining it | 0.6–1.9 ms to return the loop's value | — | ⚪ not a comparison: the poll interval bounds it, because accept-versus-shutdown is a `select` and we have none yet (W7); an earlier shape whose stop arrived with an empty pool read 95 µs – 1.0 ms | `--runtime-drain` |
 | a cancellation, decomposed | spawn and await 1.40–1.56 µs without one; spawn and cancel 1.16–1.21 µs; the parts measured alone over one computation and one cell: token set 0.11–0.33 µs, `resolveFirst` 0.14–0.58 µs, **retire 7.9–8.7 µs** (200 iterations each) | — | ⚪ no baseline: the operation did not exist before this milestone. The two whole-operation loops differ in shape as well as in the cancellation they do or do not make, so the parts are the decomposition and the retire is its finding — a linear scan of the registry, measured over the 201 entries the parkers leave, while the cancel loop's own retire scans a registry its own cycles keep empty | `--runtime-cancel` |
 | the registration registry, with 200 awaits in flight on a leaf | 200 live registrations, and 0 after those are cancelled (201 entries by list length, one of them the cancelling computation's own) | — | ⚪ no baseline; a same-run pair, and the live count is a count of registrations whose leaf has not completed | `--runtime-cancel` |
 | the blocking pool, over 20 000 trivial jobs on 4 workers | submit **1 974–2 655 ns** alone, with the queue kept short by awaiting each job before the next submit; a `spawnBlocking` spawn-and-await round trip **34.7–40.1 µs per job** through the runtime | — | ⚪ no baseline: the pool is new, and neither figure is readable without the job count and pool width its line prints | `--runtime-ops` |
 | critical section, notification with nobody parked | 27 ns / 1 ns | — | ⚪ no baseline | `--runtime-ops` |
+
+**The bounded accept path (W14).** `nix develop -c lake exe controls --runtime-service --bound=2` prints a
+`servicebench|n=5|bound=2|runUs=…|usPerConn=…|connsPerSec=…` line beside SC14's `service|` record, and the row
+above quotes that line across five runs (five further runs of the check, which invokes the mode three times
+each, read the same band). It is ⚪ and it is deliberately **not** an accept-throughput figure: the run's whole
+wall time is dominated by the staged 100 ms deadline — id 1's response is `Runtime.never`, so its `withTimeout`
+fires at ~100 ms — which is why `runUs` reads ~102 ms and `usPerConn` ~20.5 ms for five one-byte connections. The
+three numbers are exactly what the mode computes (`runUs`; `runUs / n`; `n · 10⁶ / runUs`) and what the command
+reproduces; nothing here is attributed to admission, and a per-accept cost would need a run with no staged
+deadline, which the mode does not offer. `runUs` is printed and never asserted, and this row gates nothing (§1).
 
 Re-measured after the cancellation milestone, the round-trip row above reads **1 369–1 394 ns** across three runs
 against its recorded 1 042 ns: a 31% delta, at the edge of this document's ±30% band, marked as a cross-revision
@@ -276,6 +287,7 @@ record is not updated for it.
 | `nix develop -c lake exe controls --runtime-shared` | the same counter under each design's required discipline, and what the stock pool loses without its lock |
 | `nix develop -c lake exe controls --runtime-sleep` | four 50 ms libuv timers on one carrier — 51 ms, against 200 ms for a serial sleep path |
 | `nix develop -c lake exe controls --runtime-net` | 16 concurrent echo connections on one carrier: the connection count, the server's thread count, whether the client shares it, the byte-identical replies, and the pool alongside |
+| `nix develop -c lake exe controls --runtime-service --bound=2` | the bounded accept path (SC14): one 5-connection run's wall time, its per-connection share, and the connections/s that implies — the figures §3's service row quotes — plus SC14's `service\|` record and its checker's `servicectl\|` readings |
 | `nix develop -c lake exe controls --runtime-time` | 16 × 50 ms sleeps and their event order, two timeout outcomes, the task layer's first-writer law, and the blocking path for the same sleeps |
 | `nix develop -c lake exe controls --runtime-drain` | a stop with a connection in flight: whether the connection completes after the stop, whether the pool is empty and whether a leaf registration is outstanding when the run returns, and how long the drain takes |
 | `nix develop -c lake exe controls --runtime-cancel` | a disconnect cancelling the work: the counter as it stood in the cancelling step and after the run returns, the work's own registrations before and after, the cancelled handle's outcome, and a second cancellation; plus the cost of the new operation — spawn-and-await against cancelling a parked task — and the registry's size before and after cancelling 200 parked awaits |

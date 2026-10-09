@@ -528,6 +528,24 @@ different from using `Std.Async` directly.
 **Acceptance.** Each obligation as a scenario at the executor boundary with its control, alongside the model
 statement it refines, in the shape SC1–SC6 already use.
 
+**Met, and what its record reads.** The three obligations are proved over `LeanIn/Model/Service.lean`'s
+`Service.Reachable` (`Service.NoDrop`, `Service.Bounded`, `Service.RequestsResolved` and
+`Service.PendingWithinLive`, beside `Service.WF`, each with its per-transition preservation, its reachable
+projection and a breaking-control), the library product is `Runtime.serveBounded`, and the scenario is SC14,
+green on every run since the bound landed — `nix develop -c bash tests/executor-contract.sh SC14` invokes
+`lake exe controls --runtime-service --bound=2` three times and reads
+`SC14 ok: bound=2 accepted=[0,1,2,3,4] completed=[0,2,4] closed=[3,1] liveHighWater=2 parkedAtPeak=2 responded=[0,2,4] errored=[3,1] deadlineFired=yes`
+— **one instance** of the record, not *the* record: the lists' orders (`closed=[3,1]`, `errored=[3,1]`) are the scheduler's, so only the id multisets are fixed —
+with the three clauses SC14-O1/O2/O3 each bound to its own record fields and the detector's near misses rejected
+in the same invocation. The red it replaced was **found, not arranged**: the shipped accept loop admits
+unconditionally, so SC14-O2 failed on production with `liveHighWater=5` against `bound=2`, and the same run's
+`accepted=[0,1,2,3,4]` shows the violation was already there. The refinement is the sanctioned fallback — a
+proved model, an argued correspondence and an executable correspondence test (`docs/interface.md` §6,
+`docs/decisions.md` D15) — and two limits are recorded there rather than hidden: only the success-path permit
+release is exercised by SC14 (the wrapper's error branch is total by construction, not by observation), and a
+cancelled body's release step is skipped by `Item.fire`, so a permit can leak — a liveness cost that reduces
+admissions, not a breach of the bound. The measurement row is in `docs/PERFORMANCE.md`.
+
 ### W15 — Ask upstream to parameterise the async surface by its runtime
 
 **Deliverable.** A proposal, and if it is accepted a patch, removing the two concrete couplings that keep
@@ -615,7 +633,7 @@ CPS indirection, which is P1.
 | 6 | **W5** safety trio, and cancellation safety | the error channel is in (SC9), a stop drains a connection in flight (SC10), and a disconnect cancels the work (SC11) — by an explicit operation rather than by dropping; `panic!` totality to go | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | met (SC12) | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
-| 9 | **W14** the service's own refinement | | the product |
+| 9 | **W14** the service's own refinement | met (SC14) | the product |
 | 10 | **W12** task-locals, connection registry | | log context, drainable shutdown |
 | 11 | **W7** selection, racing, priority | | racing a request against its deadline |
 | 12 | **W13** handle, metrics, deterministic time | | operating it, capacity, timeout tests |

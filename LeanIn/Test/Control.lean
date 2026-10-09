@@ -1958,6 +1958,269 @@ def runtimeSync : IO UInt32 := do
   IO.println s!"syncbench|{bench}"
   return 0
 
+/-- The service run's own annotations, appended under one `Std.Mutex`: the ordered `events` list of
+`(isBegin, id)` the mode reduces to `liveHighWater`, the outcome lists each body appends where it
+happened, and the online readings `live`/`parked` with their running maxima. The bodies and the
+client's read of the admission log take the same lock, so a begin the client sees is a begin the
+record holds. -/
+private structure ServiceLog where
+  events : List (Bool × Nat) := []
+  completed : List Nat := []
+  closed : List Nat := []
+  responded : List Nat := []
+  errored : List Nat := []
+  live : Nat := 0
+  parked : Nat := 0
+  parkedHigh : Nat := 0
+  deadlineFired : Bool := false
+
+/-- The `service|` record's fields, in the order the mode prints them. -/
+def serviceFields : List String :=
+  ["bound", "offered", "accepted", "completed", "closed", "liveHighWater", "parkedAtPeak",
+   "requests", "responded", "errored", "deadlineFired", "carrier", "runUs"]
+
+/-- One field of a `key=value|…` record: its value when the key appears exactly once and nonempty,
+and `none` when it is absent, repeated or empty — so a value is never bound from a neighbour. -/
+def serviceField (rec key : String) : Option String :=
+  let vals := (rec.splitOn "|").filterMap (fun tok =>
+    match tok.splitOn "=" with
+    | [k, v] => if k == key then some v else none
+    | _      => none)
+  match vals with
+  | [v] => if v == "" then none else some v
+  | _   => none
+
+/-- A nonempty natural field. -/
+def serviceNat (rec key : String) : Option Nat :=
+  (serviceField rec key).bind String.toNat?
+
+/-- The record's fields are exactly `serviceFields`, in order, each nonempty. -/
+def serviceShaped (rec : String) : Bool :=
+  let toks := rec.splitOn "|"
+  toks.length == serviceFields.length &&
+  (toks.zip serviceFields).all (fun (tok, key) =>
+    match tok.splitOn "=" with
+    | [k, v] => k == key && v != ""
+    | _      => false)
+
+/-- A bracketed `[i,…]` identity list as a multiset of naturals. An empty body, an empty entry or a
+non-natural entry yields `none`, so a dropped, doubled or malformed entry is rejected before any
+membership is compared. -/
+def serviceIds (rec key : String) : Option (List Nat) :=
+  (serviceField rec key).bind fun v =>
+    if v.startsWith "[" && v.endsWith "]" then
+      let body := ((v.drop 1).dropEnd 1).toString
+      (body.splitOn ",").mapM (fun s => String.toNat? s)
+    else none
+
+/-- Two identity lists hold the same ids with the same multiplicities. -/
+def serviceMultisetEq (a b : List Nat) : Bool :=
+  a.length == b.length &&
+  a.all (fun x => (a.filter (fun y => y == x)).length == (b.filter (fun y => y == x)).length)
+
+/-- Obligation 1 (`Service.NoDrop`): `completed ∪ closed` is exactly `accepted`, and both paths are
+populated — so the equality is not carried by one path alone. -/
+def serviceNoDropOk (rec : String) : Bool :=
+  match serviceIds rec "accepted", serviceIds rec "completed", serviceIds rec "closed" with
+  | some acc, some comp, some clo =>
+      !comp.isEmpty && !clo.isEmpty && serviceMultisetEq (comp ++ clo) acc
+  | _, _, _ => false
+
+/-- Obligation 2 (`Service.Bounded`): the live high-water is within the bound and reaches it, and the
+mode's second reading of the same count reaches it too. -/
+def serviceBoundedOk (rec : String) : Bool :=
+  match serviceNat rec "bound", serviceNat rec "liveHighWater", serviceNat rec "parkedAtPeak" with
+  | some b, some lhw, some pap => 1 <= b && lhw <= b && lhw == b && pap == b
+  | _, _, _ => false
+
+/-- Obligation 3 (`Service.RequestsResolved` and `Service.PendingWithinLive`): `responded ∪ errored`
+is exactly `requests`, disjointly, and the deadline fired — with both outcome paths populated. -/
+def serviceResolvedOk (rec : String) : Bool :=
+  match serviceIds rec "requests", serviceIds rec "responded", serviceIds rec "errored" with
+  | some req, some resp, some err =>
+      serviceField rec "deadlineFired" == some "yes" &&
+      !resp.isEmpty && !err.isEmpty &&
+      serviceMultisetEq (resp ++ err) req &&
+      resp.all (fun x => !(err.contains x))
+  | _, _, _ => false
+
+/-- The record satisfies every binding of the contract: it is shaped as `serviceFields`, and each of
+the three obligations holds, read from its own named fields. -/
+def serviceOk (rec : String) : Bool :=
+  serviceShaped rec && serviceNoDropOk rec && serviceBoundedOk rec && serviceResolvedOk rec
+
+/-- The checker's verdict as one word, so a reading is `accepted` or `rejected` and nothing else. -/
+def serviceReading (b : Bool) : String := if b then "accepted" else "rejected"
+
+/-- A well-formed `service|` record, built from the record syntax and the expected values rather than
+from the mode's output, so the checker's controls cannot agree with the mode by construction. -/
+def serviceGoodRec : String :=
+  "bound=2|offered=[0,1,2,3,4]|accepted=[0,1,2,3,4]|completed=[0,2,4]|closed=[1,3]|liveHighWater=2|parkedAtPeak=2|requests=[0,1,2,3,4]|responded=[0,2,4]|errored=[1,3]|deadlineFired=yes|carrier=100|runUs=1"
+
+/-- A connection silently dropped (O1). -/
+def serviceNearMissing : String := serviceGoodRec.replace "completed=[0,2,4]" "completed=[0,2]"
+
+/-- A connection terminated twice (O1). -/
+def serviceNearDoubled : String := serviceGoodRec.replace "closed=[1,3]" "closed=[0,1,3]"
+
+/-- The bound not held (O2). -/
+def serviceNearOverBound : String := serviceGoodRec.replace "liveHighWater=2" "liveHighWater=3"
+
+/-- A reader that never saw the populated state (O2's negative control). -/
+def serviceNearZeroPeak : String := serviceGoodRec.replace "liveHighWater=2" "liveHighWater=0"
+
+/-- A request left silently unresolved (O3). -/
+def serviceNearUnresolved : String := serviceGoodRec.replace "requests=[0,1,2,3,4]" "requests=[0,1,2,3,4,5]"
+
+/-- An O3 reader that never exercised the deadline path. -/
+def serviceNearNoDeadline : String :=
+  (serviceGoodRec.replace "deadlineFired=yes" "deadlineFired=no").replace "errored=[1,3]" "errored=[]"
+
+/-- The mode's own checker readings, on a well-formed record and on each near miss: `accepted` then
+`rejected` when the checker discriminates. -/
+def serviceCtlLine : String :=
+  "servicectl|recordGood=" ++ serviceReading (serviceOk serviceGoodRec) ++
+  "|missingId=" ++ serviceReading (serviceOk serviceNearMissing) ++
+  "|doubled=" ++ serviceReading (serviceOk serviceNearDoubled) ++
+  "|overBound=" ++ serviceReading (serviceOk serviceNearOverBound) ++
+  "|zeroPeak=" ++ serviceReading (serviceOk serviceNearZeroPeak) ++
+  "|unresolved=" ++ serviceReading (serviceOk serviceNearUnresolved) ++
+  "|noDeadline=" ++ serviceReading (serviceOk serviceNearNoDeadline)
+
+/-- **SC14 — the service's own obligations at the executor boundary.**
+
+An accept loop of ours serves `n` connections on one carrier, and `Std.Async`'s client is the peer.
+Each connection's body `recv`s the id the client staged, appends `begin id` to a `Std.Mutex`-guarded
+log as its first action, then produces its staged response: id `1`'s response is `Runtime.never`, so
+its deadline fires; id `3`'s response fails with a staged error; ids `0`, `2`, `4` echo and stay live
+until the client closes them. The client connects every socket and sends the staged ids last, waits
+until the log holds the bound's worth of begins, and then reads each admitted socket in the server's
+own begin order and closes it — so the read order is the server's, not the scheduler's, and no read
+waits on a socket the loop has not admitted.
+
+The one `service|` record binds the three obligations to their own fields: `completed ∪ closed =
+accepted` (`Service.NoDrop`), `liveHighWater ≤ bound` with `liveHighWater = bound`
+(`Service.Bounded`), and `responded ∪ errored = requests` with `deadlineFired = yes`
+(`Service.RequestsResolved` / `Service.PendingWithinLive`). `offered` and `carrier` are recorded;
+`runUs` is printed and never asserted. The mode also prints its own checker's verdicts on a
+well-formed record and on near misses on a `servicectl|` line.
+
+Diagnostic: `lake exe controls --runtime-service [--bound=2]`. -/
+def runtimeService (bound : Nat) : IO UInt32 := do
+  let n := 5
+  let timeout : Std.Time.Millisecond.Offset := 100
+  let sendOrder : List Nat := [0, 2, 4, 1, 3]
+  let hooks ← Runtime.Hooks.new
+  let l ← Runtime.Listener.bind (Runtime.loopback 0)
+  let keep ← IO.mkRef l
+  let addrRef ← IO.mkRef (none : Option Std.Net.SocketAddress)
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let svc ← Std.Mutex.new ({} : ServiceLog)
+  let svcRead : IO ServiceLog := svc.atomically get
+  let svcWrite (f : ServiceLog → ServiceLog) : IO Unit := svc.atomically do set (f (← get))
+  let carrier ← IO.getTID
+  let startAt ← IO.mkRef (0 : Nat)
+  let body : Runtime.Conn → LeanIn.Task.EAsync IO.Error Unit := fun c => do
+    -- The connection's own failure is its outcome, recorded before it is raised: the loop awaits every
+    -- spawned body, so a body that raised would fail the run rather than close one connection. Catch it
+    -- here, at the connection boundary, so the run returns and the record carries `closed`/`errored`.
+    try
+      match ← Runtime.Conn.recv c hooks 1 with
+      | none => pure ()
+      | some bs =>
+        let id := (bs.get! 0).toNat
+        monadLift (svcWrite fun s =>
+          { s with events := s.events ++ [(true, id)], live := s.live + 1,
+                   parked := s.parked + 1, parkedHigh := max s.parkedHigh (s.parked + 1) })
+        let endConn (ok : Bool) : LeanIn.Task.EAsync IO.Error Unit := do
+          monadLift (svcWrite fun s =>
+            { s with events := s.events ++ [(false, id)], live := s.live - 1, parked := s.parked - 1 })
+          if ok then pure () else throw (.userError "connection did not complete")
+        if id == 1 then
+          let fired ← LeanIn.Task.EAsync.ofAsync (Runtime.withTimeout hooks timeout
+            (Runtime.never : LeanIn.Task.Async Unit))
+          monadLift (svcWrite fun s =>
+            { s with errored := s.errored ++ [id], closed := s.closed ++ [id],
+                     deadlineFired := fired.isNone })
+          endConn false
+        else if id == 3 then
+          monadLift (svcWrite fun s =>
+            { s with errored := s.errored ++ [id], closed := s.closed ++ [id] })
+          endConn false
+        else
+          Runtime.Conn.send c hooks bs
+          monadLift (svcWrite fun s => { s with responded := s.responded ++ [id] })
+          match ← Runtime.Conn.recv c hooks 65536 with
+          | none =>
+            monadLift (svcWrite fun s => { s with completed := s.completed ++ [id] })
+            endConn true
+          | some _ => endConn true
+    catch _ => pure ()
+  let server ← IO.asTask (Runtime.run e (do
+    let a ← Runtime.Listener.sockName (← keep.get)
+    addrRef.set (some a)
+    startAt.set (← IO.monoNanosNow)
+    Runtime.serveBounded hooks (← keep.get) bound n body)) _root_.Task.Priority.dedicated
+  let addr ← do
+    let mut a : Option Std.Net.SocketAddress := none
+    while a.isNone do a ← addrRef.get
+    pure (a.getD (Runtime.loopback 0))
+  -- The client's close discipline is the loop's admission policy: the loop admits `bound` and then
+  -- waits on a permit, so a close is what releases one. The client reads and closes in the server's
+  -- begin order as each begin arrives, and it reads nothing until it has seen `bound` begins — which is
+  -- what makes the live high-water `bound` structural rather than a race.
+  Std.Async.Async.block do
+    let entries ← sendOrder.mapM (fun id => do
+      let c ← Std.Async.TCP.Socket.Client.mk
+      c.connect addr
+      c.send (ByteArray.mk #[UInt8.ofNat id])
+      return (id, c))
+    let beginsNow : Std.Async.Async (List Nat) := do
+      let s ← svcRead
+      return (s.events.filter (fun ev => ev.1)).map (fun ev => ev.2)
+    let waitFor (k : Nat) : Std.Async.Async Unit := do
+      let mut seen ← beginsNow
+      while seen.length < k do
+        Std.Async.sleep 1
+        seen ← beginsNow
+      pure ()
+    waitFor bound
+    for k in List.range n do
+      waitFor (k + 1)
+      let ids ← beginsNow
+      let id := ids.getD k 0
+      match entries.find? (fun (i, _) => i == id) with
+      | some (_, c) =>
+        let _ ← c.recv? 65536
+        c.shutdown
+      | none => pure ()
+  let outcome ← IO.wait server
+  let returnedAt ← IO.monoNanosNow
+  match outcome with
+  | .error err => IO.println s!"service|failed={err}"; return 1
+  | .ok (.error err) => IO.println s!"service|failed={err}"; return 1
+  | .ok (.ok ()) =>
+    let s ← svc.atomically get
+    let begins := (s.events.filter (fun ev => ev.1)).map (fun ev => ev.2)
+    -- `accepted`/`requests` are multisets: the order bodies began in belongs to the scheduler, so they
+    -- are read out in ascending id order, which is the same ids whichever order the loop admitted them.
+    let acc := (List.range n).filter (fun i => begins.contains i)
+    let mut live := 0
+    let mut high := 0
+    for ev in s.events do
+      live := if ev.1 then live + 1 else live - 1
+      high := max high live
+    let br (xs : List Nat) : String := "[" ++ String.intercalate "," (xs.map toString) ++ "]"
+    let df := if s.deadlineFired then "yes" else "no"
+    let runUs := (returnedAt - (← startAt.get)) / 1000
+    IO.println s!"service|bound={bound}|offered={br (List.range n)}|accepted={br acc}|completed={br s.completed}|closed={br s.closed}|liveHighWater={high}|parkedAtPeak={s.parkedHigh}|requests={br acc}|responded={br s.responded}|errored={br s.errored}|deadlineFired={df}|carrier={carrier}|runUs={runUs}"
+    IO.println serviceCtlLine
+    -- The service run's own measurement, printed and never asserted: the whole run's wall time in
+    -- microseconds, its per-connection share, and the connections per second that share implies.
+    let connsPerSec := if runUs == 0 then 0 else n * 1000000 / runUs
+    IO.println s!"servicebench|n={n}|bound={bound}|runUs={runUs}|usPerConn={runUs / n}|connsPerSec={connsPerSec}"
+    return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -1983,6 +2246,8 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-cancel" :: _ => return ← runtimeCancel
   | "--runtime-blocking" :: _ => return ← runtimeBlocking
   | "--runtime-sync" :: _ => return ← runtimeSync
+  | "--runtime-service" :: rest =>
+    return ← runtimeService (((argValue rest "--bound").bind String.toNat?).getD 2)
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

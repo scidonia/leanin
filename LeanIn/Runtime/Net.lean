@@ -3,6 +3,7 @@ import Std.Async.TCP
 import LeanIn.Runtime.Leaf
 import LeanIn.Runtime.Time
 import LeanIn.Task.Error
+import LeanIn.Task.Sync
 
 /-!
 # Sockets on our carriers
@@ -138,6 +139,64 @@ partial def serveUntilStopped (hooks : Hooks) (e : Sched.Executor Task.Item cap)
     | none =>
       Task.EAsync.ofAsync (sleep hooks interval)
       serveUntilStopped hooks e l interval body hs
+
+/-- The admission loop of `serveBounded`: one admission per iteration, with the handles accepted so
+far accumulated, until exactly `n` connections have been served — then every handle is awaited.
+
+A permit is taken before the accept and never after it. `tryAcquire` first, because a free permit must
+not pay for a park that would wake it at once; `acquire` only when the bound is full, which parks this
+step and resumes it holding the permit, so the accept below always runs with one. A failing accept
+releases the permit it was holding before the failure travels, so no failure path can drain the bound. -/
+private partial def serveBoundedLoop (hooks : Hooks) (l : Listener) (sem : Task.Sync.Semaphore)
+    (serve : Conn → Task.EAsync IO.Error Unit) (i n : Nat)
+    (hs : List (Task.Task (Except IO.Error Unit))) : Task.EAsync IO.Error Unit := do
+  if i ≥ n then
+    hs.forM (fun h => Task.MonadAwait.await h)
+  else
+    if ← monadLift (Task.Sync.Semaphore.tryAcquire sem) then pure ()
+    else Task.EAsync.ofAsync (Task.Sync.Semaphore.acquire sem)
+    let client ← try
+      Listener.accept l hooks
+    catch e =>
+      monadLift (Task.Sync.Semaphore.release sem)
+      throw e
+    let h ← Task.MonadAsync.spawn (serve client)
+    serveBoundedLoop hooks l sem serve (i + 1) n (h :: hs)
+
+/-- **An accept loop with an admission bound.** It serves exactly `n` connections while admitting at
+most `bound` at a time: with the bound full the loop parks on the semaphore rather than admitting, and
+a connection's permit is released when its body ends, so a place in the bound is returned by every
+route out of a body.
+
+That release is the point, and it is total. The body runs under a `try`; its own `release` is the
+tail of the `try`, and the branch releases and rethrows. `EAsync`'s sequencing short-circuits on
+`error`, so the tail runs exactly when the body returned and the branch exactly when the body failed
+— one release on every path a body can take, none skipped, including the failure. That total is over
+the body's own return and failure paths only: under cancellation `Item.fire` skips the whole step, so
+the release is skipped too — the limit `decisions.md` D15 records. The accepted
+connection's own failure is the ordinary case here (`echoConn`'s comment), so a body returning
+`.error` must give its permit back rather than leaking it; a leak would only *reduce* admissions and
+so never break the bound, but it would degrade the bound to a hint.
+
+Every handle is awaited before the function returns (the shape `serveNJoin` has), so a driver returns
+with nothing held. The signature matches `serveNJoin`'s, so a caller moves between the two loops by
+changing one line; the loop assigns no connection id, so the payload id a body reads is the client's
+and an admission ordinal can never be confused with a connection identity.
+
+The semaphore is the right primitive and not merely an available one: the bound is the service's own
+obligation, and `Task.Sync.Semaphore` is built for this shape — a wake is a hint and a permit is taken
+in the waiter's own step, so the loop can never be handed a permit it then skips. -/
+def serveBounded (hooks : Hooks) (l : Listener) (bound : Nat) (n : Nat)
+    (body : Conn → Task.EAsync IO.Error Unit) : Task.EAsync IO.Error Unit := do
+  let sem ← monadLift (Task.Sync.Semaphore.new bound)
+  let serve (c : Conn) : Task.EAsync IO.Error Unit := do
+    try
+      body c
+      monadLift (Task.Sync.Semaphore.release sem)
+    catch e =>
+      monadLift (Task.Sync.Semaphore.release sem)
+      throw e
+  serveBoundedLoop hooks l sem serve 0 n []
 
 /-- **The loopback address a scenario binds**: `127.0.0.1` and a port. -/
 def loopback (port : UInt16 := 0) : Std.Net.SocketAddress :=

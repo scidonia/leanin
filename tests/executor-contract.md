@@ -288,6 +288,114 @@ trace.
 
 ______________________________________________________________________
 
+### SC14 — the service's own obligations: no drop, a live bound, and resolution within a deadline
+
+**Actor.** A Lean executable server (`lake exe controls --runtime-service`): an accept loop of ours
+plus a per-connection body, run on one carrier, with `Std.Async`'s client as the peer. The promises a
+client sees are the connection's fate and the request's answer, and they are named by
+`LeanIn/Model/Service.lean`'s `Service.NoDrop`, `Service.Bounded`, `Service.RequestsResolved` and
+`Service.PendingWithinLive`. Nothing here calls a private function: the client speaks TCP to the
+server's own bound socket, and the check reads the executable's stdout and its exit status.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC14`, which invokes
+`lake exe controls --runtime-service --bound=2` three times and asserts on the one `service|` record
+each invocation prints, plus the mode's own `servicectl|` checker readings. Every compared value is a
+named field of that record, read by key; an absent, repeated or empty field fails the check rather
+than resolving to a neighbouring value.
+
+**Given.** A fresh single-carrier executor (`Sched.Executor.new LeanIn.Task.Item 256 1`), a listener
+bound to `127.0.0.1:0` (`Runtime.loopback 0`), a bound `B = 2`, and `n = 5` connections whose payload
+is one byte, the connection's id. The client stages connection identities `0..4`; the body's response
+is staged per id: id `1`'s response is `Runtime.never` (`LeanIn/Runtime/Time.lean:36`), so its deadline
+fires rather than its response; id `3`'s response fails with a staged error, so it terminates without
+completing; ids `0`, `2`, `4` echo and complete. The client sends the staged ids `1` and `3` last.
+
+**When.** In one invocation: the loop starts the server, the client connects all five sockets and
+sends each id, and — before reading or closing anything — waits on the mode's `Std.Mutex`-guarded
+admission log until it holds the begins the loop's admission policy requires: `B` begins on a loop
+that admits `B` and waits on a permit, every offered begin on a loop that admits unconditionally. It
+then reads each admitted socket's reply in that log's order and closes it; the body that owns a closed
+socket ends, so the read order is the server's own begin order and not the OS's connect order or a
+scheduler race. The loop drains and returns when every body has ended, and the mode prints the
+`service|` record and its `servicectl|` readings.
+
+**Then.** There is exactly one `service|` record, and its fields are exactly, in this order with
+nonempty values: `bound`, `offered`, `accepted`, `completed`, `closed`, `liveHighWater`,
+`parkedAtPeak`, `requests`, `responded`, `errored`, `deadlineFired`, `carrier`, `runUs`. The three
+obligations are read from their own named fields, each in the multiset or inequality the model
+statement names:
+
+- **SC14-O1** — `Service.NoDrop`: `completed ∪ closed`, as an id multiset, equals `accepted`. The
+  affirmative control, read from the same record, is that `completed` and `closed` are both nonempty, so
+  the equality is not carried by one path alone. That union equality and those two nonemptinesses are
+  the whole of the assertion: `accepted`'s own value (`[0,1,2,3,4]` here) and `offered` are printed but
+  never asserted, and neither terminal list is compared against a named id.
+- **SC14-O2** — `Service.Bounded`: `liveHighWater ≤ bound`, and the affirmative control
+  `liveHighWater = bound`. `parkedAtPeak` is the mode's second reading of the same count, from its own
+  running annotation, and reads `bound` too.
+- **SC14-O3** — `Service.RequestsResolved` and `Service.PendingWithinLive`: `responded ∪ errored`, as
+  an id multiset, equals `requests` disjointly, so every request id is resolved exactly once and none
+  is outstanding. The affirmative controls, in the same record, are `deadlineFired = yes` (id `1`'s
+  request was resolved by the deadline transition) and `responded` and `errored` both nonempty.
+
+`runUs` is printed and never asserted; `carrier` and `offered` are recorded, not asserted. The record
+is a set of order-independent equalities and one inequality, because the order bodies finish in belongs
+to the scheduler: `completed`, `closed`, `responded` and `errored` are compared as multisets, and
+`accepted`/`requests` are printed in ascending id order.
+
+**The failure this scenario records on the shipped loop.** The accept loop in the tree as it stands
+admits every offered connection — one accepted socket and one spawned body each, with no admission
+bound. The mode's body therefore drives that loop, and `SC14-O2`'s `liveHighWater ≤ bound` is false:
+the record carries `liveHighWater=5` and `parkedAtPeak=5` against `bound=2`, and the check exits 1 with
+its own `Then` text:
+
+```
+SC14 Then: the live-connection bound is not held
+  obligation: every live connection is within its bound (Service.Bounded)
+  expected liveHighWater <= bound=2 and liveHighWater = bound
+  observed: liveHighWater=5 parkedAtPeak=5 accepted=[0,1,2,3,4]
+```
+
+The violation is already in the shipped loop, so no staged revision, no ordering deviation and no
+substitution exposes it. `SC14-O1` and `SC14-O3` hold on the same loop: the unbounded loop awaits
+every spawned body, and the body reports `.ok` for a completed connection and an error for one that
+deadlines or fails, so the id partition and the disjoint resolution both hold. Those two clauses and
+`SC14-O2` are each evaluated on the record before the first failing one is reported, so a run that
+also broke either of them would name it instead. A red is only a red if it is this clause's own
+assertion: a missing `service|` record, a malformed record, a non-zero exit without a `fail` line, or a
+watchdog expiry is a setup error, not the `Then`.
+
+**Why, and what it rests on.** `Service.NoDrop` is the partition "every admitted connection appears
+exactly once, in exactly one of live/completed/closed", so obligation 1 asks the executor's record to
+show that partition for the ids it admitted, and the affirmative control is that both terminal paths
+are populated rather than one carrying the whole equality. `Service.Bounded` is `live.length ≤ bound`,
+and its executor counterpart is the live high-water over the mode's own `begin`/`end` annotations; the
+client's deferral of every read and close until the loop's admission policy is satisfied — `bound`
+begins on a loop that waits on a permit, every offered begin on one that admits unconditionally — is
+what makes `liveHighWater = bound` on the bounded loop, structural rather than a timing accident
+**because the client connects the self-terminating ids `1` and `3` last**: the first `bound` admissions
+are therefore the echoers, which cannot end before the client's deferred first close, so the high-water
+is exactly the bound; the same deferral on the unconditional loop admits all five at once, which is why
+the equality is absent there. This rests on the accept queue delivering accepts in the client's connect
+order — an ordering assumption, not a fact the scenario establishes. `Service.RequestsResolved` is
+`responded + errored + pending.length = requests` and `Service.PendingWithinLive` keeps every pending
+request on a live connection, so obligation 3 asks the record to resolve each request exactly once, and
+the deadline path is exercised by id `1`'s `Runtime.never` response — an event order, not a clock: the
+deadline fires with no dependence on the peer. On the shipped loop, `liveHighWater` is the offered
+count, which is the bound violated, and the other two obligations are what the run still shows, which
+is what makes the record evidence for all three rather than only for the clause that fails.
+
+The checker is exercised inside the same invocation: it accepts a well-formed record and rejects near
+misses whose `completed` is missing an id `accepted` holds, whose `closed` carries an id `completed`
+also carries, whose `liveHighWater` is `bound + 1`, whose `liveHighWater` is `0`, whose `requests`
+carries an id in neither `responded` nor `errored`, and whose `deadlineFired` is `no` with `errored`
+empty. Every near miss is built from the record syntax and the expectation, never from the mode's
+output, and a control that does not hold is a fixture defect rather than this `Then`. The mode's own
+`servicectl|` readings must hold too: on a well-formed record the checker says `accepted`, and on each
+near miss it says `rejected`. The `Then` must hold in each of the mode's three invocations.
+
+______________________________________________________________________
+
 ### SC13 — async synchronisation: a mutex, a semaphore and a bounded channel on one carrier
 
 **Actor.** A Lean executable client of the task layer (`lake exe controls --runtime-sync`), driving the

@@ -3,6 +3,7 @@ import LeanIn.Theory.World
 import LeanIn.Theory.Bridge
 import LeanIn.Model.Pool
 import LeanIn.Model.Scheduler
+import LeanIn.Model.Service
 import LeanIn.Data.Ring
 import LeanIn.Sched.Basic
 import LeanIn.Sched.Pool

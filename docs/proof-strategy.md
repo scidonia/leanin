@@ -141,12 +141,28 @@ Stated so that each rung is independently meaningful and independently provable.
 | **P5** | Work-first / no idle worker with available work | if the local deque is non-empty the worker takes from it before stealing; the schedule is therefore greedy | pure model | new |
 | **P6** | No lost wakeup | a task enqueued while all workers are parked results in a worker running | scheduler loop | `iris-lean` |
 | **P7** | Cancellation correctness | a cancelled task never observes a post-cancellation step; cancellation is idempotent; a cancelled child cannot outlive its context | async layer | `iris-lean` + model |
-| **P8** | Refinement | the running implementation is a refinement of the pure model of P3–P5 | the bridge | layered refinement |
+| **P8** | Refinement | the running implementation is a refinement of the pure model of P3–P5 | the bridge | layered refinement; the service-level fallback was taken at W14 (`LeanIn/Model/Service.lean`, `docs/decisions.md` D15) and the refinement theorem remains open |
 | **P9** | Fairness (optional) | no ready task starves | scheduler loop | liveness logics |
 
 The ladder is deliberately ordered so that **P3/P4/P5 are provable first and independently** — they
 need no concurrency logic, no Iris, no runtime, and no semantics of Lean. They are pure mathematics
 about DAGs and schedules.
+
+**What W14 defers, stated rather than attempted.** The service's obligations are proved over the model
+(`LeanIn/Model/Service.lean`) and checked at the executor boundary (SC14), and the following are the
+P8-class items W14 does *not* discharge — it records them rather than leaving them implied:
+
+1. The refinement theorem `Impl.op ⊑ Model.op` for the service's six operations (`accept`, `request`,
+   `respond`, `deadline`, `complete`, `close`); the correspondence is argued in `docs/interface.md` §6
+   and `docs/decisions.md` D15.
+2. The liveness half of obligation 3 — that a pending request *eventually* reaches its deadline. It is
+   P9-class, not provable from A1–A7, and not claimed (`docs/primitive-theory.md` §6).
+3. That the connection↔task correspondence composes the executor's own single-carrier invariants
+   (`Sched.Executor`'s `State.Aligned`); the service model is deliberately above the pool.
+4. That `Hooks`/leaf registrations are conserved at a stop — SC10's `pendingHooks=0` remains the
+   executor's own evidence, because the service model does not model leaves.
+5. D14's deferred semaphore invariant (`permits + holders = capacity`) stays deferred: D15 records the
+   partial activation of D14's trigger and restates what remains.
 
 ______________________________________________________________________
 
@@ -294,7 +310,7 @@ ______________________________________________________________________
 | P4 | Lean + probability (new) | explicit small-`P` computation of the bound |
 | P0, P1, P6, P7 | `iris-lean` (HeapLang instance or a small custom language) | the standard Iris route: state the spec, watch it fail on a deliberately-broken implementation |
 | P2, P9 | `iris-lean` later credits; **Rocq/Iris if Lean can't** | a schedule exhibiting starvation |
-| P8 | layered refinement (technique borrowed from mCertiKOS-style work) | mismatch between model trace and implementation trace on a scripted run |
+| P8 | layered refinement (technique borrowed from mCertiKOS-style work); at W14 the instrument actually used was an argued correspondence plus a detector scenario at the executor boundary — order-independent set equalities and one inequality, SC14 — because the live server's interleaving is not deterministic | mismatch between model trace and implementation trace on a scripted run |
 | anything not provable yet | **deterministic replay + stress** | a scripted interleaving that must reproduce |
 
 The user's environment already has `~/.opam/rocq-9` with `rocq-prover 9.0.0`, `coq-iris 4.4.0`,
