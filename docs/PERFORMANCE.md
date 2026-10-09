@@ -22,8 +22,8 @@ the repository's *checks* are scenarios with controls and these are measurements
   10 000-task workload read 7 713 µs in one diagnostic and 10 795 µs in another; the stock pool's own row moved
   26 579 ↔ 28 549 µs across days. A comparison between two revisions has to interleave them and take minima —
   which is how the 1.5× from `Executor`'s ownership fix was measured, and why `--runtime-async` exists.
-- **Every multiplier below is computed inside the run that printed both of its numbers.** Pairing a figure from
-  one run with a figure from another gives a multiplier that can be off by 1.3×, which is exactly why the same
+- **Every multiplier in the two tables is computed inside the run that printed both of its numbers.** Pairing a
+  figure from one run with one from another gives a multiplier that can be off by 1.3×, which is why the same
   workload's advantage over `Std.Async` appears as 17.0× in one pairing and 13.5× in the next. Where a
   comparison crosses runs it is marked as such rather than quietly multiplied.
 - Both pool sizes are reported for `Std.Async`: its default thread count (8 here) *and* `LEAN_NUM_THREADS=1`,
@@ -72,69 +72,83 @@ The last three are the interesting ones. The tail row says an idle worker does n
 pushed while others run is picked up promptly. The shared row compares each design under the discipline it
 actually needs — ours is single-carrier, so a plain reference is correct and wins; the stock pool cannot drop
 its lock, and the same diagnostic shows why (`253 115 of 800 000` increments survive without it). And the timer
-row is the one that shows the *async* path is genuinely non-blocking while the blocking path is the hole below.
+row is the one that shows the *async* path is genuinely non-blocking while the blocking path is the hole in §4.
 
 ## 4. 🔴 Where we are worse
 
-Stated before anything above it, because it is the honest part of this document.
+Stated before anything above it, because it is the honest part of this document. Two rows carry no factor: one
+has no baseline to divide by yet, and one is about the instruments rather than the runtime. Each multiplier is
+same-run, like every other in this document, and the subsections below explain the mechanism rather than repeat
+the arithmetic.
 
-### 4.1 🔴 Blocking work stops everything — 4.0× worse than the stock pool
+| worse, and where it comes from | ours | baseline | leanin is | source |
+|---|---|---|---|---|
+| blocking work on a carrier (§4.1) | 100 375 µs | stock pool 25 134 µs | 🔴 **4.0× worse** | `--runtime-bench` |
+| no core parallelism at all (§4.2) | 1 distinct thread for 64 tasks | — | ⚪ no baseline yet: structural until W8 | `--runtime-bench` |
+| a burst submit into an undrained pool (§4.3) | 830 ns | 41 ns of lock, state copy and enqueue | 🔴 **20× worse** | `--runtime-unit` |
+| a burst spawn into an undrained pool (§4.3) | 2 730 ns | the same 41 ns | 🔴 **67× worse** | `--runtime-unit` |
+| the submit burst against steady state (§4.4) | 951 ns, one transaction | 339 ns, which is two | 🔴 **2.8× worse** | `--runtime-ops` |
+| a ring push whose array is shared (§4.5) | 121 ns | 6 ns, the same push uniquely held | 🔴 **20× worse** | `--runtime-unit` |
+| carriers added to a serial client (§4.6) | 1 worker: 10 795 µs | 4 workers: 7 988 µs | 🔴 **1.35×, then flat** | `--runtime-async` |
+| what the instruments can resolve (§4.7) | ±30% run-to-run | — | ⚪ no factor: a limit of the measurement, not of the runtime | all of the above |
+
+### 4.1 Blocking work stops everything
 
 ```
 4 x 25ms sleeps      : stock 25134us / leanin 100375us
 64 spawned tasks     : 1 distinct threads
 ```
 
-Four tasks that sleep with `IO.sleep` take **100 ms** on our runtime and 25 ms on the stock pool: **4.0× worse**,
-because one carrier serialises them. The stock pool is better here for an uncomfortable reason — it has eight
-workers to lose. Either way this is the pathology `spawn_blocking` exists for, and it is the motive for W4. The
-measurement to move is this row: it should become ~25 ms when blocking leaves the carrier.
+Four tasks that sleep with `IO.sleep` take **100 ms** on our runtime and 25 ms on the stock pool, because one
+carrier serialises them. The stock pool is better here for an uncomfortable reason — it has eight workers to
+lose. Either way this is the pathology `spawn_blocking` exists for, and it is the motive for W4: the row should
+become ~25 ms once blocking work can leave the carrier.
 
-### 4.2 🔴 One carrier, so no core parallelism at all
+### 4.2 One carrier, so no core parallelism
 
 `64 spawned tasks : 1 distinct threads`. Every CPU-shaped handler — TLS, JSON, compression — occupies the one
 carrier and nothing else runs. This is structural until W8, and it cannot be measured as a comparison yet,
 because there is no second carrier to measure against.
 
-### 4.3 🔴 A burst into an undrained pool grows its overflow
+### 4.3 A burst into an undrained pool grows its overflow
 
 ```
 unit: transaction plumbing 41ns | + Pool.submit 830ns | + Pool.spawn 2730ns
 ```
 
-The lock, the state copy and the scheduler record cost **41 ns**. Adding `Pool.submit` costs 830 ns — **20× the
-plumbing** — and `Pool.spawn` 2 730 ns, **67×**, because the overflow appends the evicted half to `inject`,
-which is a `List`: a burst nothing drains grows it, and the append is proportional to its length. In steady
-state the same work is **339 ns for a spawn and a take together**, which is the honest per-item figure — the
-burst figures are what happens when nothing takes.
+The lock, the state copy and the scheduler record cost **41 ns**, and that is the whole of a transaction that
+does not touch the pool. `Pool.submit` and `Pool.spawn` add the numbers in the table because the overflow
+appends the evicted half to `inject`, which is a `List`: a burst nothing drains grows it, and the append is
+proportional to its length. In steady state the same work is **339 ns for a spawn and a take together**, which
+is the honest per-item figure — the burst rows are what happens when nothing takes.
 
-### 4.4 🔴 The same, seen from one operation
+### 4.4 The same, seen from one operation
 
-`Executor.submit` at 951 ns against `spawn+take (steady)` at 339 ns for *two* transactions — **2.8× for one
-transaction against two**. Same cause as 4.3. `Executor.spawn` (464 ns) does not show it because it writes the
-LIFO slot and only occasionally reaches the ring.
+`Executor.submit` sits in the table against `spawn+take (steady)`, and the comparison is deliberately harsh: one
+transaction against two. `Executor.spawn` (464 ns) does not show the effect, because it writes the LIFO slot
+and only occasionally reaches the ring.
 
-### 4.5 🔴 A ring mutation still copies its slots when the array is shared
+### 4.5 A ring mutation still copies its slots when the array is shared
 
 ```
 unit: Ring.push unique array 6ns | array shared with a live ring 121ns
 ```
 
-**20× the cost**, for a 2 KB copy, whenever the array is referenced twice. `Executor` now releases the cell's
-hold before it modifies the pool, which is where that sharing came from, and the take path asks the scheduler
-before it reads the pool — but the row stays in the harness because the effect is easy to reintroduce.
+The copy is 2 KB, and it happens whenever the array is referenced twice. `Executor` now releases the cell's hold
+before it modifies the pool, which is where that sharing came from, and the take path asks the scheduler before
+it reads the pool — but the row stays in the harness because the effect is easy to reintroduce.
 
-### 4.6 🔴 This shape does not scale, and is not evidence of scaling
+### 4.6 This shape does not scale, and is not evidence of scaling
 
-1 worker 10 795 µs, 4 workers 7 988 µs, 8 workers 8 106 µs — **1.35× and then a plateau**. That is the client's
-in-order `await` loop, not the scheduler, and it means this row cannot be used to argue for or against
-multi-carrier work: W8 needs a parallel-shaped workload and a second measurement to go with it.
+The 1.35× in the table is the client's in-order `await` loop, not the scheduler, and it means this row cannot be
+used to argue for or against multi-carrier work: W8 needs a parallel-shaped workload and a second measurement to
+go with it.
 
-### 4.7 ⚪ Measurement itself is a limitation
+### 4.7 Measurement itself is a limitation
 
 Not a claim about the runtime, but about the instruments, and it limits what can be claimed at all. There is no
 paused clock and no deterministic driver yet (W13), so anything timeout-shaped can only be tested against
-wall-clock time, and there is no ThreadSanitizer in the runtime. Combined with the ±30% drift above, small
+wall-clock time, and there is no ThreadSanitizer in the runtime. Combined with the ±30% drift in §1, small
 effects cannot be resolved today: the reorder in `Executor`'s take path was worth 2–8%, which is inside the
 noise of a single run and needed five interleaved pairs to see.
 
