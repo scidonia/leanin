@@ -9,7 +9,11 @@ separate so the two can be read side by side.
 
 Every deliverable states the artefact and the evidence that it is met. The evidence idiom is the repository's
 own: a **scenario** at an external boundary with its controls, a **proof** against the model, or a
-**measurement** from `--runtime-bench`, `--runtime-tail`, `--runtime-shared`, `--runtime-ops` or `--spike`.
+**measurement** from `--runtime-bench`, `--runtime-tail`, `--runtime-shared`, **measurement** from `--runtime-bench`, `--runtime-tail`, `--runtime-shared`, `--runtime-ops`, `--spike`,
+`--runtime-async` (the rows compared against `Std.Async`) or `--runtime-unit` (one transaction, decomposed).
+
+**The item numbers are names, not an order. §3 is the order**, and it is the one to read before starting: it
+moves W5 ahead of W4 and interleaves the webserver items W10–W14 with the scheduler ones.
 
 ## 0. What is already in place
 
@@ -18,11 +22,12 @@ the park/wake protocol with the notification inside the critical section that re
 layer with `spawn`/`await` and continuation-passing; `blockOn` driving the executor on the caller's thread; and
 the specification — a model whose transitions SC1–SC6 check and whose obligations are proved.
 
-Measured, as of the benchmarks in the repository: parity with `Std.Async` on the batch shape at equal thread
-count (17.5 ms against 16.5 ms per 10 000 units), **7.6× faster than a native `Task` on a dependent chain**
-(924 ns against 6 987 ns per link), and ahead of the stock pool at its default configuration (1.6× throughput,
-2.3× tail). The remaining per-unit gap on the batch shape is about 4×, and its source is allocation and CPS
-indirection rather than scheduling.
+Measured, as of the benchmarks in the repository: **ahead of `Std.Async` on the batch shape at every thread
+count** — 10.2–11.3 ms against 24.2 ms per 10 000 units at one worker, and against its 105–168 ms at eight,
+where it degrades; **7.6× faster than a native `Task` on a dependent chain** (924 ns against 6 987 ns per
+link); and ahead of the stock pool at its default configuration (1.6× throughput, 2.3× tail). The per-unit gap
+to the native pool on the batch shape is closed, and what remains is allocation and CPS indirection rather than
+scheduling (P1).
 
 ## 1. Should io_uring be part of the design?
 
@@ -133,6 +138,35 @@ rows so regressions are visible.
 sleeping `d` finish in about `d`, not N × d (`spike` already measures 64 × 100 ms at 102 ms for
 `Async.sleep`), and a task spawned *while* another sleeps still runs.
 
+### W10 — The HTTP surface we would actually be reusing
+
+**Deliverable.** A survey of `Std.Http.Server` and its neighbours under `Std/Http/`, answering what decides W9:
+keep-alive and connection reuse, request-size and header limits, HEAD and the other methods, chunked
+transfer-encoding, the timeout knobs, and — the one that decides most — *how it is driven*: whether it takes a
+runtime to run on, or brings its own loop.
+
+**Why.** W9 proposes reuse, and reuse is only a decision once the reused surface is known. If it cannot be run
+on our carrier, or does not do limits or keep-alive, then W9 is a protocol implementation rather than an
+integration, which changes the size of the largest webserver item. Read-only, and it can run beside W2.
+
+**Acceptance.** A written answer, a line per question with a file-and-line anchor, and a verdict on whether W9
+is integration or implementation.
+
+### W11 — Buffered I/O helpers
+
+**Deliverable.** The reading and writing shapes an HTTP parser assumes, over W1's leaves: `readUntil` against a
+delimiter (the request line and the headers), `readExact`, `lines`, a buffered writer with `flush`, `copy`, and
+`split` for half-close. `Std.Async.IO` today is three classes — `AsyncRead.read`, `AsyncWrite.write`/`writeAll`/
+`flush`, `AsyncStream.next` — with no buffering, no delimiting and no splitting, so every parser written on it
+hand-rolls all four.
+
+**Why Tokio.** `AsyncBufReadExt::{read_until, lines}`, `read_exact`, `copy`, `TcpStream::split`, `BufWriter`.
+This is the layer between the socket and the protocol, and it is small.
+
+**Acceptance.** A scenario framing two messages with a delimiter that arrives across three writes, with the
+split point inside the delimiter, plus the control that the same detector rejects a partial read taken as
+complete.
+
 ### W4 — The blocking pool (PLAN.md M4)
 
 **Deliverable.** `LeanIn/Runtime/Blocking.lean`: a bounded pool of carrier threads off the executor's queue,
@@ -156,6 +190,12 @@ the stock pool must be left untouched — plus two existing rows that must move:
 per-task error outcomes (`Task (Except …)`-shaped, or a supervisor — a malformed request must not panic the
 runtime), and a `shutdown` that drains ring, slot and inject.
 
+**Cancellation safety** is the property a server actually needs, and it is not what dropping gives: a connection
+cancelled mid-request must lose nothing and duplicate nothing, which is a statement about the task state machine
+rather than about the queue. And **a parser must be total**: a panic in Lean is not catchable, so "a malformed
+request must not panic the runtime" cannot be implemented as isolation around a handler — it is an obligation on
+the parsing code, checked by the model rather than caught at the boundary.
+
 **Why Tokio.** A server cannot be written without any of the three: clients disconnect, handlers fail, and
 processes get signals.
 
@@ -172,6 +212,14 @@ queue and `resume` is the wake), an async semaphore, and a bounded channel.
 in a single-carrier runtime: the blocking version is the case that cannot be demonstrated because it wedges the
 carrier.
 
+**What is missing, and what is not.** `Semaphore.acquire` returns an `IO.Promise`, `Channel.send`/`recv` return
+`Task`s, and `Broadcast`/`Notify`/`CancellationToken` are the same shape — so those arrive across W1's seam as an
+ordinary `await`, because a `Promise` or a `Task` *is* the waker substrate. What does not cross is the **OS-lock
+family** — `Mutex`, `RecursiveMutex` and `SharedMutex` are real C++ locks, so taking one blocks the carrier —
+and anything whose only interface is a blocking call. The async mutex is the item; the semaphore and the channel
+are adapters over what exists, and the deliverable should say which is which.
+carrier.
+
 **Acceptance.** Two tasks sharing a mutex across awaits both complete, and a task waiting on it does not stall
 unrelated tasks; a flood scenario where the bounded queue holds and the accepted/rejected counts are exact.
 
@@ -184,6 +232,35 @@ absence), `race`/`join` combinators once it exists, and a priority argument on `
 
 **Acceptance.** A scenario observing that the first of several handles to become ready is the one which wins,
 and a priority scenario asserting the order the queue serves.
+
+### W12 — Task-local context and a connection registry
+
+**Deliverable.** A task-local store — a request id, a deadline, a tracing context, read without threading it
+through every signature — and a `JoinSet`-shaped set of handles that can be awaited as a group and drained.
+
+**Why Tokio.** `task_local!` and `JoinSet`. The registry is what makes shutdown a *drain* — stop accepting, let
+outstanding connections finish, cancel what outlives the deadline — rather than a counter check; the locals are
+what make a log line say which request it belongs to.
+
+**Acceptance.** A scenario where a value installed on the client task is read from a task it spawned on the
+carrier, and not from a task on another carrier; a drain scenario where `shutdown` returns only after the
+outstanding handlers have finished, with the live count observed to fall to zero.
+
+### W13 — Runtime handle, metrics, and deterministic time
+
+**Deliverable.** A handle that spawns onto a running executor from a thread that is not a carrier (a signal
+handler, a plain `IO.asTask`); a small set of counters (ready work, parked carriers, busy time per carrier); and
+a mode where time is driven by the harness rather than the clock, so a timeout is tested at a stated instant
+instead of by sleeping.
+
+**Why Tokio.** `Handle::spawn`, `Runtime::metrics`, `#[tokio::test(start_paused = true)]`. The handle is what
+lets a signal handler ask the runtime to stop; the counters are what capacity claims are argued from; and
+without the third, every timeout and every shutdown deadline can only be tested by wall-clock luck, which is
+what this repository accepts nowhere else.
+
+**Acceptance.** A scenario where a non-carrier thread spawns and the work runs on a carrier; a shutdown driven by
+a registered signal, observed to stop accepting and then drain; and a timeout test whose elapsed time is read
+from the harness clock, with the control that the same test at a shorter deadline trips.
 
 ### W8 — Multi-carrier and stealing (PLAN.md M5), with O2
 
@@ -206,12 +283,26 @@ minimal specified HTTP/1.1 if the project wants the protocol's own contracts.
 
 **Why Tokio.** This is hyper/axum's role, and it is where "write a web server" actually lands.
 
+**Depends on W10**: whether this item is integration or implementation is what that survey decides.
+
 **Acceptance.** An end-to-end scenario: a request over a real socket, a byte-exact response, and the framework's
 behaviour contracts with their controls.
 
+### W14 — The service's own refinement statement
+
+**Deliverable.** The obligations a *server* has, stated in the model and checked against the executor: every
+accepted connection is either completed or closed and never silently dropped; the number of live connections
+never exceeds its bound; and every request gets a response or an error within its deadline.
+
+**Why.** The scheduler's obligations are the mechanism; these are the product, and they are what makes this
+different from using `Std.Async` directly.
+
+**Acceptance.** Each obligation as a scenario at the executor boundary with its control, alongside the model
+statement it refines, in the shape SC1–SC6 already use.
+
 ### P1, P2 — Two cross-cutting performance items
 
-**P2 — the burst path, and it comes first.** Enqueuing into a saturated ring costs **1533 ns** against **169 ns**
+**P2 — the burst path (landed).** Enqueuing into a saturated ring costs **1533 ns** against **169 ns**
 steady, and the benchmark's batch shape spawns 10 000 units into a 256-slot ring — so its **1657 ns per task is
 the overflow path almost exactly**. The batch shape is the ring, not the task machinery, which is what the
 earlier attribution got wrong. Two things fixed it, both measured on this machine with the same command:
@@ -228,21 +319,42 @@ the enqueue, so ~420 ns is cell handling, resumption and the bind chain — the 
 compiler-generated state machine. Acceptance: the round-trip row, and `--runtime-bench` parity at equal thread
 count on a streaming shape.
 
-**Standing, for orientation.** At the default configuration this runtime is now ahead on both shapes measured:
-16.6 ms against the native pool's 26.4 ms on the batch, and 588 ns against 5093 ns on a chain link. At *equal
-thread count* it is still ~4× behind the native pool on the batch shape — and that gap is what P2 is for.
+**Standing, for orientation.** This runtime is ahead on both shapes measured: 10.2–11.3 ms against the native
+pool's 25.7–28.5 ms on the batch, and 588 ns against 5093 ns on a chain link. At *equal worker count* the batch
+row is ahead too — 10.2–11.3 ms against `Std.Async`'s 24.2 ms at one thread — so what remains is allocation and
+CPS indirection, which is P1.
 
-## 3. Where to start
+## 3. The order
 
-W1 first, because it is ten to twenty lines and it unblocks every leaf at once — sockets, timers, DNS, channels
-and `Std.Http` all sit behind that one type. Then P1, because a server is batch-shaped, which is the shape where
-we are 4× behind rather than 7.6× ahead. Then W4, which is already the plan's next milestone and whose motive is
-already measured. W5 and W6 are interface work the plan already knows about; W8 is the largest single piece and
-gated on O2; W9 is mostly someone else's code, which is the point.
+| # | step | state | unblocks |
+|---|---|---|---|
+| 1 | **W1** leaf seam | met | every leaf — sockets, timers, DNS, channels, `Std.Http` |
+| 2 | **W10** the `Std.Http.Server` survey | next (read-only) | whether W9 is an integration or an implementation |
+| 3 | **W2** sockets | next | any service at all |
+| 4 | **W3** timers | | timeouts, deadlines, keep-alive |
+| 5 | **W11** buffered I/O helpers | | framing, and any parser |
+| 6 | **W5** safety trio, and cancellation safety | | operability: disconnect, failure, signal |
+| 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |
+| 8 | **W6** async sync and backpressure | | shared state, connection limits |
+| 9 | **W14** the service's own refinement | | the product |
+| 10 | **W12** task-locals, connection registry | | log context, drainable shutdown |
+| 11 | **W7** selection, racing, priority | | racing a request against its deadline |
+| 12 | **W13** handle, metrics, deterministic time | | operating it, capacity, timeout tests |
+| 13 | **W8** multi-carrier and stealing (O2 first) | | more than one core |
+| 14 | **W9** the HTTP surface | | a web server |
+| 15 | **P1** allocation and CPS (P2 landed) | | the benchmark rows |
+
+W1 is met, so the order starts at W10 and W2. W10 is read-only and can run beside W2; W2 and W3 give a service
+that answers a request; W11 gives it framing; W5 makes it operable (disconnect, failure, signal); W4 unblocks any
+handler that must touch a file or a CPU; W6 covers shared state and limits; W14 states what the service promises;
+W12 makes it observable and drainable; W7 races a request against its deadline; W13 makes it operable and its
+timeouts testable; W8 is the largest single piece and gated on O2; W9 is mostly someone else's code, which is the
+point; P1 is what the last measurement row is for.
 
 ## 4. What stays absent
 
 Unchanged from `interface.md` §5, and worth restating because a workplan invites scope creep: no bare `wait`
 (A4 permits spurious wakeups), no fairness or priority *guarantee* (only a bound on the LIFO allowance), no
 atomics in the interface, no `LocalSet`/`block_in_place`/runtime-flavour enum, and no io_uring backend of our
-own — a ring would arrive as a leaf behind W1, if it arrives at all.
+own — a ring would arrive as a leaf behind W1, if it arrives at all; and no panic isolation, because a panic is
+not catchable in Lean, so totality of the parsing code is the defence rather than a supervisor around it.
