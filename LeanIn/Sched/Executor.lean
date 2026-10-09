@@ -69,8 +69,10 @@ of its slots, and the mutation then happens in place. Nothing outside the critic
 lock is held for the whole transaction, and the value the transaction computes is written back before the
 lock is released.
 
-Only sites that *replace* the pool are using it. A site that has to restore the pool it read — a refused
-take — cannot, because an in-place mutation would have moved the value it means to restore. -/
+A transaction that ends without storing a new state writes the state it read back instead, which is what the
+take sites do when the pool turns out to be empty. Every site that can modify the pool sets this first, and no
+site reads the pool value it read after modifying it: the take sites ask the scheduler first, so a refusal
+never modifies anything. -/
   placeholder : State α cap
 
 def Executor.new (α : Type) (cap : Nat) (workers : Nat) : IO (Executor α cap) := do
@@ -110,18 +112,32 @@ def Executor.submit (e : Executor α cap) (x : α) : IO Unit := do e.submitBase 
 
 /-- **Take one item of work, and report the decision.** The pool and the scheduler advance together, or
 neither does — a pool that returned a task while the scheduler removed no work would break `Aligned`, and one
-lock is what makes that unreachable rather than merely unlikely. A refused scheduler leaves the pool as it
-was and reports no item, which is the same refusal the older form returned as `none`. -/
+lock is what makes that unreachable rather than merely unlikely.
+
+**The scheduler is consulted first, and the pool is read only when it accepts.** `Aligned` — which holds of a
+fresh executor and is preserved by each of the transition theorems above — says `work = inFlight`, and
+`inFlight = 0` is exactly the pool having nothing to give, so a refusal means an empty pool and an acceptance
+means a non-empty one. The two orders therefore agree on every state a call boundary can be in, and a refusal
+needs no restore: the pool is never modified on that path, which is what lets the take below modify it in
+place. -/
 def Executor.takeReport (e : Executor α cap) : IO (Sched.TakeReport α cap) :=
   e.state.atomically do
     let st ← get
-    let r := st.pool.takeReport
-    match r.item with
-    | none => return r
-    | some _ =>
-      match st.sched.take with
-      | none    => return { r with item := none, pool := st.pool }
-      | some s' => set ({ st with pool := r.pool, sched := s' }); return r
+    match st.sched.take with
+    | none    =>
+      -- Refused, so under `Aligned` the pool is empty and there is no take to undo. The report is still a
+      -- read-out of the pool with no item in it, which is what the earlier form returned here; because the
+      -- cell still holds the state that was read, that read copies rather than modifying it in place.
+      let r := st.pool.takeReport
+      return { r with item := none, pool := st.pool }
+    | some s' =>
+      -- The scheduler accepted, so this take is the one that will be stored: release the cell's hold first,
+      -- and the ring mutation below happens in place.
+      set e.placeholder
+      let r := st.pool.takeReport
+      match r.item with
+      | none => set st; return r
+      | some _ => set ({ st with pool := r.pool, sched := s' }); return r
 
 /-- Take one item of work: the decision without its report. -/
 def Executor.take (e : Executor α cap) : IO (Option α) := do
@@ -234,12 +250,16 @@ before serving the ring, so the predicate below re-checks exactly the condition 
 def Executor.tryTake (e : Executor α cap) : IO (Option (Option α)) :=
   e.state.atomically do
     let st ← get
-    match st.pool.take with
-    | (none, _) => return (if st.sched.stopping then some none else none)
-    | (some x, p') =>
-      match st.sched.take with
-      | none    => return none
-      | some s' => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some (some x))
+    match st.sched.take with
+    | none    =>
+      -- Refused, so under `Aligned` there is nothing in the pool: this is the empty-pool branch the earlier
+      -- form reached after taking, which asked only whether the pool was stopping.
+      return (if st.sched.stopping then some none else none)
+    | some s' =>
+      set e.placeholder
+      match st.pool.take with
+      | (none, _) => set st; return none
+      | (some x, p') => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some (some x))
 
 /-- **One step of a worker: take work, or park until there is some.** The predicate is re-checked under
 the same lock a submit notifies under, which is what makes the model's check-and-park atomicity real: a
@@ -270,14 +290,15 @@ def Executor.work (e : Executor α cap) : IO (Option α) := do
           return false)
       (k := do
         let st ← get
-        match st.pool.take with
-        | (none, _) => return none
-        | (some x, p') =>
-          match st.sched.take with
-          | none    => return none
+        match st.sched.take with
+        | none    => return none
+        | some s' =>
+          set e.placeholder
+          match st.pool.take with
+          | (none, _) => set st; return none
           -- Waking to take work means the worker is no longer parked, in the same critical section as the
           -- take, so the state never shows a worker both parked and holding work.
-          | some s' => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some x))
+          | (some x, p') => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some x))
 
 /-- **The whole state as the specification sees it**, for a client that needs more than the two counts:
 `inFlight`, `taken` and `parked` all come from here. Using the projection rather than a bespoke accessor is

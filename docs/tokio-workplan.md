@@ -219,8 +219,9 @@ earlier attribution got wrong. Two things fixed it, both measured on this machin
 (24 656 µs → 16 550 µs), and a transaction releases the cell's hold on the state before it modifies the pool,
 so the ring's slots are uniquely owned and `Array.set` does not copy them (16 550 µs → 10 987 µs). The row is
 now 2.2× the same workload's `Std.Async` figure at one thread (24 179 µs) and 13× its figure at eight
-(143 558 µs), and `Executor.submit` is 1 118 ns against 2 014 ns. The take side still pays the copy: a refused
-take has to restore the pool it read, which an in-place mutation no longer leaves intact.
+(143 558 µs), and `Executor.submit` is 1 118 ns against 2 014 ns. The take side reaches the same
+place by asking the scheduler before it reads the pool, so a refusal never modifies anything; its effect on
+this row is small, because these takes mostly find the LIFO slot, which touches no slot array.
 
 **P1 — allocation and CPS, and it is the chain-shape item.** The round trip is **588 ns**, of which ~169 ns is
 the enqueue, so ~420 ns is cell handling, resumption and the bind chain — the part with no counterpart in a
