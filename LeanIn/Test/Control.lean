@@ -3,6 +3,7 @@ import LeanIn.Sched.Basic
 import LeanIn.Sched.Executor
 import LeanIn.Runtime.Basic
 import LeanIn.Runtime.Leaf
+import LeanIn.Runtime.Net
 
 /-!
 # Runtime controls for the bridge axioms
@@ -697,6 +698,60 @@ def runtimeUnit : IO UInt32 := do
   IO.println s!"unit: Ring.push unique array {uni}ns | array shared with a live ring {sh}ns"
   return 0
 
+/-- **W2's evidence: sockets driven from our carriers.**
+
+The server half is ours — bind, an accept loop of ours, one task per connection, all as `Task.Async` steps on
+one executor driven by one thread. The client half is deliberately `Std.Async`'s, driven by `Async.block` on
+this thread: a client that is not ours is what makes the thread identities below mean anything.
+
+Observations, in the shape SC6 uses. Every connection task records the thread it started on and the accept loop
+records one at each end, so one distinct thread is the single-carrier claim and "not the client's thread" is
+the seam. Each reply is compared byte for byte, so the loop is doing work rather than closing on an empty read.
+And the executor's `inFlight` is read back after every connection has been awaited, so a leaked or lost task
+would be visible rather than assumed away.
+
+Diagnostic: `lake exe controls --runtime-net`. -/
+def runtimeNet : IO UInt32 := do
+  let n := 16
+  let payload : ByteArray := "leanin over a socket".toUTF8
+  let hooks ← Runtime.Hooks.new
+  let l ← Runtime.Listener.bind (Runtime.loopback 0)
+  let addr ← Runtime.Listener.sockName l
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let srvTids ← IO.mkRef ([] : List UInt64)
+  let body : Runtime.Conn → LeanIn.Task.Async Unit := fun c => do
+    srvTids.modify (· ++ [← IO.getTID])
+    Runtime.echoConn hooks c
+  let server ← IO.asTask (Runtime.run e (do
+    srvTids.modify (· ++ [← IO.getTID])
+    Runtime.serveNJoin hooks l n body)) _root_.Task.Priority.dedicated
+  let clientTid ← IO.getTID
+  let t0 ← IO.monoNanosNow
+  let replies ← Std.Async.Async.block do
+    let hs ← (List.range n).mapM (fun _ => Std.Async.async (do
+      let c ← Std.Async.TCP.Socket.Client.mk
+      c.connect addr
+      c.send payload
+      let got ← c.recv? 65536
+      c.shutdown
+      return got))
+    hs.mapM (fun h => Std.Async.await h)
+  let t1 ← IO.monoNanosNow
+  let outcome ← IO.wait server
+  let tids ← srvTids.get
+  let distinct := tids.foldl (fun acc t => if acc.contains t then acc else acc ++ [t]) []
+  let exact := (replies.filter (fun r => r == some payload)).length
+  let (inFlight, _) ← e.observe
+  match outcome with
+  | .error err => IO.println s!"net: the server computation failed: {err}"; return 1
+  | .ok () =>
+    IO.println s!"net: {n} concurrent connections, {distinct.length} distinct server thread(s), client on {clientTid}"
+    IO.println s!"net: server tids {distinct} — client among them: {distinct.contains clientTid}"
+    IO.println s!"net: {exact}/{n} replies byte-identical to the {payload.size}-byte request; inFlight after = {inFlight}"
+    IO.println s!"net: {n} concurrent connections in {(t1 - t0) / 1000}us of wall time, {(t1 - t0) / 1000 / n}us of it per connection"
+    IO.println s!"net: carrier path only — the client is Std.Async's, so the server's runtime is what differs"
+    return 0
+
 
 
 /-- Throwaway, for W1's outbound direction and W3's acceptance: do `Std.Async`'s leaves work through the seam,
@@ -886,6 +941,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-ops" :: _ => return ← runtimeOps
   | "--runtime-async" :: _ => return ← runtimeAsync
   | "--runtime-unit" :: _ => return ← runtimeUnit
+  | "--runtime-net" :: _ => return ← runtimeNet
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

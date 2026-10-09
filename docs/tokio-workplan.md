@@ -129,6 +129,26 @@ is what lets it be tested with no socket at all.
 
 **Why Tokio.** `TcpListener`/`TcpStream` and the accept loop are the floor of any network service.
 
+**So far.** `LeanIn/Runtime/Net.lean` holds the socket seam and the accept loop: `Listener.bind`/`accept`,
+`Conn.recv`/`send`/`sendAll`/`shutdown`, `echoConn`, and `serveN`/`serveNJoin` — each one an `awaitAsync` over
+`Std.Async`'s operation, so a completion enqueues our resume and nothing of ours runs on the completing thread.
+The module opens nothing from `Std.Async`, because two of its names collide with ours — it has its own
+`MonadAsync`, whose method is `async` where ours is `spawn`, and its own `background` — so it qualifies every
+name on the far side and leaves ours alone. It is the boundary, and it reads like one.
+
+`--runtime-net` is the evidence, and it answers the question W10 left open:
+
+```
+net: 16 concurrent connections, 1 distinct server thread(s), client on 1007222
+net: server tids [1007223] — client among them: false
+net: 16/16 replies byte-identical to the 20-byte request; inFlight after = 0
+net: 16 concurrent connections in 6993us of wall time, 437us of it per connection
+```
+
+One thread for the accept loop and all sixteen connection tasks, on a thread the client is not on, with every
+reply byte-identical and the executor empty afterwards. What remains of this item is the scenario's home: that
+observation belongs in `tests/` beside SC1–SC6 with its controls, not only in a diagnostic.
+
 **Acceptance.** A scenario: N concurrent connections, each echoed correctly, every step on the carrier,
 `inFlight` back to 0 at the end. A measurement: connections per second and per-connection round trip, added as
 rows so regressions are visible.
@@ -421,8 +441,8 @@ CPS indirection, which is P1.
 | # | step | state | unblocks |
 |---|---|---|---|
 | 1 | **W1** leaf seam | met | every leaf — sockets, timers, DNS, channels, `Std.Http` |
-| 2 | **W10** the `Std.Http.Server` survey | next (read-only) | whether W9 is an integration or an implementation |
-| 3 | **W2** sockets | next | any service at all |
+| 2 | **W10** the `Std.Http.Server` survey | met | whether W9 is an integration or an implementation |
+| 3 | **W2** sockets | seam, loop and diagnostic done; the scenario in `tests/` is the remainder | any service at all |
 | 4 | **W3** timers | | timeouts, deadlines, keep-alive |
 | 5 | **W11** buffered I/O helpers | | framing, and any parser |
 | 6 | **W5** safety trio, and cancellation safety | | operability: disconnect, failure, signal |
