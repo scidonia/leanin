@@ -30,6 +30,7 @@ Supporting documents:
 | [`docs/proof-strategy.md`](docs/proof-strategy.md) | Property ladder, three-layer architecture, TCB, the hard parts |
 | [`docs/reading-list.md`](docs/reading-list.md) | Annotated primary sources, with verification status |
 | [`docs/evidence.md`](docs/evidence.md) | Every measured and read-first-hand fact, with commands and anchors |
+| [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Measured performance against `Std.Async` and the stock pool, including the shapes where we are worse |
 
 ## Build and run
 
