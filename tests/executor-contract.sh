@@ -1501,6 +1501,65 @@ check_sc8() {
     "$sleepers" "$overlap" "$late_before_wakes" "$wakes" "$timeout_hit" "$timeout_miss" "$first_wins" "$late_timer_ignored"
 }
 
+# connect_ok <record> — the error channel's observations as a detector, so its own control can reuse it: a refused
+# connect arrives as the refusal, an accepted one arrives as `ok`, and the listener is still bound when the run
+# reports itself — that last one being the lifetime rule this mode exists to demonstrate.
+connect_ok() {
+  local rec="$1" refused accepted listener
+  refused="$(field refused "$rec")" || return 1
+  accepted="$(field accepted "$rec")" || return 1
+  listener="$(field listener "$rec")" || return 1
+  case "$refused" in error:*111*) : ;; *) return 1 ;; esac
+  [ "$accepted" = "ok" ] || return 1
+  [ -n "$listener" ] || return 1
+}
+
+# --- SC9 — a failed socket operation arrives as a value, and a successful one as `ok` ————————————————————————
+check_sc9() {
+  local out status line refused accepted listener
+  local near
+  local -a records=()
+
+  out="$(bounded lake exe controls --runtime-connect)"
+  status=$?
+  check_status SC9 "$status" "lake exe controls --runtime-connect"
+  require_header "$out"
+
+  mapfile -t records < <(grep '^connect|' <<<"$out" || true)
+  [ "${#records[@]}" -eq 1 ] ||
+    fail "SC9 Then: the error channel not observed exactly once" \
+      "expected exactly one connect| record, saw ${#records[@]}"
+  line="${records[0]}"
+
+  record_is "${line#connect|}" refused accepted listener ||
+    fail "SC9 Then: the error channel not observed exactly once" \
+      "the record is not exactly refused/accepted/listener with nonempty values: [$line]"
+
+  connect_ok 'refused=error:no such thing (error code: 111, connection refused)|accepted=ok|listener=127.0.0.1:1' ||
+    setup_error "SC9: the error-channel detector rejected a well-formed record" \
+      "the detectors' own control, not the SC9 Then"
+  for near in \
+    'refused=error:no such thing (error code: 111, connection refused)|accepted=error:connection reset by peer|listener=127.0.0.1:1' \
+    'refused=ok|accepted=ok|listener=127.0.0.1:1' \
+    'refused=error:no such thing (error code: 111, connection refused)|accepted=ok|listener='; do
+    if connect_ok "$near"; then
+      setup_error "SC9: the error-channel detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC9 Then"
+    fi
+  done
+  printf 'SC9 control: rejected an accepted connect that also failed, a refusal reported as success and a listener that did not survive\n'
+
+  connect_ok "${line#connect|}" ||
+    fail "SC9 Then: a failed socket operation was not observed to arrive as a value" \
+      "record=[$line]"
+
+  bound_field refused refused "$line" "SC9 Then"
+  bound_field accepted accepted "$line" "SC9 Then"
+  bound_field listener listener "$line" "SC9 Then"
+  printf 'SC9 ok: refused=%s accepted=%s listener=%s\n' "$refused" "$accepted" "$listener"
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -1510,8 +1569,9 @@ SC5) check_sc5 ;;
 SC6) check_sc6 ;;
 SC7) check_sc7 ;;
 SC8) check_sc8 ;;
+SC9) check_sc9 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9\n' >&2
   exit 2
   ;;
 esac

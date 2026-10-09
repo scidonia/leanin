@@ -288,6 +288,50 @@ trace.
 
 ______________________________________________________________________
 
+### SC9 — a failed socket operation arrives as a value, and the listener must outlive its last use
+
+**Actor.** A Lean executable client that connects twice: once to a port nothing listens on, and once to a
+listener the same program holds. The second is the affirmative control for the first.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC9`, which invokes
+`lake exe controls --runtime-connect`. Nothing is accepted in this mode — the point is the connect, not a
+conversation — so the check reads the two outcomes and the listener's own address and nothing else.
+
+**Given.** A fresh executor, a listener bound to `127.0.0.1:0`, and two `connect`s through the runtime's own
+wrapper, which returns failures as values.
+
+**When.** In one invocation the client connects to port 1, which nothing user-level can be listening on, and then
+to the listener's address, which it reads in the same step. It prints the refusal text, the second outcome, and
+the listener's address read again afterwards.
+
+**Then.** There is exactly one `connect|` record, and its fields are exactly `refused`, `accepted` and `listener`
+in that order with nonempty values.
+
+`refused` is the *refusal* — its text carries `error code: 111`, and it arrived as a value, so the run reached
+its own record rather than dying. `accepted` is `ok`: a connect to a live listener succeeds, which is what makes
+the refusal a reading rather than a reader that reports failure for everything. And `listener` is non-empty,
+because the socket had to still exist at the end for either of the first two to mean anything.
+
+The detector reading those three conditions is exercised inside the same invocation: it accepts a well-formed
+record and rejects three near misses — an accepted connect that also failed, a refusal reported as success, and a
+listener that did not survive the run. Every near miss is built from the record syntax and the expectation,
+never from the executable's output, and a control that does not hold is a fixture defect rather than this `Then`.
+
+**Why, and what it cost to learn.** `interface.md` §5 records that our `Async` has no error channel; `EAsync` is
+that channel, and this is the first scenario that reads it — a socket failure has to be an ordinary value,
+because a client closing a connection mid-request is the normal case for a server.
+
+The scenario also carries a rule that only showed up by writing it. **A socket's descriptor dies with the last
+*use* of the Lean object that owns it, not at the end of its scope.** The first version read the listener's
+address immediately before connecting and the listener was collected in between, so the connect was reset by a
+socket that had just served sixteen connections; two of four runs died with SIGSEGV instead, which is the same
+hazard winning a different race. Keeping the listener in a reference whose own last use falls *after* the connect
+holds both alive through it, and six consecutive runs then read `refused=…111`, `accepted=ok` and a bound
+listener. That is a rule the driver obeys for its listener and for every connection it serves, and it is here
+rather than in the driver because this is the smallest place it can be seen.
+
+______________________________________________________________________
+
 ### SC8 — timers on our carriers: sleeps that park rather than occupy, and timeouts that fire
 
 **Actor.** A Lean executable client of LeanIn's timer leaf and its timeout combinator: `16` sleepers of 50 ms

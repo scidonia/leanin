@@ -1039,6 +1039,41 @@ def runtimeTime : IO UInt32 := do
   IO.println s!"timectl|blockingOrderOverlaps={blockingOrderOverlaps}|missingWakeWakes={missingWakeWakes}"
   return 0
 
+/-- **The error channel, isolated.**
+
+Two connects and nothing else: one to a port nothing listens on, which must return the failure *as a value*, and
+one to a listener this program holds, which must return `ok` — the affirmative control for the first, in the same
+run. The failure text is printed rather than classified, because the point of this mode is to be read.
+
+**The listener is held in a reference that is used again after the connect, and that is the finding this mode
+exists for.** A socket's descriptor dies with the *last use* of the Lean object that owns it, not at the end of
+its scope: the first version read the address immediately before connecting and the listener was collected in
+between, so the connect was reset by a socket that had been serving a moment earlier. Two of four runs also died
+with SIGSEGV rather than a reset, which is the same hazard losing a race. Holding it in a reference whose own
+last use is *after* the connect keeps both alive through it — which is also the rule a driver must follow for its
+listener and for every connection it is serving.
+
+Diagnostic: `lake exe controls --runtime-connect`. -/
+def runtimeConnect : IO UInt32 := do
+  let hooks ← Runtime.Hooks.new
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let refusedProg : LeanIn.Task.EAsync IO.Error Unit := do
+    let _ ← Runtime.connect hooks (Runtime.loopback 1)
+    pure ()
+  let refused ← Runtime.run e refusedProg
+  let refusedStr := match refused with | .ok _ => "ok" | .error err => s!"error:{err}"
+  let l ← Runtime.Listener.bind (Runtime.loopback 0)
+  let keep ← IO.mkRef l
+  let acceptedProg : LeanIn.Task.EAsync IO.Error Unit := do
+    let a ← monadLift (Runtime.Listener.sockName (← keep.get) : IO Std.Net.SocketAddress)
+    let _ ← Runtime.connect hooks a
+    pure ()
+  let accepted ← Runtime.run e acceptedProg
+  let stillBound ← Runtime.Listener.sockName (← keep.get)
+  let acceptedStr := match accepted with | .ok _ => "ok" | .error err => s!"error:{err}"
+  IO.println s!"connect|refused={refusedStr}|accepted={acceptedStr}|listener={stillBound}"
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -1059,6 +1094,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-unit" :: _ => return ← runtimeUnit
   | "--runtime-net" :: _ => return ← runtimeNet
   | "--runtime-time" :: _ => return ← runtimeTime
+  | "--runtime-connect" :: _ => return ← runtimeConnect
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"
