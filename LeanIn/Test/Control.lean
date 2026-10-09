@@ -755,6 +755,21 @@ def runtimeNet : IO UInt32 := do
   let distinct := distinctOf tids
   let exact := (replies.filter (fun r => r == some payload)).length
   let perturbed := (replies.filter (fun r => r == some (payload.push 0))).length
+  -- An error-channel probe lived here: a refused connect to a dead port, and an accepted connect to this run's
+  -- own listener as its affirmative control. It was removed rather than fixed in place because it makes the
+  -- process die with SIGSEGV, and two things about it are worth keeping:
+  --
+  -- * A socket's descriptor closes when the Lean object owning it is collected. The first version read the
+  --   listener's address early and probed later, and was refused by a socket it had just served sixteen
+  --   connections on; reading the address in the same step as the probe fixed that, which is why the second
+  --   version reached the accepted connect at all.
+  -- * With the listener kept alive across the probe, the process then segfaults — during the run, not at the
+  --   exit, and before the record is printed. The likely shape is a libuv handle finalised at a point the loop
+  --   is no longer prepared for, but that is a hypothesis and not a finding: it needs isolating in its own mode
+  --   before anything is built on it.
+  --
+  -- What is *not* in doubt is the library: `EAsync` is in and the socket layer returns failures rather than
+  -- raising. `Runtime.connect` exists for the probe and for the driver's own tests.
   let (inFlightAfter, _) ← e.observe
   -- A shipped-path echo server for the same workload was tried here and backed out: an accept loop with a
   -- per-connection `background` does not elaborate inside this module (`whnf` heartbeat exhaustion in the

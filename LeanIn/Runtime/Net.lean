@@ -67,6 +67,16 @@ def Conn.sendAll (c : Conn) (hooks : Hooks) (data : Array ByteArray) : Task.EAsy
 def Conn.shutdown (c : Conn) (hooks : Hooks) : Task.EAsync IO.Error Unit :=
   awaitAsyncE hooks (Std.Async.TCP.Socket.Client.shutdown c)
 
+/-- **Connect, awaited as one of ours.** A client operation, and the one the error channel's own test needs: a
+refused connect is the ordinary way to make a socket operation fail on purpose.
+
+The socket is made through `ofAsync`/`ofIO` rather than by lifting the `IO` action implicitly: do-notation
+inserts a lift for a nested action but not for a bind here, so the two steps are written out. -/
+def connect (hooks : Hooks) (addr : Std.Net.SocketAddress) : Task.EAsync IO.Error Conn := do
+  let c ← Task.EAsync.ofAsync (Task.Async.ofIO Std.Async.TCP.Socket.Client.mk)
+  let _ ← awaitAsyncE hooks (Std.Async.TCP.Socket.Client.connect c addr)
+  return c
+
 /-- **Echo a connection until the peer stops, then shut it down.**
 
 A socket failure ends the connection rather than the loop: the peer going away mid-stream is the case this

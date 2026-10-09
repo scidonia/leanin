@@ -321,6 +321,22 @@ a client closing a connection mid-request is the normal case for a server, and `
 dying. The reachable defect is exact: the previous version took the process down when a client disconnected.
 What this does *not* fix is a `panic!`, which aborts and stays fatal, so the totality obligation below stands.
 
+**What its test is not yet.** A scenario for the channel was written and then removed: a refused connect, with an
+accepted connect to the run's own listener as its affirmative control. It does not survive contact — the process
+dies with SIGSEGV — and neither half of what it found is a finding yet:
+
+- A socket's descriptor closes with the Lean object that owns it. The first version read the listener's address
+  early and probed later, and was refused by a socket it had just served sixteen connections on; reading the
+  address in the same step as the probe fixed that, which is why the second version reached the accepted
+  connect at all.
+- With the listener kept alive across the probe, the process segfaults *during* the run, before the record is
+  printed. The likely shape is a libuv handle finalised at a point the loop is not prepared for, but that is a
+  hypothesis rather than a finding: it wants isolating in its own mode, with no listener in the picture, before
+  anything is built on it.
+
+`Runtime.connect` stays, because the driver's own tests will want it. So the channel is implemented and its
+scenario is outstanding, which is the honest state of this third of W5.
+
 **Acceptance.** Three scenarios with their controls: a disconnect stops the work (a body's counter stops
 advancing); one connection erroring leaves the others served; and after `stop`, in-flight work completes before
 `run` returns, with `remaining = 0`.
