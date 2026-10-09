@@ -357,6 +357,15 @@ written against the classes rather than against `Task`: nothing calls `asTask`, 
 **Why it gates nothing.** Upstream review has no delivery date, so W9's driver is written either way. If this
 proposal lands, that driver is deleted rather than kept beside the shipped one.
 
+**What the switch-out needs, precisely.** Feature parity is not the precondition; two *seams* are. Upstream, the
+driver has to stop naming the concrete `Async`, `Selector`, `CancellationContext` and channel types —
+`MonadAsync` and `MonadAwait` already exist, and the missing piece is a select-shaped class beside them. On our
+side that class needs an instance, which means the select operation `interface.md` §5 records as absent (**W7**)
+has to exist first, with the instances for our task type following it. The runtime *behaviour* the driver
+relies on is the parity that actually matters, and it is a short list to check one by one: cancellation
+propagating when a task is dropped, the select itself, notification, and the drain at shutdown — the last two
+of which the model already proves.
+
 **Acceptance.** For the proposal, a written design and a maintainer's reply. For a patch, the evidence W1
 produced for its own boundary: the same driver source typechecks against both `Std.Async`'s types and ours.
 
