@@ -257,6 +257,15 @@ total and independent of `WF` — `Array.set` demands a bound proof. The `List` 
 `Ring.toList`, where its algebraic lemmas keep the proofs short. That split is the one Lean's own
 containers use.
 
+
+**The transaction releases the cell's hold before it modifies the pool.** `Array.set` copies when the array is
+still referenced elsewhere, and a transaction's `get` leaves exactly one other reference behind — the cell's
+own. So a ring mutation under `Mutex.atomically` copies the slots (2 KB at `cap = 256`), and those copies are
+most of the garbage the pool produces. Writing a placeholder into the cell first makes the state the
+transaction read the only owner, and the mutation happens in place; the computed state is written back before
+the lock is released, so nothing outside the critical section can observe the placeholder. Only sites that
+*replace* the pool can do this: a site that restores the pool it read cannot, because the in-place mutation
+moved the value it means to restore — which is why a refused take still pays the copy.
 **Precedent: Lean's own containers already do exactly this.** `Std.DHashMap` is an Array-of-buckets
 implementation carrying a bundled well-formedness invariant, and `Std/Data/DHashMap/Lemmas.lean`
 proves its operations against a **`List` model**. Array container, list ghost view, laws in a separate

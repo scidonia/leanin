@@ -613,6 +613,92 @@ def runtimeOps : IO UInt32 := do
   IO.println s!"ops: Join.new {joinNs}ns | Executor.spawn {spawnNs}ns | Executor.submit {submitNs}ns | Executor.tryTake {workNs}ns | spawn+take (steady) {steadyNs}ns"
   return 0
 
+/-- **The workload the `Std.Async` row is compared on, swept.** 10 000 units, each taking one mutex and
+incrementing a counter, spawned and then joined -- the shape `--runtime-bench` measures against
+`Std.Async.Async.block`.
+
+Ours takes its worker count as an argument, so the row sweeps in-process. The stock pool's size is fixed when
+the process starts, so its row sweeps by re-running the executable under `LEAN_NUM_THREADS`. The row with no
+body separates the pool and the task machinery from the mutex the body takes.
+
+Diagnostic: `lake exe controls --runtime-async`, and `LEAN_NUM_THREADS=n lake exe controls --runtime-async`. -/
+def runtimeAsync : IO UInt32 := do
+  let n := 10000
+  let k := 5
+  let ours (workers : Nat) (body : LeanIn.Task.Async Unit) : IO Nat := bestMicros k do
+    let e ← Sched.Executor.new LeanIn.Task.Item 256 workers
+    let _ ← Runtime.run e (do
+      let hs ← (List.range n).mapM (fun _ => LeanIn.Task.Async.spawn body)
+      for h in hs do let _ ← LeanIn.Task.Async.await h
+      pure ())
+    pure ()
+  let m ← Std.Mutex.new (0 : Nat)
+  let counting : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO (m.atomically do set ((← get) + 1))
+  for w in [1, 2, 4, 8] do
+    let t ← ours w counting
+    IO.println s!"async shape  {n} tasks  leanin {w} workers      : {t}us"
+  let nop : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO (pure ())
+  for w in [1, 4] do
+    let t ← ours w nop
+    IO.println s!"async shape  {n} tasks  leanin {w} workers, no body: {t}us"
+  let green ← bestMicros k do
+    let m ← Std.Mutex.new (0 : Nat)
+    Std.Async.Async.block do
+      let hs ← (List.range n).mapM (fun _ => Std.Async.async (m.atomically do set ((← get) + 1)))
+      for h in hs do let _ ← Std.Async.await h
+      pure ()
+  IO.println s!"async shape  {n} tasks  Std.Async                 : {green}us"
+  return 0
+
+/-- **Where one executor transaction's nanoseconds go.** A transaction is the lock, a copy of the state and
+the scheduler; the pool's part of it is a ring mutation, and a ring mutation copies its array whenever the
+array is still referenced somewhere else -- which is exactly what reading the state out of the mutex cell
+leaves behind. Two ring rows settle that: `push` with the array uniquely held (the old ring is dead at the
+call) against `push` with a live ring sharing it.
+
+The `+ Pool.submit` row also shows the other cliff: `inject` is a list appended to, so a burst that nobody
+drains grows it and the append gets more expensive with every item.
+
+Diagnostic: `lake exe controls --runtime-unit`. -/
+def runtimeUnit : IO UInt32 := do
+  let k := 20000
+  let best (x : IO Unit) : IO Nat := do
+    let mut b := 0
+    for _ in List.range 2 do
+      let t0 ← IO.monoNanosNow
+      x
+      let t1 ← IO.monoNanosNow
+      if b == 0 || t1 - t0 < b then b := t1 - t0
+    return b / k
+  let item : LeanIn.Task.Item := ⟨pure ()⟩
+  let m ← Std.Mutex.new ({ pool := LeanIn.Sched.emptyPool LeanIn.Task.Item 256,
+                            sched := LeanIn.Sched.Scheduler.initial 1 } :
+                          LeanIn.Sched.State LeanIn.Task.Item 256)
+  let plumb ← best do for _ in List.range k do
+    m.atomically do let s ← get; set ({ s with sched := s.sched.enqueue })
+  let withsub ← best do for _ in List.range k do
+    m.atomically do
+      let s ← get
+      set ({ s with pool := s.pool.submit item, sched := s.sched.enqueue })
+  let withspawn ← best do for _ in List.range k do
+    m.atomically do
+      let s ← get
+      set ({ s with pool := s.pool.spawn item, sched := s.sched.enqueue })
+  let uni ← best do
+    let mut r : LeanIn.Ring Nat 256 := LeanIn.emptyRing Nat 256
+    for i in List.range k do r := r.push i
+    if r.size = 0 then IO.println "push did nothing"
+  let sh ← best do
+    let base : LeanIn.Ring Nat 256 := LeanIn.emptyRing Nat 256
+    for i in List.range k do
+      let r := base.push i
+      if r.size = 0 then IO.println "push did nothing"
+  IO.println s!"unit: transaction plumbing {plumb}ns | + Pool.submit {withsub}ns | + Pool.spawn {withspawn}ns"
+  IO.println s!"unit: Ring.push unique array {uni}ns | array shared with a live ring {sh}ns"
+  return 0
+
+
+
 /-- Throwaway, for W1's outbound direction and W3's acceptance: do `Std.Async`'s leaves work through the seam,
 and do timers overlap on one carrier? Four tasks each awaiting a 50ms `Std.Async.sleep` should take about 50ms,
 not 200 — which is what distinguishes a timer from `IO.sleep` (which blocks the thread). -/
@@ -798,6 +884,8 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-shared" :: _ => return ← runtimeShared
   | "--runtime-sleep" :: _ => return ← runtimeSleep
   | "--runtime-ops" :: _ => return ← runtimeOps
+  | "--runtime-async" :: _ => return ← runtimeAsync
+  | "--runtime-unit" :: _ => return ← runtimeUnit
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

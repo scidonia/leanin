@@ -60,10 +60,26 @@ structure Executor (α : Type) (cap : Nat) where
   /-- A worker waiting for work parks on this. The *state* says a worker is parked; only the condvar makes a
   thread sleep, and a push notifies under the same lock the predicate is re-checked under. -/
   cv    : Std.Condvar
+  /-- **What a transaction writes into the cell while it holds the lock.**
+
+`Array.set` copies when its array is still referenced elsewhere, and the cell's own reference to the state
+being read is exactly that other reference — so every ring mutation under `Mutex.atomically` was copying the
+slots. Writing this value releases the cell's hold, leaving the state the transaction read as the only owner
+of its slots, and the mutation then happens in place. Nothing outside the critical section can see it: the
+lock is held for the whole transaction, and the value the transaction computes is written back before the
+lock is released.
+
+Only sites that *replace* the pool are using it. A site that has to restore the pool it read — a refused
+take — cannot, because an in-place mutation would have moved the value it means to restore. -/
+  placeholder : State α cap
 
 def Executor.new (α : Type) (cap : Nat) (workers : Nat) : IO (Executor α cap) := do
-  return { state := ← Std.Mutex.new { pool := emptyPool α cap, sched := Scheduler.initial workers },
-           cv := ← Std.Condvar.new }
+  -- A placeholder of its own, not the state the cell starts with: a transaction mutates the state it read,
+  -- so sharing one value between the cell and the placeholder would let a transaction mutate the placeholder.
+  let fresh := { pool := emptyPool α cap, sched := Scheduler.initial workers }
+  return { state := ← Std.Mutex.new fresh,
+           cv := ← Std.Condvar.new
+           placeholder := { pool := emptyPool α cap, sched := Scheduler.initial workers } }
 
 /-- **Submit, without the real-world token.** The body of `submit`, split out because a *waker* runs in
 `BaseIO`: a continuation registered on a stock `Task` cannot call an `IO` action, and enqueuing is the one
@@ -76,6 +92,9 @@ def Executor.submitBase (e : Executor α cap) (x : α) : BaseIO Unit :=
   e.state.atomically do
     let st ← get
     let wasParked := st.sched.parked ≠ 0
+    -- Release the cell's hold before the pool is modified, so the ring's slots are uniquely owned and the
+    -- mutation happens in place (see `Placeholder`). The old pool is not read again after this point.
+    set e.placeholder
     set ({ st with pool := st.pool.submit x, sched := st.sched.enqueue })
     -- The notify is inside the critical section, which is the discipline the whole protocol rests on: a
     -- worker's predicate is re-checked under this lock, so a wakeup cannot slip between the check and the
@@ -125,6 +144,9 @@ def Executor.spawnBase (e : Executor α cap) (x : α) : BaseIO Unit :=
   e.state.atomically do
     let st ← get
     let wasParked := st.sched.parked ≠ 0
+    -- Release the cell's hold before the pool is modified, so the ring's slots are uniquely owned and the
+    -- mutation happens in place (see `Placeholder`). The old pool is not read again after this point.
+    set e.placeholder
     set ({ st with pool := st.pool.spawn x, sched := st.sched.enqueue })
     if wasParked then e.cv.notifyOne
 

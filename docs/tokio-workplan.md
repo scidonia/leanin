@@ -214,10 +214,13 @@ behaviour contracts with their controls.
 **P2 — the burst path, and it comes first.** Enqueuing into a saturated ring costs **1533 ns** against **169 ns**
 steady, and the benchmark's batch shape spawns 10 000 units into a 256-slot ring — so its **1657 ns per task is
 the overflow path almost exactly**. The batch shape is the ring, not the task machinery, which is what the
-earlier attribution got wrong. It is fixed: `Ring.keepFirst` moves the live count so the newer half leaves
-without the ring being read out and refilled, and `Pool.toRing` uses it. Measured on this machine, same
-command, 10 000 tasks spawn+join: 24 656 µs → 16 550 µs; `Executor.submit` 2 014 ns → 1 321 ns. What is
-left in the batch row is the ring's own push, not the overflow.
+earlier attribution got wrong. Two things fixed it, both measured on this machine with the same command:
+`Ring.keepFirst` moves the live count so the newer half leaves without the ring being read out and refilled
+(24 656 µs → 16 550 µs), and a transaction releases the cell's hold on the state before it modifies the pool,
+so the ring's slots are uniquely owned and `Array.set` does not copy them (16 550 µs → 10 987 µs). The row is
+now 2.2× the same workload's `Std.Async` figure at one thread (24 179 µs) and 13× its figure at eight
+(143 558 µs), and `Executor.submit` is 1 118 ns against 2 014 ns. The take side still pays the copy: a refused
+take has to restore the pool it read, which an in-place mutation no longer leaves intact.
 
 **P1 — allocation and CPS, and it is the chain-shape item.** The round trip is **588 ns**, of which ~169 ns is
 the enqueue, so ~420 ns is cell handling, resumption and the bind chain — the part with no counterpart in a
