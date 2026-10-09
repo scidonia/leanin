@@ -70,7 +70,7 @@ Each multiplier is same-run, as in §2.
 | those 16 waits issued one after another on one thread | — | 801 ms | ⚪ **not a baseline**: this is what *not* overlapping them costs, which is the reason the row above exists | `--runtime-time` |
 | the same 16 sleeps against the shipped *timer* path | 51–52 ms | 64 × 100 ms in 102 ms | ⚪ parity, and a citation rather than a same-run pair (`docs/evidence.md`) | `spike` |
 | 16 concurrent echo connections on one carrier | 4.8–11 ms of wall time across runs (≈ 1.5–3.3 k connections/s) | — | ⚪ no baseline yet: the shipped server on this workload is W16 | `--runtime-net` |
-| a stop, with nothing in flight | 95 µs – 1.0 ms to return the loop's value | — | ⚪ not a comparison: the poll interval bounds it, because accept-versus-shutdown is a `select` and we have none yet (W7) | `--runtime-drain` |
+| a stop with a connection in flight, draining it | 0.6–1.9 ms to return the loop's value | — | ⚪ not a comparison: the poll interval bounds it, because accept-versus-shutdown is a `select` and we have none yet (W7); an earlier shape whose stop arrived with an empty pool read 95 µs – 1.0 ms | `--runtime-drain` |
 | critical section, notification with nobody parked | 27 ns / 1 ns | — | ⚪ no baseline | `--runtime-ops` |
 
 The last three are the interesting ones. The tail row says an idle worker does not have to be a slow one: a task
@@ -184,7 +184,7 @@ thread, which is one thread per task rather than a bounded blocking pool.
 | `nix develop -c lake exe controls --runtime-sleep` | four 50 ms libuv timers on one carrier — 51 ms, against 200 ms for a serial sleep path |
 | `nix develop -c lake exe controls --runtime-net` | 16 concurrent echo connections on one carrier: the connection count, the server's thread count, whether the client shares it, the byte-identical replies, and the pool alongside |
 | `nix develop -c lake exe controls --runtime-time` | 16 × 50 ms sleeps and their event order, two timeout outcomes, the task layer's first-writer law, and the blocking path for the same sleeps |
-| `nix develop -c lake exe controls --runtime-drain` | a stop with nothing in flight: whether the run returns the loop's own value rather than an abandonment, and how long that takes |
+| `nix develop -c lake exe controls --runtime-drain` | a stop with a connection in flight: whether the connection completes after the stop, whether the pool is empty and whether a leaf registration is outstanding when the run returns, and how long the drain takes |
 
 ## 7. What these numbers are not
 

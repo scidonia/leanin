@@ -288,6 +288,60 @@ trace.
 
 ______________________________________________________________________
 
+### SC10 — a stop drains: the connection in flight completes, and nothing is left outstanding
+
+**Actor.** A Lean executable server that accepts one connection and echoes it, with the connection itself stopping
+the executor from inside the body being served. The client is `Std.Async`'s: it connects, sends, reads its echo
+and closes.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC10`, which invokes
+`lake exe controls --runtime-drain`. The stop is a public executor operation; the check reads what the run recorded
+and the two counts it read back afterwards.
+
+**Given.** A fresh executor, a listener bound to `127.0.0.1:0`, and a 9-byte payload.
+
+**When.** In one invocation the server's accept loop polls, accepts the connection, and the body — before echoing —
+stops the executor. The loop notices on its next poll, stops accepting, and waits for the connection it already
+has. The client reads its echo and closes, which ends the connection; the drain then returns, and the run returns
+the loop's own value.
+
+**Then.** There is exactly one `drain|` record, and its fields are exactly `served`, `echoed`, `inFlightAfter`,
+`pendingHooks`, `listener` and `drainUs` in that order with nonempty values.
+
+`served` is `1` and `echoed` is `yes`: the connection that was in flight when the stop arrived **completed** — its
+echo came back to the client — which is what "a stop drains" means and what W5's acceptance asks for.
+`inFlightAfter` is `0`: the pool holds nothing once the run returns. And `pendingHooks` is `0`: **no leaf
+registration is left outstanding.** That last field is the one no model of pool items could state, because a task
+parked on a leaf holds no pool item at all — a driver that stopped there would abandon the continuation without
+disturbing any counter, which is exactly the bug this scenario was written to catch.
+
+The detector reading those four conditions is exercised inside the same invocation: it accepts a well-formed
+record and rejects four near misses — a connection dropped by the stop (`echoed=no`), a pool still holding work, a
+registration left outstanding, and a run that served nothing. Every near miss is built from the record syntax and
+the expectation, never from the executable's output, and a control that does not hold is a fixture defect rather
+than this `Then`.
+
+**Why, and what it cost.** Two bugs came out of writing it, both in the driver rather than in the sockets.
+
+*The stop abandoned instead of draining.* `Runtime.blockOn` ended the driver as soon as the pool was empty and the
+executor was stopping — but a stopped executor still holds work as continuations registered on leaves, which are
+not in the pool by construction. So `Runtime.run` threw "the driver stopped before the computation finished", the
+connection's continuation was never resumed, and a client waiting on it hung in `recv`. The model's shutdown says
+*drain*; the driver aborted, and running it is what showed the difference.
+
+*Then the wait was not a wait.* The fix had `blockOn` park directly, without recording that it was parking — and
+`submit`/`spawnBase` notify **only when `parked ≠ 0`**. So the driver slept with the loop's poll timer pending, the
+timer completed and enqueued the loop's continuation, and nothing told the driver. It now sets `parked` before
+waiting and clears it on waking, the way `Executor.work`'s predicate does. That is the protocol, and skipping it
+was invisible until a scenario had work in flight when the stop arrived — which is why this is a scenario and not a
+diagnostic.
+
+The first version of the mode also died with `104 connection reset by peer`, for the reason SC9 records: a socket's
+descriptor dies with the last use of the object owning it, and the loop's final `tryAccept` is not the end of the
+run. The listener is read again after the drain for that reason.
+
+______
+
 ### SC9 — a failed socket operation arrives as a value, and the listener must outlive its last use
 
 **Actor.** A Lean executable client that connects twice: once to a port nothing listens on, and once to a

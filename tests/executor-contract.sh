@@ -1560,6 +1560,70 @@ check_sc9() {
   printf 'SC9 ok: refused=%s accepted=%s listener=%s\n' "$refused" "$accepted" "$listener"
 }
 
+# drain_ok <record> — the drain's observations as a detector, so its own control can reuse it: one connection was
+# served, it *completed* after the stop arrived (its echo came back), the executor holds nothing once the run
+# returns, and no leaf registration is left outstanding. That last one is the part a model of pool items cannot
+# see, and it is where the first version of this check would have failed.
+drain_ok() {
+  local rec="$1" served echoed pool pending
+  served="$(field served "$rec")" || return 1
+  echoed="$(field echoed "$rec")" || return 1
+  pool="$(field inFlightAfter "$rec")" || return 1
+  pending="$(field pendingHooks "$rec")" || return 1
+  [ "$served" = "1" ] || return 1
+  [ "$echoed" = "yes" ] || return 1
+  [ "$pool" = "0" ] || return 1
+  [ "$pending" = "0" ] || return 1
+}
+
+# --- SC10 — a stop drains: the connection in flight completes, and nothing is left outstanding ————————————————
+check_sc10() {
+  local out status line served echoed pool pending listener
+  local near
+  local -a records=()
+
+  out="$(bounded lake exe controls --runtime-drain)"
+  status=$?
+  check_status SC10 "$status" "lake exe controls --runtime-drain"
+  require_header "$out"
+
+  mapfile -t records < <(grep '^drain|' <<<"$out" || true)
+  [ "${#records[@]}" -eq 1 ] ||
+    fail "SC10 Then: the drain not observed exactly once" \
+      "expected exactly one drain| record, saw ${#records[@]}"
+  line="${records[0]}"
+
+  record_is "${line#drain|}" served echoed inFlightAfter pendingHooks listener drainUs ||
+    fail "SC10 Then: the drain not observed exactly once" \
+      "the record is not exactly served/echoed/inFlightAfter/pendingHooks/listener/drainUs with nonempty values: [$line]"
+
+  drain_ok 'served=1|echoed=yes|inFlightAfter=0|pendingHooks=0|listener=127.0.0.1:1|drainUs=1' ||
+    setup_error "SC10: the drain detector rejected a well-formed record" \
+      "the detectors' own control, not the SC10 Then"
+  for near in \
+    'served=1|echoed=no|inFlightAfter=0|pendingHooks=0|listener=127.0.0.1:1|drainUs=1' \
+    'served=1|echoed=yes|inFlightAfter=1|pendingHooks=0|listener=127.0.0.1:1|drainUs=1' \
+    'served=1|echoed=yes|inFlightAfter=0|pendingHooks=1|listener=127.0.0.1:1|drainUs=1' \
+    'served=0|echoed=yes|inFlightAfter=0|pendingHooks=0|listener=127.0.0.1:1|drainUs=1'; do
+    if drain_ok "$near"; then
+      setup_error "SC10: the drain detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC10 Then"
+    fi
+  done
+  printf 'SC10 control: rejected a connection dropped by the stop, a pool that still holds work, a registration left outstanding and a run that served nothing\n'
+
+  drain_ok "${line#drain|}" ||
+    fail "SC10 Then: a stop was not observed to drain" \
+      "record=[$line]"
+
+  bound_field served served "$line" "SC10 Then"
+  bound_field echoed echoed "$line" "SC10 Then"
+  bound_field pool inFlightAfter "$line" "SC10 Then"
+  bound_field pending pendingHooks "$line" "SC10 Then"
+  printf 'SC10 ok: served=%s echoed=%s inFlightAfter=%s pendingHooks=%s\n' "$served" "$echoed" "$pool" "$pending"
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -1570,8 +1634,9 @@ SC6) check_sc6 ;;
 SC7) check_sc7 ;;
 SC8) check_sc8 ;;
 SC9) check_sc9 ;;
+SC10) check_sc10 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10\n' >&2
   exit 2
   ;;
 esac

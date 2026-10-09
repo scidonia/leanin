@@ -57,8 +57,21 @@ def blockOn (e : Executor cap) (finished : IO Bool) : IO Unit := do
         -- or with the value the caller is waiting for. The bound on a drain that cannot finish is a deadline,
         -- which is the caller's to impose and W7's to make cheap.
         e.state.atomicallyOnce e.cv
-          (pred := do return (← get).pool.inFlight ≠ 0)
-          (k := do return ())
+          (pred := do
+            let st ← get
+            if st.pool.inFlight ≠ 0 then return true
+            else
+              -- Record that the driver is about to wait, in the state the producers read. `submit` and
+              -- `spawnBase` notify only when `parked ≠ 0`, so a wait that does not say so is a wait nothing will
+              -- wake — which is exactly what happened here: the loop's own poll timer completed, the completion
+              -- enqueued, and the driver slept on. `Executor.work`'s predicate does this; this one has to too.
+              if st.sched.parked = 0 then
+                set { st with sched := { st.sched with parked := 1 } }
+              return false)
+          (k := do
+            let st ← get
+            if st.sched.parked ≠ 0 then
+              set { st with sched := { st.sched with parked := 0 } })
 
 /-- Run one computation to completion on the caller's thread and return its value.
 

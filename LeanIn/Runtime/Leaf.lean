@@ -36,6 +36,18 @@ abbrev Hooks := IO.Ref (List (_root_.Task Unit))
 
 def Hooks.new : IO Hooks := IO.mkRef []
 
+/-- **How many registrations are still outstanding.** A hook stops being pending when its leaf completes — that
+is when the continuation it holds runs — so this is the part of "in flight" that a model of pool items cannot
+see: a task parked on a leaf holds no pool item at all, and a driver that stopped there would abandon it. Reading
+it after a run returns is the conformance check that the model's invariants cannot state. -/
+def pending (hooks : Hooks) : IO Nat := do
+  let ts ← hooks.get
+  let mut n := 0
+  for t in ts do
+    unless (← IO.getTaskState t) == .finished do
+      n := n + 1
+  return n
+
 /-- **The step that does the work**, factored out so `awaitTask` and `awaitAsync` share one path: register a
 continuation that enqueues, and return.
 

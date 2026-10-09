@@ -1101,18 +1101,52 @@ def runtimeDrain : IO UInt32 := do
   let l ← Runtime.Listener.bind (Runtime.loopback 0)
   let keep ← IO.mkRef l
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1
-  IO.println s!"drain|stopping-before={← e.isStopping}"
-  let srv ← IO.asTask (Runtime.run e (do
-    Runtime.serveUntilStopped hooks e (← keep.get) 1 (fun _ => pure ()) []))
-    _root_.Task.Priority.dedicated
-  IO.sleep 20
-  let stopAt ← IO.monoNanosNow
-  e.stop
-  IO.println s!"drain|stopping-after={← e.isStopping}"
-  let out ← IO.wait srv
+  let served ← IO.mkRef (0 : Nat)
+  let addrRef ← IO.mkRef (none : Option Std.Net.SocketAddress)
+  let stopAt ← IO.mkRef (0 : Nat)
+  let server ← IO.asTask (Runtime.run e (do
+    let a ← monadLift (Runtime.Listener.sockName (← keep.get) : IO Std.Net.SocketAddress)
+    addrRef.set (some a)
+    Runtime.serveUntilStopped hooks e (← keep.get) 1 (fun c => do
+      served.modify (· + 1)
+      -- The connection stops the server, and it does so *here*, inside the body being served. That removes the
+      -- race the first version had: a client that sends and then stops can stop before the accept happens, and
+      -- then the loop drains an empty list while the connection waits in the backlog for an accept that never
+      -- comes — a hang, produced twice. Stopping from inside the served connection makes "a connection is in
+      -- flight when the stop arrives" true by construction rather than by hope.
+      let now ← monadLift (IO.monoNanosNow : IO Nat)
+      stopAt.set now
+      monadLift (e.stop : IO Unit)
+      Runtime.echoConn hooks c) [])) _root_.Task.Priority.dedicated
+  let payload : ByteArray := "drain me".toUTF8
+  let addr ← do
+    let mut a : Option Std.Net.SocketAddress := none
+    while a.isNone do a ← addrRef.get
+    pure (a.getD (Runtime.loopback 0))
+  let echoed ← Std.Async.Async.block do
+    let c ← Std.Async.TCP.Socket.Client.mk
+    c.connect addr
+    c.send payload
+    let got ← c.recv? 65536
+    c.shutdown
+    return got
+  let outcome ← IO.wait server
+  -- A use *after* the drain, so the listener outlives the loop that used it. This is the rule `--runtime-connect`
+  -- found: a socket's descriptor dies with the last use of the Lean object owning it, and the loop's final
+  -- `tryAccept` is not the end of the run — the drain waits on connections after it, and the reset that produced
+  -- the first version of this mode was that socket going away mid-drain.
+  let stillBound ← Runtime.Listener.sockName (← keep.get)
   let returnedAt ← IO.monoNanosNow
-  IO.println s!"drain|returned={out.isOk}|detail={out}|drainUs={(returnedAt - stopAt) / 1000}"
-  return 0
+  let (inFlightAfter, _) ← e.observe
+  let pendingAfter ← Runtime.pending hooks
+  let echoedStr := if echoed == some payload then "yes" else "no"
+  let servedStr := toString (← served.get)
+  match outcome with
+  | .error err => IO.println s!"drain|failed={err}"; return 1
+  | .ok (.error err) => IO.println s!"drain|failed={err}"; return 1
+  | .ok (.ok ()) =>
+    IO.println s!"drain|served={servedStr}|echoed={echoedStr}|inFlightAfter={inFlightAfter}|pendingHooks={pendingAfter}|listener={stillBound}|drainUs={(returnedAt - (← stopAt.get)) / 1000}"
+    return 0
 
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do

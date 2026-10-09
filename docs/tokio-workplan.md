@@ -343,12 +343,31 @@ now waits for work to appear rather than ending: `--runtime-drain` reads `stoppi
 `stopping-after=true`, `returned=true` with the loop's own value, and returns in 95 µs to 1.0 ms — the poll
 interval bounding it, which is W7's absence showing through.
 
-What is still unwritten is the server-shaped half: a connection in flight when the stop arrives, completing rather
-than being dropped. That should now be a scenario with this diagnostic as its control.
+**The server-shaped half, and the second bug it found.** SC10 makes the connection *itself* stop the executor from
+inside the body being served, so "a connection is in flight when the stop arrives" is true by construction rather
+than by a race: the client connects, sends, reads its echo and closes, and the loop — which stopped accepting when
+it noticed — waits for the connection it already has. A stop that arrives before the accept leaves the connection
+in the backlog while the loop drains an empty list, and the client then waits for an accept that never comes; two
+versions of that mode hung on exactly that, which is why the stop moved inside the body. The run reads
+`served=1 echoed=yes inFlightAfter=0 pendingHooks=0`, in 0.6–1.9 ms.
+
+`pendingHooks=0` is the field the model cannot state, and the reason this is a scenario rather than a diagnostic.
+Draining is not only about the pool: a task parked on a leaf holds no pool item at all, so a driver that stops
+there abandons the continuation without disturbing any counter — which is the abandon above. The fix for *that* was
+itself wrong in a way only this shape could show. It parked the driver directly, without recording that it was
+parking, and `submit`/`spawnBase` notify **only when `parked ≠ 0`** — so the driver slept with the loop's poll
+timer pending, the timer completed and enqueued the loop's continuation, and nothing told the driver. It now sets
+`parked` before waiting and clears it on waking, as `Executor.work`'s predicate does. Both bugs were in the driver
+and neither in the sockets, and neither was visible from a stop that arrived with an empty pool: an empty pool is
+exactly what the second one needed.
 
 **Acceptance.** Three scenarios with their controls: a disconnect stops the work (a body's counter stops
 advancing); one connection erroring leaves the others served; and after `stop`, in-flight work completes before
 `run` returns, with `remaining = 0`.
+
+The third is met by SC10, which reads the connection's own echo coming back *after* the stop and an empty pool when
+`run` returns. The first two are the cancellation-on-drop half and are not written yet; "a malformed request must
+not panic" is separate again, because a `panic!` aborts rather than raising.
 
 ### W6 — Async synchronisation and backpressure
 
@@ -537,7 +556,7 @@ CPS indirection, which is P1.
 | 3 | **W2** sockets | met (SC7) | any service at all |
 | 4 | **W3** timers | met (SC8) | timeouts, deadlines, keep-alive |
 | 5 | **W11** buffered I/O helpers | collapsed into W9 — the codec frames and buffers its own bytes | — |
-| 6 | **W5** safety trio, and cancellation safety | the error channel is in (SC9) and the drain works (`--runtime-drain`); a connection-in-flight drain scenario is next, cancellation on drop to go | operability: disconnect, failure, signal |
+| 6 | **W5** safety trio, and cancellation safety | the error channel is in (SC9) and a stop drains a connection in flight (SC10); cancellation on drop to go | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | | the product |
