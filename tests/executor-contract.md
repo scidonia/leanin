@@ -288,6 +288,56 @@ trace.
 
 ______________________________________________________________________
 
+### SC7 — sockets on our carriers: one server thread, and a client that is not on it
+
+**Actor.** A Lean executable server that binds a loopback socket, accepts `16` connections through an accept
+loop of its own, and echoes each one until the peer stops — all as steps of one executor driven by one thread —
+with a client that is deliberately **not** ours: `Std.Async`'s TCP client, driven by `Async.block` on the
+calling thread.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC7`, which invokes
+`lake exe controls --runtime-net`. The client connects over a real socket, and the server reads and writes
+through the public socket operations only; nothing in the check reaches into a queue, a slot or a thread table.
+
+**Given.** A fresh executor, a listener bound to `127.0.0.1:0` — the OS chooses the port and the client is told
+what it chose — `16` concurrent client connections, and a 20-byte payload each connection sends and expects
+back byte for byte.
+
+**When.** In one invocation the server accepts and serves, and the client connects, sends, reads and shuts
+down; every connection task records the thread it started on. The executor's observer is read twice: before the
+driver starts, with three no-op items deliberately queued, and again after the driver returns.
+
+**Then.** There is exactly one `net|` record, and its fields are exactly `connections`, `serverThreads`,
+`clientAmongServer`, `echoes`, `heldBefore`, `inFlightAfter` and `wallUs` in that order with nonempty values.
+
+`serverThreads` is `1`: the accept loop and all sixteen connection tasks ran on one thread — the single-carrier
+claim, measured where the work happened rather than inferred from the configuration. `clientAmongServer` is
+`false`: that thread is not the client's, so the client's driver is genuinely a second thread in the picture,
+and what is asserted is where *our* work ran rather than that only one thread existed. `echoes` equals
+`connections`: every reply was byte-identical to its request, so the loop read and wrote rather than closing on
+an empty read. `inFlightAfter` is `0`: nothing is left held once every connection has been awaited. And
+`heldBefore` is non-zero — the affirmative control for that last reading, since the observer is the same one on
+both sides and a reader that cannot see work would report zero either way. A first attempt at this control read
+the observer from inside a running connection body and got `0`, which is why it now stages the queue instead: a
+carrier drains the pool as it goes, so a reading taken while one is running is legitimately empty.
+
+The detector reading those five conditions is exercised inside the same invocation. It accepts a well-formed
+record and rejects four near misses — `serverThreads=2`, `clientAmongServer=true`, `echoes` one short of
+`connections`, and `inFlightAfter=1` — each built from the record syntax and the expectation, never from the
+executable's output, with a control that does not hold reported as a fixture defect rather than as this `Then`.
+The executable's own two detector controls are read from its `netctl|` record and required to hold: the
+distinct-thread detector counts two on a two-distinct sample and one on a repeat, and the reply comparison finds
+nothing against a payload with one extra byte — so neither detector is stuck at the value the `Then` wants.
+
+**Why.** W10's survey found that the shipped server's accept loop is a stock `Task`, which cannot be moved onto
+our carriers, so a server that runs here owns its loop; that loop's only interesting claim is *where* it runs,
+and a thread identity is the only way to check it from outside. The echo is what keeps the claim honest — a
+runtime that closed each connection before reading it, or that accepted on one thread and served on another,
+could still report a plausible connection count. `wallUs` is printed and never asserted: it moved by a factor
+of two between runs of the same invocation, which is why this check reads identities and counts and not clocks.
+
+______________________________________________________________________
+
 ### SC6 — real work runs on one carrier, and a pool worker only ever enqueues
 
 **Actor.** A Lean executable client running a program on the single-carrier runtime.

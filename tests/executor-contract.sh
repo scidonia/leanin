@@ -947,11 +947,11 @@ check_sc4() {
 steps_on() {
   local list="$1" carrier="$2" inner e
   case "$list" in
-    '['*']')
-      inner="${list#"["}"
-      inner="${inner%"]"}"
-      ;;
-    *) return 1 ;;
+  '['*']')
+    inner="${list#"["}"
+    inner="${inner%"]"}"
+    ;;
+  *) return 1 ;;
   esac
   case "$inner" in '' | ',' | ','* | *',' | *',,'*) return 1 ;; esac
   local IFS=','
@@ -1309,6 +1309,99 @@ check_sc5() {
     "${#expected_staged[@]}" "$phase" "${#expected_fifo[@]}" "${#expected_lifo[@]}" "${#expected_flush[@]}" "${#expected_slot[@]}" "$remaining"
 }
 
+# net_ok <record> — the socket observations of one invocation, as a detector so its own control can reuse it
+# rather than a lookalike: one server thread, a client that is not on it, every reply exact, and the pool empty
+# after every connection was awaited. `heldBefore` is the control for that last reading — it must be non-zero,
+# because the reader is the same one and nothing else in the run shows it can see work.
+net_ok() {
+  local rec="$1" c st cam ec hb ifa
+  c="$(field connections "$rec")" || return 1
+  st="$(field serverThreads "$rec")" || return 1
+  cam="$(field clientAmongServer "$rec")" || return 1
+  ec="$(field echoes "$rec")" || return 1
+  hb="$(field heldBefore "$rec")" || return 1
+  ifa="$(field inFlightAfter "$rec")" || return 1
+  [ "$st" = "1" ] || return 1
+  [ "$cam" = "false" ] || return 1
+  [ "$ec" = "$c" ] || return 1
+  [ "$hb" != "0" ] || return 1
+  [ "$ifa" = "0" ] || return 1
+}
+
+# --- SC7 — sockets on our carriers: one server thread, a client that is not on it, exact replies ————————————
+check_sc7() {
+  local out status line ctl connections server_threads client_among echoes held_before in_flight_after
+  local ctl_threads_two ctl_threads_repeat ctl_perturbed
+  local near
+  local -a records=()
+
+  out="$(bounded lake exe controls --runtime-net)"
+  status=$?
+  check_status SC7 "$status" "lake exe controls --runtime-net"
+  require_header "$out"
+
+  mapfile -t records < <(grep '^net|' <<<"$out" || true)
+  [ "${#records[@]}" -eq 1 ] ||
+    fail "SC7 Then: socket work on the carrier not observed exactly once" \
+      "expected exactly one net| record, saw ${#records[@]}"
+  line="${records[0]}"
+
+  record_is "${line#net|}" connections serverThreads clientAmongServer echoes heldBefore inFlightAfter wallUs ||
+    fail "SC7 Then: socket work on the carrier not observed exactly once" \
+      "the record is not exactly connections/serverThreads/clientAmongServer/echoes/heldBefore/inFlightAfter/wallUs with nonempty values: [$line]"
+
+  # The detector's own control, from the record syntax and the expectation alone: it must accept a
+  # well-formed record, and reject the four near misses a runtime that ran socket work on another thread,
+  # shared the carrier with the client, lost a task or dropped a connection's reply would produce.
+  net_ok 'connections=16|serverThreads=1|clientAmongServer=false|echoes=16|heldBefore=3|inFlightAfter=0|wallUs=1' ||
+    setup_error "SC7: the socket-observation detector rejected a well-formed record" \
+      "the detectors' own control, not the SC7 Then"
+  for near in \
+    'connections=16|serverThreads=2|clientAmongServer=false|echoes=16|heldBefore=3|inFlightAfter=0|wallUs=1' \
+    'connections=16|serverThreads=1|clientAmongServer=true|echoes=16|heldBefore=3|inFlightAfter=0|wallUs=1' \
+    'connections=16|serverThreads=1|clientAmongServer=false|echoes=16|heldBefore=3|inFlightAfter=1|wallUs=1' \
+    'connections=16|serverThreads=1|clientAmongServer=false|echoes=15|heldBefore=3|inFlightAfter=0|wallUs=1'; do
+    if net_ok "$near"; then
+      setup_error "SC7: the socket-observation detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC7 Then"
+    fi
+  done
+  printf 'SC7 control: rejected a second server thread, a carrier shared with the client, a leaked task and a missed reply\n'
+
+  ctl="$(grep '^netctl|' <<<"$out" | head -1)"
+  [ -n "$ctl" ] ||
+    setup_error "SC7: the detector controls are missing" "no netctl record in the invocation"
+  record_is "${ctl#netctl|}" threadsOnTwo threadsOnRepeat perturbed ||
+    setup_error "SC7: the detector-control record is not the expected shape" "control: [$ctl]"
+  bound_field ctl_threads_two threadsOnTwo "$ctl" "SC7 control"
+  bound_field ctl_threads_repeat threadsOnRepeat "$ctl" "SC7 control"
+  bound_field ctl_perturbed perturbed "$ctl" "SC7 control"
+  [ "$ctl_threads_two" = "2" ] ||
+    setup_error "SC7: the distinct-thread detector did not count two on a two-distinct sample" \
+      "threadsOnTwo=$ctl_threads_two"
+  [ "$ctl_threads_repeat" = "1" ] ||
+    setup_error "SC7: the distinct-thread detector did not collapse a repeat" \
+      "threadsOnRepeat=$ctl_threads_repeat"
+  [ "$ctl_perturbed" = "0" ] ||
+    setup_error "SC7: the reply comparison matched a payload with one extra byte" \
+      "perturbed=$ctl_perturbed"
+
+  net_ok "${line#net|}" ||
+    fail "SC7 Then: socket work was not observed to run on one carrier with every reply exact" \
+      "record=[$line]"
+
+  bound_field connections connections "$line" "SC7 Then"
+  bound_field server_threads serverThreads "$line" "SC7 Then"
+  bound_field client_among clientAmongServer "$line" "SC7 Then"
+  bound_field echoes echoes "$line" "SC7 Then"
+  bound_field held_before heldBefore "$line" "SC7 Then"
+  bound_field in_flight_after inFlightAfter "$line" "SC7 Then"
+
+  printf 'SC7 ok: connections=%s serverThreads=%s clientAmongServer=%s echoes=%s heldBefore=%s inFlightAfter=%s\n' \
+    "$connections" "$server_threads" "$client_among" "$echoes" "$held_before" "$in_flight_after"
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -1316,8 +1409,9 @@ SC3) check_sc3 ;;
 SC4) check_sc4 ;;
 SC5) check_sc5 ;;
 SC6) check_sc6 ;;
+SC7) check_sc7 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7\n' >&2
   exit 2
   ;;
 esac

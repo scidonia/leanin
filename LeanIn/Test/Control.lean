@@ -698,17 +698,24 @@ def runtimeUnit : IO UInt32 := do
   IO.println s!"unit: Ring.push unique array {uni}ns | array shared with a live ring {sh}ns"
   return 0
 
+/-- Distinct elements, in order. The detector the thread-identity observations are read with, named so that its
+own control below can call the same function rather than a lookalike. -/
+private def distinctOf (xs : List UInt64) : List UInt64 :=
+  xs.foldl (fun acc t => if acc.contains t then acc else acc ++ [t]) []
+
 /-- **W2's evidence: sockets driven from our carriers.**
 
 The server half is ours — bind, an accept loop of ours, one task per connection, all as `Task.Async` steps on
 one executor driven by one thread. The client half is deliberately `Std.Async`'s, driven by `Async.block` on
-this thread: a client that is not ours is what makes the thread identities below mean anything.
+this thread: a client that is not ours is what makes the thread identities mean anything.
 
-Observations, in the shape SC6 uses. Every connection task records the thread it started on and the accept loop
-records one at each end, so one distinct thread is the single-carrier claim and "not the client's thread" is
-the seam. Each reply is compared byte for byte, so the loop is doing work rather than closing on an empty read.
-And the executor's `inFlight` is read back after every connection has been awaited, so a leaked or lost task
-would be visible rather than assumed away.
+One record line, in the shape the scenario fixtures read, and controls for the detectors in it, because an
+absence detector that cannot report a presence proves nothing. The thread detector is shown counting two on a
+two-distinct sample and one on a repeat. The reply comparison is shown against a payload with one extra byte,
+where it must find nothing. And `heldBefore` is the same observer as `inFlightAfter`, read while three items
+are deliberately queued and nothing is driving — `3` and then `0` is a reader that moves, where a first
+attempt at this control read the pool from inside a running connection body and got `0`, which proves nothing:
+a carrier drains the pool as it goes, so that reading is legitimately empty.
 
 Diagnostic: `lake exe controls --runtime-net`. -/
 def runtimeNet : IO UInt32 := do
@@ -722,6 +729,10 @@ def runtimeNet : IO UInt32 := do
   let body : Runtime.Conn → LeanIn.Task.Async Unit := fun c => do
     srvTids.modify (· ++ [← IO.getTID])
     Runtime.echoConn hooks c
+  -- the control: the pool holds work only until a carrier takes it, so the reader is shown a queue nothing is
+  -- draining. These three no-op items are taken first when the driver starts, and they change nothing else.
+  for _ in List.range 3 do e.submit ⟨pure ()⟩
+  let (heldBefore, _) ← e.observe
   let server ← IO.asTask (Runtime.run e (do
     srvTids.modify (· ++ [← IO.getTID])
     Runtime.serveNJoin hooks l n body)) _root_.Task.Priority.dedicated
@@ -739,17 +750,15 @@ def runtimeNet : IO UInt32 := do
   let t1 ← IO.monoNanosNow
   let outcome ← IO.wait server
   let tids ← srvTids.get
-  let distinct := tids.foldl (fun acc t => if acc.contains t then acc else acc ++ [t]) []
+  let distinct := distinctOf tids
   let exact := (replies.filter (fun r => r == some payload)).length
-  let (inFlight, _) ← e.observe
+  let perturbed := (replies.filter (fun r => r == some (payload.push 0))).length
+  let (inFlightAfter, _) ← e.observe
   match outcome with
-  | .error err => IO.println s!"net: the server computation failed: {err}"; return 1
+  | .error err => IO.println s!"net|failed={err}"; return 1
   | .ok () =>
-    IO.println s!"net: {n} concurrent connections, {distinct.length} distinct server thread(s), client on {clientTid}"
-    IO.println s!"net: server tids {distinct} — client among them: {distinct.contains clientTid}"
-    IO.println s!"net: {exact}/{n} replies byte-identical to the {payload.size}-byte request; inFlight after = {inFlight}"
-    IO.println s!"net: {n} concurrent connections in {(t1 - t0) / 1000}us of wall time, {(t1 - t0) / 1000 / n}us of it per connection"
-    IO.println s!"net: carrier path only — the client is Std.Async's, so the server's runtime is what differs"
+    IO.println s!"net|connections={n}|serverThreads={distinct.length}|clientAmongServer={distinct.contains clientTid}|echoes={exact}|heldBefore={heldBefore}|inFlightAfter={inFlightAfter}|wallUs={(t1 - t0) / 1000}"
+    IO.println s!"netctl|threadsOnTwo={(distinctOf [0, 1]).length}|threadsOnRepeat={(distinctOf [7, 7]).length}|perturbed={perturbed}"
     return 0
 
 
