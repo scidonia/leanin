@@ -119,11 +119,13 @@ else, and a check in the suite can say so. Everything else in the runtime stays 
 
 ### W2 — Sockets
 
-**Deliverable.** Drive `Std.Async`'s socket operations from our carriers through W1 — `Socket.Server.accept`,
-and `Socket.Client.recv?`/`sendAll` — and an instance of `Std.Http.Transport` over that, so
-`Std.Http.Server.serve` runs on our executor. W10's survey settles that the accept loop is the server's rather
-than ours, so this item is the seam rather than a loop. The default `Socket.Client` transport is the thing
-being adapted, and the channel-backed `Mock` transport is what lets the adaptation be tested without a socket.
+**Deliverable.** Our own accept loop and per-connection driving over `Std.Async.TCP`'s socket operations —
+`Socket.Server.accept` and `Socket.Client.recv?`/`sendAll` — reached through W1, so every await is ours and
+each accepted connection runs on a carrier. W10's survey moved the loop back into our hands: the shipped
+`serve` runs its accept loop as a stock `Task` (`Server.lean:193`), and Lean's `Task` scheduler cannot be
+replaced, so the loop that serves connections is ours even where the protocol is not. A `Transport` instance
+over our socket is what keeps that loop independent of the socket type, and the channel-backed `Mock` instance
+is what lets it be tested with no socket at all.
 
 **Why Tokio.** `TcpListener`/`TcpStream` and the accept loop are the floor of any network service.
 
@@ -167,12 +169,19 @@ is integration or implementation.
 | shutdown | a `CancellationContext`, an `activeConnections` counter and a `shutdownPromise`: `shutdown`, `waitShutdown`, `shutdownAndWait`, and the promise resolves only when the count reaches zero — a drain, not a flag |
 | limiting | a `Semaphore` acquired *before* `accept`, so the cap bounds accepted connections rather than queued ones |
 
-Two consequences for the plan. W9 is an integration, and W11 shrinks: the request line, the headers and
-chunked framing with all their limits are inside the H1 codec, so W11 covers only what a router or a body helper
-needs on top. And the limits, timeouts and drain that W5, W6 and W14 were partly for are already *policy of the
-reused server*; what remains ours is that the runtime honours them on our carriers — the one thing to verify by
-running rather than by reading, since `serve`'s accept loop and its per-connection `ContextAsync.background`
-must step on our carriers with nothing inside doing a blocking `Task.get`.
+The split is sharper than "integration", and the reason is that `Std.Async` is `BaseIO (MaybeTask α)` over
+`Task`s. **`await` is a yield point, not a block** — `Basic.lean:471` hands the `Task` straight back to whoever
+is driving. But `background` is `discard ∘ async` and `async` is `BaseIO.asTask` (`Basic.lean:463`, `:994`),
+which is a task on the *stock pool*. The server spawns at exactly four places: the accept loop
+(`Server.lean:193`), each connection (`Server.lean:182`), each handler call (`Connection.lean:157`, `:318`), and
+a streaming body's generator (`Data/Body/Stream.lean:669`). Driving `serve` from one of our carriers would
+leave the accept loop and every handler on the stock pool with our carrier stepping only the prologue — and no
+hook exists to change that, since Lean's `Task` scheduler is not replaceable.
+
+So what is reusable is the **library, not the driver**: `Protocol/H1.lean` is a pure machine (`feed`, `step`,
+`send`, `pullBody`) with `Data/*` and `Config` beside it, and it drives no concurrency at all. W9 is that
+machine plus a connection loop of ours, and W2 keeps the accept loop, because the shipped one is a stock task.
+The limits, timeouts and drain that W5, W6 and W14 were partly for remain policy we inherit from `Config`.
 
 ### W11 — Buffered I/O helpers
 
@@ -304,16 +313,18 @@ chain-shape advantage (7.6×) must not regress.
 
 ### W9 — The HTTP surface
 
-**Deliverable.** `Std.Http.Server` driven by the runtime. W10's survey says integration, and the seam is
-`Std.Http.Transport`: an instance whose `recv`, `sendAll` and `recvSelector` are our leaf operations awaited
-through W1, so a connection of ours is what the server is handed. The default `Socket.Client` instance is
-available but not required, and the channel-backed `Mock` instance is what makes the server testable with no
-socket in the picture at all.
+**Deliverable.** The protocol **reused, the driver ours**. `Std.Http.Protocol.H1`'s `Machine` is pure —
+`feed`, `step`, `send`, `pullBody` — with `Data/*` for the typed messages and `Config` for the limits and
+timeouts, so parsing, framing, keep-alive, chunking and every limit are not written twice. The connection loop
+is ours, because the shipped one spawns stock `Task`s: accept, feed the machine from `Transport.recv` /
+`recvSelector`, dispatch each `H1.Event` to a handler shaped like `Std.Http.Server.Handler`, and write the
+machine's output back with `Transport.sendAll` — with every await being ours, so a handler runs on a carrier
+and the connection can be cancelled when the client goes away.
 
 **Why Tokio.** This is hyper/axum's role, and it is where "write a web server" actually lands.
 
-**W10 decided this**: integration, through `Transport`, which is why the deliverable is an instance rather
-than a protocol.
+**W10 decided the split**: the protocol is reused and the driver is ours, because the shipped connection
+loop's `background`/`asTask` calls put the accept loop and every handler on the stock pool.
 
 **Acceptance.** An end-to-end scenario: a request over a real socket, a byte-exact response, and the framework's
 behaviour contracts with their controls.

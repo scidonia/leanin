@@ -135,7 +135,7 @@ ______________________________________________________________________
 | I/O reactor | libuv via `Std.Internal.UV` (epoll under the hood) | **reuse** |
 | sync primitives | `Std.Sync` complete set | **reuse** |
 | `CancellationToken` | `CancellationContext`/`Token` + `ContextAsync` | **reuse** |
-| HTTP server | `Std.Http.Server` | **reuse** |
+| HTTP server | `Std.Http.Server` | **reuse the protocol, own the driver**: `Protocol/H1.lean` is a pure machine, and `Data/*` and `Config` come with it, but `Server.lean`/`Connection.lean` spawn stock `Task`s (`:182`, `:193`, `:157`, `:318`) and `Task`'s scheduler is not replaceable |
 | **work-stealing multi-thread scheduler** | none — global priority pool | **build** |
 | **per-worker run queue + LIFO slot + inject queue** | none | **build** |
 | **`spawn_blocking` / bounded blocking pool** | none (per-task dedicated thread only) | **build** |
