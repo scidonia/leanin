@@ -13,6 +13,9 @@ the repository's *checks* are scenarios with controls and these are measurements
 
 - 8 cores, through the nix dev shell, which runs `lake` under `nice -n 19` — for our rows and for the baselines
   alike, so the handicap is shared.
+- 🟢 means **leanin is better**, 🔴 means **leanin is worse**, ⚪ means the row is **not a comparison** — a fact
+  about our own runtime, or two numbers that are not like-for-like. Markdown has no colour, so markers carry it
+  here, as `⚠️` already does elsewhere in `docs/`; the same figures are coloured where they are reported.
 - `--runtime-bench` and `--runtime-async` report the **best of 5** runs, `--runtime-ops` and `--runtime-unit`
   the best of 2.
 - **Run-to-run drift is ±30%, so no single pair of numbers attributes anything.** In one session the *same*
@@ -32,14 +35,14 @@ the repository's *checks* are scenarios with controls and these are measurements
 
 | run | ours | against | ours is |
 |---|---|---|---|
-| `--runtime-bench` | 7 713 µs | stock `Task` pool, default priority: 26 579 µs | **3.4× faster** |
-| `--runtime-bench` | 7 713 µs | `Std.Async`, default threads (8): 131 291 µs | **17.0× faster** |
-| `--runtime-async` | 1 worker: 10 795 µs | `Std.Async`, default threads: 145 274 µs | **13.5× faster** |
-| `--runtime-async` | 2 / 4 / 8 workers: 8 019 / 7 988 / 8 106 µs | the same `Std.Async` row | **18× faster** |
-| `--runtime-async`, `LEAN_NUM_THREADS=1` | 1 worker: 11 370 µs | `Std.Async`: 24 910 µs | **2.2× faster** |
-| `--runtime-async`, `LEAN_NUM_THREADS=8` | 1 worker: 12 040 µs | `Std.Async`: 125 699 µs | **10.4× faster** |
-| `--runtime-async` | 1 worker vs 2–8 workers | — | **1.35× from the second carrier, then flat** |
-| `--runtime-async` | no body: 8 269 / 8 436 µs | the same rows with the mutex body | the body is free; this is all machinery |
+| `--runtime-bench` | 7 713 µs | stock `Task` pool, default priority: 26 579 µs | 🟢 **3.4× faster** |
+| `--runtime-bench` | 7 713 µs | `Std.Async`, default threads (8): 131 291 µs | 🟢 **17.0× faster** |
+| `--runtime-async` | 1 worker: 10 795 µs | `Std.Async`, default threads: 145 274 µs | 🟢 **13.5× faster** |
+| `--runtime-async` | 2 / 4 / 8 workers: 8 019 / 7 988 / 8 106 µs | the same `Std.Async` row | 🟢 **18× faster** |
+| `--runtime-async`, `LEAN_NUM_THREADS=1` | 1 worker: 11 370 µs | `Std.Async`: 24 910 µs | 🟢 **2.2× faster** |
+| `--runtime-async`, `LEAN_NUM_THREADS=8` | 1 worker: 12 040 µs | `Std.Async`: 125 699 µs | 🟢 **10.4× faster** |
+| `--runtime-async` | 1 worker vs 2–8 workers | — | ⚪ 1.35× from the second carrier, then flat |
+| `--runtime-async` | no body: 8 269 / 8 436 µs | the same rows with the mutex body | ⚪ the body is free; this is all machinery |
 
 The first two rows and the third are the *same* workload measured twice, which is the drift above: 7 713 µs
 against 10 795 µs. That is why the headline reads 17.0× in one pairing and 13.5× in the other, and why the
@@ -51,31 +54,31 @@ deques all sit behind one mutex; concurrency buys contention rather than through
 from two workers on, because the client awaits its handles in order, so this workload is serial by
 construction: it measures the critical path, not throughput, and more carriers cannot shorten a serial path.
 
-## 3. Where we are ahead
+## 3. 🟢 Where we are ahead
 
 Each multiplier is same-run, as in §2.
 
 | shape | ours | the other one | ours is | source |
 |---|---|---|---|---|
-| 10 000 tasks spawn+join | 7 713 µs | stock `Task` pool 26 579 µs | **3.4× faster** | `--runtime-bench` |
-| spawn and await, one round trip | 1 042 ns | stock `Task` spawn+join 5 499 ns | **5.3× faster** | `--runtime-ops` |
-| enqueue, one call | 464 ns | — | not like-for-like: the native row is a spawn *and* a join, so compare it with the round trip above | `--runtime-ops` |
-| tail: last of 10 000 tasks started | 14 038 µs after the first | stock pool 46 013 µs | **3.3× better** | `--runtime-tail` |
-| shared counter, 10 000 increments | 14 014 µs, a plain `IO.Ref` (correct for one carrier) | stock pool with the mutex its 8 threads require: 49 741 µs | **3.5× faster** | `--runtime-shared` |
-| four 50 ms timers on one carrier, via libuv | 51 ms | a serial blocking path: 200 ms | **3.9× better** | `--runtime-sleep` |
-| critical section, notification with nobody parked | 27 ns / 1 ns | — | — | `--runtime-ops` |
+| 10 000 tasks spawn+join | 7 713 µs | stock `Task` pool 26 579 µs | 🟢 **3.4× faster** | `--runtime-bench` |
+| spawn and await, one round trip | 1 042 ns | stock `Task` spawn+join 5 499 ns | 🟢 **5.3× faster** | `--runtime-ops` |
+| enqueue, one call | 464 ns | — | ⚪ not like-for-like: the native row is a spawn *and* a join, so set it against the round trip above | `--runtime-ops` |
+| tail: last of 10 000 tasks started | 14 038 µs after the first | stock pool 46 013 µs | 🟢 **3.3× better** | `--runtime-tail` |
+| shared counter, 10 000 increments | 14 014 µs, a plain `IO.Ref` (correct for one carrier) | stock pool with the mutex its 8 threads require: 49 741 µs | 🟢 **3.5× faster** | `--runtime-shared` |
+| four 50 ms timers on one carrier, via libuv | 51 ms | a serial blocking path: 200 ms | 🟢 **3.9× better** | `--runtime-sleep` |
+| critical section, notification with nobody parked | 27 ns / 1 ns | — | ⚪ no baseline | `--runtime-ops` |
 
-The last three are the interesting ones. The tail row says an idle worker does not have to be a slow one: a
-task pushed while others run is picked up promptly. The shared row compares each design under the discipline it
+The last three are the interesting ones. The tail row says an idle worker does not have to be a slow one: a task
+pushed while others run is picked up promptly. The shared row compares each design under the discipline it
 actually needs — ours is single-carrier, so a plain reference is correct and wins; the stock pool cannot drop
 its lock, and the same diagnostic shows why (`253 115 of 800 000` increments survive without it). And the timer
 row is the one that shows the *async* path is genuinely non-blocking while the blocking path is the hole below.
 
-## 4. Where we are worse
+## 4. 🔴 Where we are worse
 
-Stated first because it is the honest part of this document.
+Stated before anything above it, because it is the honest part of this document.
 
-### 4.1 Blocking work stops everything — 4× worse than the stock pool
+### 4.1 🔴 Blocking work stops everything — 4.0× worse than the stock pool
 
 ```
 4 x 25ms sleeps      : stock 25134us / leanin 100375us
@@ -87,13 +90,13 @@ because one carrier serialises them. The stock pool is better here for an uncomf
 workers to lose. Either way this is the pathology `spawn_blocking` exists for, and it is the motive for W4. The
 measurement to move is this row: it should become ~25 ms when blocking leaves the carrier.
 
-### 4.2 One carrier, so no core parallelism at all
+### 4.2 🔴 One carrier, so no core parallelism at all
 
 `64 spawned tasks : 1 distinct threads`. Every CPU-shaped handler — TLS, JSON, compression — occupies the one
 carrier and nothing else runs. This is structural until W8, and it cannot be measured as a comparison yet,
 because there is no second carrier to measure against.
 
-### 4.3 A burst into an undrained pool grows its overflow
+### 4.3 🔴 A burst into an undrained pool grows its overflow
 
 ```
 unit: transaction plumbing 41ns | + Pool.submit 830ns | + Pool.spawn 2730ns
@@ -105,13 +108,13 @@ which is a `List`: a burst nothing drains grows it, and the append is proportion
 state the same work is **339 ns for a spawn and a take together**, which is the honest per-item figure — the
 burst figures are what happens when nothing takes.
 
-### 4.4 The same, seen from one operation
+### 4.4 🔴 The same, seen from one operation
 
 `Executor.submit` at 951 ns against `spawn+take (steady)` at 339 ns for *two* transactions — **2.8× for one
 transaction against two**. Same cause as 4.3. `Executor.spawn` (464 ns) does not show it because it writes the
 LIFO slot and only occasionally reaches the ring.
 
-### 4.5 A ring mutation still copies its slots when the array is shared
+### 4.5 🔴 A ring mutation still copies its slots when the array is shared
 
 ```
 unit: Ring.push unique array 6ns | array shared with a live ring 121ns
@@ -121,20 +124,21 @@ unit: Ring.push unique array 6ns | array shared with a live ring 121ns
 hold before it modifies the pool, which is where that sharing came from, and the take path asks the scheduler
 before it reads the pool — but the row stays in the harness because the effect is easy to reintroduce.
 
-### 4.6 This shape does not scale, and is not evidence of scaling
+### 4.6 🔴 This shape does not scale, and is not evidence of scaling
 
 1 worker 10 795 µs, 4 workers 7 988 µs, 8 workers 8 106 µs — **1.35× and then a plateau**. That is the client's
 in-order `await` loop, not the scheduler, and it means this row cannot be used to argue for or against
 multi-carrier work: W8 needs a parallel-shaped workload and a second measurement to go with it.
 
-### 4.7 Measurement itself is a limitation
+### 4.7 ⚪ Measurement itself is a limitation
 
-There is no paused clock and no deterministic driver yet (W13), so anything timeout-shaped can only be tested
-against wall-clock time, and there is no ThreadSanitizer in the runtime. Combined with the ±30% drift above,
-that means small effects cannot be resolved at all today: the reorder in `Executor`'s take path was worth
-2–8%, which is inside the noise of a single run and needed five interleaved pairs to see.
+Not a claim about the runtime, but about the instruments, and it limits what can be claimed at all. There is no
+paused clock and no deterministic driver yet (W13), so anything timeout-shaped can only be tested against
+wall-clock time, and there is no ThreadSanitizer in the runtime. Combined with the ±30% drift above, small
+effects cannot be resolved today: the reorder in `Executor`'s take path was worth 2–8%, which is inside the
+noise of a single run and needed five interleaved pairs to see.
 
-## 5. Rows that are about Lean's pool, not about us
+## 5. ⚪ Rows that are about Lean's pool, not about us
 
 These appear in the same diagnostics and are the motivation for W4 and W8; they are not comparisons with this
 runtime, and they should not be read as such:
