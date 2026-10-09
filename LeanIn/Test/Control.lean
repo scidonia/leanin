@@ -1074,7 +1074,7 @@ def runtimeConnect : IO UInt32 := do
   IO.println s!"connect|refused={refusedStr}|accepted={acceptedStr}|listener={stillBound}"
   return 0
 
-/-- A shutdown probe lived here: connect, send, stop the executor from the client thread *before* reading, then
+/- A shutdown probe lived here: connect, send, stop the executor from the client thread *before* reading, then
 read the echo and let the drain finish. It hangs, and the hang is not diagnosed — the run never reaches its
 record, so there is nothing to narrow it down with, and the likely suspects all need evidence rather than a guess:
 the poll loop's view of the stop flag, the drain's wait for the connection to end, and the client's half-close
