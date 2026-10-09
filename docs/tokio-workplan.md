@@ -341,6 +341,25 @@ different from using `Std.Async` directly.
 **Acceptance.** Each obligation as a scenario at the executor boundary with its control, alongside the model
 statement it refines, in the shape SC1–SC6 already use.
 
+### W15 — Ask upstream to parameterise the async surface by its runtime
+
+**Deliverable.** A proposal, and if it is accepted a patch, removing the two concrete couplings that keep
+anything written against `Std.Async` from running on our carriers: `background`/`async` bottoming out in
+`BaseIO.asTask` (`Std/Async/Basic.lean:463`, `:994`), and `Selector`, `CancellationContext` and the channel
+type being concrete rather than class-shaped. `interface.md` §4 already expects half of this — `MonadAsync` and
+`MonadAwait` instances over either implementation — so what is missing is a `MonadSelect`-shaped class beside
+them and a driver generic over all three.
+
+**Why.** If the surface is parameterised, `Std.Http.Server` runs on our executor with no fork of it and no driver
+of ours, and milestone 0's "no hook to replace `Task`'s scheduler" stops mattering for every piece of code
+written against the classes rather than against `Task`: nothing calls `asTask`, so nothing needs the hook.
+
+**Why it gates nothing.** Upstream review has no delivery date, so W9's driver is written either way. If this
+proposal lands, that driver is deleted rather than kept beside the shipped one.
+
+**Acceptance.** For the proposal, a written design and a maintainer's reply. For a patch, the evidence W1
+produced for its own boundary: the same driver source typechecks against both `Std.Async`'s types and ours.
+
 ### P1, P2 — Two cross-cutting performance items
 
 **P2 — the burst path (landed).** Enqueuing into a saturated ring costs **1533 ns** against **169 ns**
@@ -382,8 +401,9 @@ CPS indirection, which is P1.
 | 11 | **W7** selection, racing, priority | | racing a request against its deadline |
 | 12 | **W13** handle, metrics, deterministic time | | operating it, capacity, timeout tests |
 | 13 | **W8** multi-carrier and stealing (O2 first) | | more than one core |
-| 14 | **W9** the HTTP surface | | a web server |
-| 15 | **P1** allocation and CPS (P2 landed) | | the benchmark rows |
+| 14 | **W15** parameterise the async surface upstream (parallel, gates nothing) | | W9's shape |
+| 15 | **W9** the HTTP surface | | a web server |
+| 16 | **P1** allocation and CPS (P2 landed) | | the benchmark rows |
 
 W1 is met, so the order starts at W10 and W2. W10 is read-only and can run beside W2; W2 and W3 give a service
 that answers a request; W11 gives it framing; W5 makes it operable (disconnect, failure, signal); W4 unblocks any
