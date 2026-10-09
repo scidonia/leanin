@@ -19,42 +19,51 @@ the repository's *checks* are scenarios with controls and these are measurements
   10 000-task workload read 7 713 µs in one diagnostic and 10 795 µs in another; the stock pool's own row moved
   26 579 ↔ 28 549 µs across days. A comparison between two revisions has to interleave them and take minima —
   which is how the 1.5× from `Executor`'s ownership fix was measured, and why `--runtime-async` exists.
+- **Every multiplier below is computed inside the run that printed both of its numbers.** Pairing a figure from
+  one run with a figure from another gives a multiplier that can be off by 1.3×, which is exactly why the same
+  workload's advantage over `Std.Async` appears as 17.0× in one pairing and 13.5× in the next. Where a
+  comparison crosses runs it is marked as such rather than quietly multiplied.
 - Both pool sizes are reported for `Std.Async`: its default thread count (8 here) *and* `LEAN_NUM_THREADS=1`,
   the equal-thread comparison for our single carrier.
 
 ## 2. The server-shaped workload: 10 000 tasks, one mutex each, spawned then joined
 
-`nix develop -c lake exe controls --runtime-async`
+`nix develop -c lake exe controls --runtime-async`, and the same workload from `--runtime-bench`.
 
-| configuration | per 10 000 units | against ours |
-|---|---|---|
-| **leanin**, 1 worker | 10 795 µs | — |
-| **leanin**, 2 / 4 / 8 workers | 8 019 / 7 988 / 8 106 µs | 1.35× better, then flat |
-| **leanin**, same shape with no body | 8 269 / 8 436 µs | the body is free; this is all machinery |
-| **leanin**, same workload from `--runtime-bench` | 7 713 µs | the drift above, same shape |
-| stock `Task` pool, default priority | 26 579 µs | **3.4× slower** |
-| `Std.Async`, default threads (8) | 131 291 / 145 274 µs | **13–17× slower** |
-| `Std.Async`, `LEAN_NUM_THREADS=1` | 24 910 µs | **2.2× slower** |
-| `Std.Async`, `LEAN_NUM_THREADS=8` | 125 699 µs | **10× slower** |
+| run | ours | against | ours is |
+|---|---|---|---|
+| `--runtime-bench` | 7 713 µs | stock `Task` pool, default priority: 26 579 µs | **3.4× faster** |
+| `--runtime-bench` | 7 713 µs | `Std.Async`, default threads (8): 131 291 µs | **17.0× faster** |
+| `--runtime-async` | 1 worker: 10 795 µs | `Std.Async`, default threads: 145 274 µs | **13.5× faster** |
+| `--runtime-async` | 2 / 4 / 8 workers: 8 019 / 7 988 / 8 106 µs | the same `Std.Async` row | **18× faster** |
+| `--runtime-async`, `LEAN_NUM_THREADS=1` | 1 worker: 11 370 µs | `Std.Async`: 24 910 µs | **2.2× faster** |
+| `--runtime-async`, `LEAN_NUM_THREADS=8` | 1 worker: 12 040 µs | `Std.Async`: 125 699 µs | **10.4× faster** |
+| `--runtime-async` | 1 worker vs 2–8 workers | — | **1.35× from the second carrier, then flat** |
+| `--runtime-async` | no body: 8 269 / 8 436 µs | the same rows with the mutex body | the body is free; this is all machinery |
+
+The first two rows and the third are the *same* workload measured twice, which is the drift above: 7 713 µs
+against 10 795 µs. That is why the headline reads 17.0× in one pairing and 13.5× in the other, and why the
+number I would defend is the equal-thread one: **2.2×**.
 
 Two things worth taking from the table. `Std.Async` gets *worse* the more threads it is given on this shape —
-25 ms at one thread, 126 ms at eight — because its tasks are `Task`s on the stock pool, whose nine priority
+24.9 ms at one thread, 125.7 ms at eight — because its tasks are `Task`s on the stock pool, whose nine priority
 deques all sit behind one mutex; concurrency buys contention rather than throughput. And our own row is flat
 from two workers on, because the client awaits its handles in order, so this workload is serial by
 construction: it measures the critical path, not throughput, and more carriers cannot shorten a serial path.
 
 ## 3. Where we are ahead
 
-| shape | ours | the other one | source |
-|---|---|---|---|
-| 10 000 tasks spawn+join | 7 713 µs | `Std.Async` 131 291 µs, stock pool 26 579 µs | `--runtime-bench` |
-| the same at equal thread count (1) | ~11 000 µs | `Std.Async` 24 910 µs | `--runtime-async`, `LEAN_NUM_THREADS=1` |
-| enqueue, one call | 464 ns | stock `Task` spawn+join 5 499 ns | `--runtime-ops` |
-| spawn and await, one round trip | 1 042 ns | stock `Task` spawn+join 5 499 ns | `--runtime-ops` |
-| tail: last of 10 000 tasks started | 14 038 µs after the first | stock pool 46 013 µs | `--runtime-tail` |
-| shared counter, 10 000 increments | 14 014 µs (a plain `IO.Ref`, correct for one carrier) | stock pool with the mutex its 8 threads require: 49 741 µs | `--runtime-shared` |
-| four 50 ms timers on one carrier, via libuv | 51 ms | serial would be 200 ms | `--runtime-sleep` |
-| critical section, notification | 27 ns / 1 ns | — | `--runtime-ops` |
+Each multiplier is same-run, as in §2.
+
+| shape | ours | the other one | ours is | source |
+|---|---|---|---|---|
+| 10 000 tasks spawn+join | 7 713 µs | stock `Task` pool 26 579 µs | **3.4× faster** | `--runtime-bench` |
+| spawn and await, one round trip | 1 042 ns | stock `Task` spawn+join 5 499 ns | **5.3× faster** | `--runtime-ops` |
+| enqueue, one call | 464 ns | — | not like-for-like: the native row is a spawn *and* a join, so compare it with the round trip above | `--runtime-ops` |
+| tail: last of 10 000 tasks started | 14 038 µs after the first | stock pool 46 013 µs | **3.3× better** | `--runtime-tail` |
+| shared counter, 10 000 increments | 14 014 µs, a plain `IO.Ref` (correct for one carrier) | stock pool with the mutex its 8 threads require: 49 741 µs | **3.5× faster** | `--runtime-shared` |
+| four 50 ms timers on one carrier, via libuv | 51 ms | a serial blocking path: 200 ms | **3.9× better** | `--runtime-sleep` |
+| critical section, notification with nobody parked | 27 ns / 1 ns | — | — | `--runtime-ops` |
 
 The last three are the interesting ones. The tail row says an idle worker does not have to be a slow one: a
 task pushed while others run is picked up promptly. The shared row compares each design under the discipline it
@@ -73,16 +82,16 @@ Stated first because it is the honest part of this document.
 64 spawned tasks     : 1 distinct threads
 ```
 
-Four tasks that sleep with `IO.sleep` take **100 ms** on our runtime and 25 ms on the stock pool: one carrier,
-so blocking work serialises it. The stock pool is better here for an uncomfortable reason — it has eight
-workers to lose. Either way this is the pathology `spawn_blocking` exists for, and it is the motive for W4.
-The measurement to move is this row: it should become ~25 ms when blocking leaves the carrier.
+Four tasks that sleep with `IO.sleep` take **100 ms** on our runtime and 25 ms on the stock pool: **4.0× worse**,
+because one carrier serialises them. The stock pool is better here for an uncomfortable reason — it has eight
+workers to lose. Either way this is the pathology `spawn_blocking` exists for, and it is the motive for W4. The
+measurement to move is this row: it should become ~25 ms when blocking leaves the carrier.
 
 ### 4.2 One carrier, so no core parallelism at all
 
 `64 spawned tasks : 1 distinct threads`. Every CPU-shaped handler — TLS, JSON, compression — occupies the one
 carrier and nothing else runs. This is structural until W8, and it cannot be measured as a comparison yet,
-because there is no second carrier to measure.
+because there is no second carrier to measure against.
 
 ### 4.3 A burst into an undrained pool grows its overflow
 
@@ -90,17 +99,17 @@ because there is no second carrier to measure.
 unit: transaction plumbing 41ns | + Pool.submit 830ns | + Pool.spawn 2730ns
 ```
 
-The lock, the state copy and the scheduler record cost **41 ns**. Adding `Pool.submit` costs 830 ns and
-`Pool.spawn` 2 730 ns, because the overflow appends the evicted half to `inject`, which is a `List`: a burst
-nothing drains grows it, and the append is proportional to its length. In steady state the same work is
-**339 ns for a spawn and a take together**, which is the honest per-item figure — the burst figures are what
-happens when nothing takes.
+The lock, the state copy and the scheduler record cost **41 ns**. Adding `Pool.submit` costs 830 ns — **20× the
+plumbing** — and `Pool.spawn` 2 730 ns, **67×**, because the overflow appends the evicted half to `inject`,
+which is a `List`: a burst nothing drains grows it, and the append is proportional to its length. In steady
+state the same work is **339 ns for a spawn and a take together**, which is the honest per-item figure — the
+burst figures are what happens when nothing takes.
 
 ### 4.4 The same, seen from one operation
 
-`Executor.submit` at 951 ns against `spawn+take (steady)` at 339 ns for *two* transactions. Same cause as 4.3.
-`Executor.spawn` (464 ns) does not show it because it writes the LIFO slot and only occasionally reaches the
-ring.
+`Executor.submit` at 951 ns against `spawn+take (steady)` at 339 ns for *two* transactions — **2.8× for one
+transaction against two**. Same cause as 4.3. `Executor.spawn` (464 ns) does not show it because it writes the
+LIFO slot and only occasionally reaches the ring.
 
 ### 4.5 A ring mutation still copies its slots when the array is shared
 
@@ -108,14 +117,14 @@ ring.
 unit: Ring.push unique array 6ns | array shared with a live ring 121ns
 ```
 
-20× the cost, for a 2 KB copy, whenever the array is referenced twice. `Executor` now releases the cell's hold
-before it modifies the pool, which is where that sharing came from, and the take path asks the scheduler before
-it reads the pool — but the row stays in the harness because the effect is easy to reintroduce.
+**20× the cost**, for a 2 KB copy, whenever the array is referenced twice. `Executor` now releases the cell's
+hold before it modifies the pool, which is where that sharing came from, and the take path asks the scheduler
+before it reads the pool — but the row stays in the harness because the effect is easy to reintroduce.
 
 ### 4.6 This shape does not scale, and is not evidence of scaling
 
-1 worker 10 795 µs, 4 workers 7 988 µs, 8 workers 8 106 µs. A 1.35× gain and then a plateau. That is the
-client's in-order `await` loop, not the scheduler, and it means this row cannot be used to argue for or against
+1 worker 10 795 µs, 4 workers 7 988 µs, 8 workers 8 106 µs — **1.35× and then a plateau**. That is the client's
+in-order `await` loop, not the scheduler, and it means this row cannot be used to argue for or against
 multi-carrier work: W8 needs a parallel-shaped workload and a second measurement to go with it.
 
 ### 4.7 Measurement itself is a limitation
