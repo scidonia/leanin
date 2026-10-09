@@ -5,6 +5,7 @@ import LeanIn.Runtime.Basic
 import LeanIn.Runtime.Leaf
 import LeanIn.Runtime.Net
 import LeanIn.Runtime.Time
+import LeanIn.Runtime.Blocking
 
 /-!
 # Runtime controls for the bridge axioms
@@ -15,14 +16,19 @@ checks is a liability, so each gets a control here — a test that distinguishes
 
 Not all seven can be tested, and saying which is part of the point:
 
-* **A1, A2, A5, A7** are controlled below.
+* **A1, A2, A5, A6, A7** are controlled below.
 * **A3** (release requires ownership) cannot be *tested*, because violating it is undefined behaviour
   — the test would be the defect. It is discharged by reading `mutex.cpp` plus the standard, and the
   model expresses the constraint by having no transition for it.
 * **A4** (spurious wakeups) cannot be *forced*: the implementation is permitted to wake spuriously, not
   obliged to. The control is therefore a tolerance test — a `waitUntil`-shaped loop must survive a
   wakeup it did not ask for — rather than an observation of one.
-* **A6** is absent from v1 (D2, D11).
+* **A6** (dedicated task ⇒ a new OS thread) is consumed by the blocking pool (D13) and is controlled
+  below: a dedicated `Task` reads a value written before its spawn, reports a tid distinct from the
+  caller's, and is `IO.wait`ed.
+* The blocking pool's **promise-backed liveness witness** — `IO.Promise.new`/`resolve`/`result?` reached
+  *directly* (D7's second primitive row, D13) — is controlled below too: `controlWitness` reads
+  `IO.getTaskState` on the witness shape `spawnBlockingE` registers in `Hooks`.
 
 Every control prints what it observed rather than only pass/fail, because A1 is a *race*: a lost update
 is expected but not guaranteed on any given run, and a control that claimed otherwise would be lying.
@@ -87,6 +93,64 @@ def controlClock (reads : Nat) : IO Unit := do
     if now > prev then advances := advances + 1
     prev := now
   IO.println s!"  A7  {reads} reads, {regressions} regressions, {advances} advances : monotone = {regressions == 0}"
+
+/-- **A6.** A dedicated `Task` runs on a new OS thread, sees writes made before its spawn, and is joinable.
+
+A value is written *before* the spawn, so seeing it in the task is the happens-before half of A6; the task's
+tid differing from the caller's is "a new OS thread"; and `IO.wait` returning the task's result is the
+joinable half. The pooling above the primitive — bounded *reuse* of such threads — is a different fact, read
+at the work by SC12's off-carrier detector rather than here. -/
+def controlDedicated : IO Unit := do
+  let callerTid ← IO.getTID
+  let before ← IO.mkRef (0 : Nat)
+  before.set 42                                       -- written before the spawn
+  let t ← IO.asTask (do
+      let seen ← before.get
+      let tid ← IO.getTID
+      return (seen, tid)) _root_.Task.Priority.dedicated
+  let r ← IO.wait t
+  match r with
+  | .ok (seen, tid) =>
+    IO.println s!"  A6  caller tid={callerTid}  task tid={tid}  distinct = {callerTid != tid} (a new OS thread)"
+    IO.println s!"  A6  value written before the spawn, read in the task : {seen} (happens-before = {seen == 42})"
+    IO.println s!"  A6  IO.wait returned the task's result : joinable = true"
+  | .error _ =>
+    IO.println "  A6  the dedicated task failed"
+
+/-- **The liveness witness.** `spawnBlockingE` registers a promise-backed stock `Task` in `Hooks`, built
+with `IO.Promise.new`, `Promise.resolve` and `Promise.result?` reached *directly* (D7's second primitive
+row, D13) — so those operations get a control here (the `A6` control above does not cover them).
+
+The control reads `IO.getTaskState` on `(done.result?).map (fun _ => ()) (sync := true)`, the exact shape
+`spawnBlockingE` registers (`LeanIn/Runtime/Blocking.lean:163-164`), at three points. Before `resolve` it
+must not be `.finished`; after `resolve` it must be. The affirmative control is a *second* promise, never
+resolved and kept live, whose witness stays not-`.finished` — so a reader stuck at either value is caught.
+`waiting` and `running` are equivalent for promise-derived tasks (`Init/System/IO.lean:552-554`), so the
+readings compare against `.finished` rather than a particular waiting state. The third reading is the
+*dropped*-promise datum: a promise dropped without `resolve` settles its witness at `none`
+(`Init/System/Promise.lean:29`). -/
+def controlWitness : IO Unit := do
+  let done ← IO.Promise.new (α := Unit)
+  let witness := (done.result?).map (fun _ => ()) (sync := true)
+  let before ← IO.getTaskState witness
+  IO.println s!"  PW  witness before resolve : {before}  (not finished = {before != .finished})"
+  done.resolve ()
+  let after ← IO.getTaskState witness
+  IO.println s!"  PW  witness after  resolve : {after}  (finished = {after == .finished})"
+  -- Affirmative control: a promise never resolved stays not-`.finished` while it is kept live.
+  -- `heldResolved` reads `held` *after* the state read, so the compiler cannot drop it before it.
+  let held ← IO.Promise.new (α := Unit)
+  let heldWitness := (held.result?).map (fun _ => ()) (sync := true)
+  let heldState ← IO.getTaskState heldWitness
+  let heldResolved ← IO.Promise.isResolved held
+  IO.println s!"  PW  never-resolved, kept live : {heldState}  (not finished = {heldState != .finished}; resolved = {heldResolved})"
+  -- The third reading: a promise dropped without `resolve` settles its witness at `none`.
+  let droppedWitness : Task (Option Unit) ← (do
+    let q ← IO.Promise.new (α := Unit)
+    return q.result?)
+  let droppedState ← IO.getTaskState droppedWitness
+  let droppedValue ← IO.wait droppedWitness
+  IO.println s!"  PW  dropped without resolve : {droppedState}  (finished = {droppedState == .finished}; value = {droppedValue})"
 
 /-- **A1.** Mutual exclusion is load-bearing.
 
@@ -358,8 +422,11 @@ def bestMicros (k : Nat) (x : IO Unit) : IO Nat := do
 `spike` measures Lean's scheduler; this measures ours on the same work. The work unit is the same on both
 sides — one `Std.Mutex`-guarded increment — so the difference is the scheduler and not the payload.
 
-The second shape is the one the plan's M4 exists for: four tasks that each sleep. The stock pool has eight
-workers, so four sleeps overlap; this runtime has one carrier, so they queue — and the number says by how much.
+The second shape is the one the plan's M4 exists for: four tasks that each sleep. Both sides overlap them now —
+the stock pool on its eight workers, and this runtime by routing each sleep through the blocking pool
+(`Runtime.spawnBlocking`), off the single carrier. Before the pool existed the `leanin` half serialised on the
+carrier and read ≈4× the stock row; the number printed now is the pool's, and the row is its own record that the
+defect is gone.
 
 Not part of the library: a diagnostic, run as `lake exe controls --runtime-bench`. -/
 def runtimeBench : IO UInt32 := do
@@ -409,11 +476,14 @@ def runtimeBench : IO UInt32 := do
     pure ()
   let oursSleep ← bestMicros k do
     let e ← Sched.Executor.new LeanIn.Task.Item 256 1
-    let body : LeanIn.Task.Async Unit := LeanIn.Task.Async.ofIO (IO.sleep d)
+    let hooks ← Runtime.Hooks.new
+    let pool ← Runtime.BlockingPool.new blockers
     let _ ← Runtime.run e (do
-      let hs ← (List.range blockers).mapM (fun _ => LeanIn.Task.Async.spawn body)
+      let hs ← (List.range blockers).mapM (fun _ =>
+        LeanIn.Task.Async.spawn (Runtime.spawnBlocking pool hooks (IO.sleep d)))
       for h in hs do let _ ← LeanIn.Task.Async.await h
       pure ())
+    Runtime.BlockingPool.shutdownAndWait pool
     pure ()
   IO.println s!"{blockers} x {d}ms sleeps      : stock {stockSleep}us / leanin {oursSleep}us"
 
@@ -436,6 +506,10 @@ def runtimeBench : IO UInt32 := do
   long after the first task does the last of them start.
 * `queue` — `W` workers occupied by blocking work, then `W` more tasks that want a worker. This is the pool's
   starvation shape: with no spare worker, ready work does not run at all, for as long as the occupiers hold on.
+* `blockqueue` — the same workload with the blockers routed through this runtime's blocking pool: `W` pool jobs
+  of 300ms and `W` further items queued behind them, at a pool width printed on the line. At `W` workers the
+  further items finish about a blocker later; the same line at one worker is the control that it reads the
+  pool's width rather than a fixed quantity.
 * `dedicated` — one OS thread per task, which is what "more threads than workers" means when the priority asks
   for it. `LEAN_NUM_THREADS` does not affect this one.
 
@@ -476,6 +550,30 @@ def runtimeTail : IO UInt32 := do
   let t4 ← IO.monoNanosNow
   IO.println s!"queue   : {w} workers blocked 300ms; {w} further tasks finished at {(t4 - t3) / 1000}us"
   for t in blockers do let _ ← IO.wait t
+
+  -- (2b) The same 8 × 300ms workload with the blockers in the runtime's blocking pool. `w` jobs occupy the
+  -- pool's workers and `w` further items queue behind them; the pool's width is the line's own configuration,
+  -- so the reading is compared against the width printed beside it and not across a `LEAN_NUM_THREADS` setting.
+  -- At `w` workers the further items finish about a blocker later; at one worker the blockers serialise again,
+  -- which is the control that the line measures the pool's width rather than a fixed quantity.
+  let blockQueue (width : Nat) : IO Unit := do
+    let hooks ← Runtime.Hooks.new
+    let be ← Sched.Executor.new LeanIn.Task.Item 256 1
+    let pool ← Runtime.BlockingPool.new width
+    let b0 ← IO.monoNanosNow
+    let _ ← Runtime.run be (do
+      let bjobs ← (List.range w).mapM (fun _ =>
+        LeanIn.Task.Async.spawn (Runtime.spawnBlocking pool hooks (IO.sleep 300)))
+      let bmore ← (List.range w).mapM (fun _ =>
+        LeanIn.Task.Async.spawn (Runtime.spawnBlocking pool hooks (pure () : IO Unit)))
+      for h in bmore do let _ ← LeanIn.Task.Async.await h
+      for h in bjobs do let _ ← LeanIn.Task.Async.await h
+      pure ())
+    let b1 ← IO.monoNanosNow
+    Runtime.BlockingPool.shutdownAndWait pool
+    IO.println s!"blockqueue : {w} pool jobs of 300ms on {width} workers; last finished at {(b1 - b0) / 1000}us"
+  blockQueue w
+  blockQueue 1
 
   -- (3) Ten thousand dedicated tasks: one OS thread each.
   let t5 ← IO.monoNanosNow
@@ -563,6 +661,10 @@ or spawn, one `work` per step, usually an `await` (two cell locks) and a `resume
 primitives Tokio-style designs do *not* pay: a mutex critical section, a condvar notification with nobody
 parked, and a `Join` (whose own `Std.Mutex` is built with it).
 
+The last row is the blocking pool's cost from the carrier, decomposed the way the cancellation rows are: the
+submission alone and a spawn-and-await round trip through the runtime, each over `k` trivial jobs at a pool
+width printed on the line, because the figure means nothing without the configuration it was taken at.
+
 Diagnostic: `lake exe controls --runtime-ops`. -/
 def runtimeOps : IO UInt32 := do
   let k := 20000
@@ -610,9 +712,46 @@ def runtimeOps : IO UInt32 := do
   let steadyNs ← best do for _ in List.range k do
     e4.spawn item
     let _ ← e4.tryTake
+  -- The blocking pool's cost from the carrier, decomposed the way the cancellation rows are. `submit` is the
+  -- submission *alone*, with the queue kept short by awaiting each job before the next submit — a tight submit
+  -- loop would starve the workers and measure the queue's growing `List` append rather than the call. The
+  -- round trip is the same job spawned and awaited through the runtime, which is what the carrier actually
+  -- pays. The configuration is on the printed line, so the row cannot be read without the job count and pool
+  -- width it was taken at. Best of two, like the rows beside it.
+  let pw := 4
+  let poolBench : IO (Nat × Nat) := do
+    let p ← Runtime.BlockingPool.new pw
+    let mut subNs := 0
+    for _ in List.range k do
+      let pr ← IO.Promise.new (α := Unit)
+      let s0 ← IO.monoNanosNow
+      Runtime.BlockingPool.submit p (pr.resolve ())
+      let s1 ← IO.monoNanosNow
+      subNs := subNs + (s1 - s0)
+      let _ ← IO.wait (pr.result?.map (fun _ => ()) (sync := true))
+    Runtime.BlockingPool.shutdownAndWait p
+    let hooks ← Runtime.Hooks.new
+    let pe ← Sched.Executor.new LeanIn.Task.Item 256 1
+    let p2 ← Runtime.BlockingPool.new pw
+    let rt0 ← IO.monoNanosNow
+    let _ ← Runtime.run pe (do
+      for _ in List.range k do
+        let h ← LeanIn.Task.Async.spawn (Runtime.spawnBlocking p2 hooks (pure () : IO Unit))
+        let _ ← LeanIn.Task.Async.await h
+        pure ())
+    let rt1 ← IO.monoNanosNow
+    Runtime.BlockingPool.shutdownAndWait p2
+    return (subNs / k, (rt1 - rt0) / k)
+  let mut subPer := 0
+  let mut rtPer := 0
+  for _ in List.range 2 do
+    let (s, r) ← poolBench
+    if subPer == 0 || s < subPer then subPer := s
+    if rtPer == 0 || r < rtPer then rtPer := r
   IO.println s!"ops: native Task spawn+join {nativeNs}ns | ref set/get {refNs}ns | mutex section {mutexNs}ns | notify (nobody parked) {notifyNs}ns"
   IO.println s!"ops: leanin Ring.keepFirst+push (full 256) {overflowNs}ns | leanin spawn+await round trip {roundNs}ns"
   IO.println s!"ops: Join.new {joinNs}ns | Executor.spawn {spawnNs}ns | Executor.submit {submitNs}ns | Executor.tryTake {workNs}ns | spawn+take (steady) {steadyNs}ns"
+  IO.println s!"ops: blocking pool, {k} jobs on {pw} workers: submit {subPer}ns | spawn+await round trip {rtPer}ns per job ({rtPer / 1000}us)"
   return 0
 
 /-- **The workload the `Std.Async` row is compared on, swept.** 10 000 units, each taking one mutex and
@@ -1334,6 +1473,98 @@ def runtimeDrain : IO UInt32 := do
     IO.println s!"drain|served={servedStr}|echoed={echoedStr}|inFlightAfter={inFlightAfter}|pendingHooks={pendingAfter}|listener={stillBound}|drainUs={(returnedAt - (← stopAt.get)) / 1000}"
     return 0
 
+/-- **SC12 — blocking jobs run off the carrier, on a bounded pool, without stalling the executor.**
+
+Four blocking jobs go through the runtime's blocking pool, each recording the thread it ran on, while a
+heartbeat of cheap carrier steps keeps the executor busy and reads the runtime's outstanding-registration
+count. One record reads: the jobs ran on threads other than `carrier` (2), four jobs shared at most
+`poolWorkers` threads, so it is a pool and not a thread per job (3), a carrier step fell strictly between the
+first job's start and its completion (4), every completion resumed on the carrier (5), the stock-priority task
+finished before the jobs did (6), the accounting reader saw every job while they were outstanding (7) and none
+after the pool was shut down (8), and every worker exited (9). Every identity is `IO.getTID` read where it
+happened and every order is the actors' own annotation order; `runUs` is printed and never asserted on.
+
+The mode also prints the readings of its own detectors on a `blockctl|` line: the distinct-thread detector
+counts two on two distinct tids and one on a repeat, the order detector rejects the blocking-shaped order and
+accepts an interleaved one, and the stock guard rejects a record that says the stock pool was taken.
+
+Diagnostic: `lake exe controls --runtime-blocking`. -/
+def runtimeBlocking : IO UInt32 := do
+  let hooks ← Runtime.Hooks.new
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let pool ← Runtime.BlockingPool.new 2
+  let carrier ← IO.getTID
+  let jobs := 4
+  let log ← IO.mkRef ([] : List String)
+  let jobTids ← IO.mkRef ([] : List UInt64)
+  let resumeTids ← IO.mkRef ([] : List UInt64)
+  let pendingPeak ← IO.mkRef (0 : Nat)
+  -- Every actor records where it ran and what it did, at the point it happened. Each job writes its own
+  -- thread into its own cell, so the identities are collected in job order rather than in completion order.
+  let jobBody (i : Nat) (cell : IO.Ref (Option UInt64)) : IO Unit := do
+    log.modify (fun l => l ++ [s!"job{i}-start"])
+    cell.set (some (← IO.getTID))
+    IO.sleep (25 : UInt32)
+    log.modify (fun l => l ++ [s!"job{i}-done"])
+  -- The heartbeat is *steps*, not one long step: it appends `hb` and reads the registry, then yields to a
+  -- trivial child and awaits it, so each iteration is another carrier step.
+  let rec heartbeat : Nat → LeanIn.Task.Async Unit
+    | 0 => pure ()
+    | n + 1 => do
+        let p ← monadLift (Runtime.pending hooks)
+        monadLift (pendingPeak.modify (fun m => max m p) : IO Unit)
+        log.modify (fun l => l ++ ["hb"])
+        let h ← LeanIn.Task.Async.spawn (pure () : LeanIn.Task.Async Unit)
+        LeanIn.Task.Async.await h
+        heartbeat n
+  let carrierBetween (events : List String) : Bool :=
+    match events.findIdx? (· == "job0-start"), events.findIdx? (· == "job0-done") with
+    | some s, some d => (events.drop (s + 1)).take (d - (s + 1)) |>.any (· == "hb")
+    | _, _ => false
+  let stockGuard : String → Bool := fun v => v == "yes"
+  let runAt ← IO.monoNanosNow
+  let _ ← Runtime.run e (do
+    -- 1. the four blocking jobs
+    let hs ← (List.range jobs).mapM (fun i => do
+      let cell ← monadLift (IO.mkRef (none : Option UInt64))
+      let h ← LeanIn.Task.Async.spawn (Runtime.spawnBlocking pool hooks (jobBody i cell))
+      pure (cell, h))
+    -- 2. the heartbeat
+    let hb ← LeanIn.Task.Async.spawn (heartbeat 200)
+    -- 3. one stock default-priority task, awaited
+    let stock ← monadLift (IO.asTask (log.modify (fun l => l ++ ["stock"])) _root_.Task.Priority.default)
+    let _ ← monadLift (IO.wait stock)
+    -- 4. await every job, recording the thread its continuation resumed on
+    hs.forM (fun (_, h) => do
+      LeanIn.Task.Async.await h
+      let tid ← monadLift (IO.getTID : IO UInt64)
+      monadLift (resumeTids.modify (fun l => l ++ [tid]) : IO Unit))
+    -- the job identities, read in job order
+    hs.forM (fun (cell, _) => do
+      match ← monadLift (cell.get : IO (Option UInt64)) with
+      | some t => monadLift (jobTids.modify (fun l => l ++ [t]) : IO Unit)
+      | none   => pure ())
+    -- 5. the heartbeat, then the pool's own shutdown/drain
+    LeanIn.Task.Async.await hb
+    monadLift (Runtime.BlockingPool.shutdownAndWait pool)
+    pure ())
+  let returnedAt ← IO.monoNanosNow
+  let events ← log.get
+  let tids ← jobTids.get
+  let rtids ← resumeTids.get
+  let peak ← pendingPeak.get
+  let pendingAfter ← Runtime.pending hooks
+  let exited ← pool.state.atomically do return (← get).exited
+  let lastDone := (events.findIdx? (· == s!"job{jobs - 1}-done")).getD 0
+  let stockBefore := decide ((events.findIdx? (· == "stock")).getD events.length < lastDone)
+  let during := if carrierBetween events then "yes" else "no"
+  let stockBeforeStr := if stockBefore then "yes" else "no"
+  let tidsStr := String.intercalate "," (tids.map toString)
+  let rtidsStr := String.intercalate "," (rtids.map toString)
+  IO.println s!"block|jobs={jobs}|carrier={carrier}|jobTids=[{tidsStr}]|poolWorkers={pool.workers}|carrierDuringFirstJob={during}|resumeTids=[{rtidsStr}]|stockBeforeJobs={stockBeforeStr}|pendingPeak={peak}|pendingAfter={pendingAfter}|workersExited={exited}|runUs={(returnedAt - runAt) / 1000}"
+  IO.println s!"blockctl|distinctTwo={(distinctOf [0, 1]).length}|distinctRepeat={(distinctOf [7, 7]).length}|orderBlocking={carrierBetween ["job0-start", "job0-done", "hb"]}|orderInterleaved={carrierBetween ["job0-start", "hb", "job0-done"]}|stockGuardYes={if stockGuard "yes" then "accepted" else "rejected"}|stockGuardNo={if stockGuard "no" then "accepted" else "rejected"}"
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -1357,14 +1588,17 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-connect" :: _ => return ← runtimeConnect
   | "--runtime-drain" :: _ => return ← runtimeDrain
   | "--runtime-cancel" :: _ => return ← runtimeCancel
+  | "--runtime-blocking" :: _ => return ← runtimeBlocking
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"
     return ← executorReplay seed script
   | _ => pure ()
-  IO.println "  A3 (release without ownership) and A6 (thread creation) are not tested — see the header."
+  IO.println "  A3 (release without ownership) is not tested — see the header."
   IO.println ""
   controlClock 10000
+  controlDedicated
+  controlWitness
   controlTryLock
   controlNotifyLost 200
   controlPredicateRecheck 200

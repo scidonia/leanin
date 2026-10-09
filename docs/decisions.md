@@ -124,9 +124,13 @@ Everything the scheduler may trust is enumerated, and anything not on the list i
 | waiting | `Condvar.new/wait/notifyOne/notifyAll` | `std::condition_variable` (`mutex.cpp:55–69`) |
 | clock | `IO.monoNanosNow` | `object.cpp:421` extern |
 | external events | `Task` as a waker only (D3) | `object.cpp`, via `IO.Promise`/`BaseIO.bindTask` |
+| thread creation | `IO.asTask … Task.Priority.dedicated` | `lean_io_as_task` → `object.cpp:792`, `thread.cpp:120` (`pthread_create`) |
+| liveness witness | `IO.Promise.new/resolve/result?`, `Task.map` (`sync := true`), `IO.getTaskState` | `lean_io_promise_new`/`_resolve`/`_result_opt` (`Init/System/Promise.lean:40-41,48-49,54-55`), `lean_task_map` (`Init/Core.lean:701-703`), `lean_io_get_task_state` (`Init/System/IO.lean:555`) |
 
-**Deliberately excluded.** Atomics (not exposed). `IO.Promise` (Mutex+Condvar covers it, so it stays
-out of the TCB). Thread creation (v1 runs on the caller's thread; D2). `IO.Ref` — see O1.
+**Deliberately excluded.** Atomics (not exposed). `IO.Ref` — see O1. The direct `IO.Promise` reach is
+*not* excluded: the blocking pool's liveness witness is one, on the table's second row above, and O1's
+rule is why the witness is a promise and not an `IO.Ref Bool` — an `IO.Ref` read outside a lock is
+exactly what D8 forbids.
 
 ______________________________________________________________________
 
@@ -231,10 +235,11 @@ some environments via the `io_uring_disabled` sysctl (kernel 6.6+) and container
 at the same place: the inject queue from D3's seam. So io_uring would change *how* an external event
 is produced, not *how* a task is scheduled — a good sign that the seam is drawn in the right place.
 
-**Note on A6.** M4 needs threads, but they come from `Task.Priority.dedicated` — i.e. from `Task`,
-which D3 already places in the TCB. So A6 as a raw `pthread_create` axiom is *still* not needed in v1.
-That holds only as long as the blocking pool is built on `Task` rather than spawning threads itself;
-if it ever spawns its own, A6 joins v1's axiom set.
+**Note on A6.** M4 needs threads, and they come from `Task.Priority.dedicated` — i.e. from `Task`,
+which D3 already places in the TCB (D13). So A6 as a raw `pthread_create` axiom is *still* not needed
+in v1: the blocking pool is built on `Task` rather than spawning threads itself, which was the
+condition this note used to carry and is now a fact of the implementation. A6 is therefore *consumed*
+through `Task`, and its `needed` column reads `v1 (W4), v2` ([`primitive-theory.md`](primitive-theory.md)).
 
 ______________________________________________________________________
 
@@ -294,6 +299,83 @@ See M2b in [`PLAN.md`](../PLAN.md).
 
 **Consequence for the plan.** `Ring` is a pure, provable obligation and belongs *before* M3's
 concurrency, since the concurrent queue is a `Ring` under a mutex. It is scheduled as **M2b**.
+
+______________________________________________________________________
+
+### D13 — Blocking work runs on a pool of our own threads, reached through `Task.Priority.dedicated`.
+
+**What it is, and where it lives.** `LeanIn/Runtime/Blocking.lean` holds a `BlockingPool`: a FIFO
+`List (IO Unit)` queue with a `stopping` flag and an `exited` count under the pool's **own**
+`Std.Mutex`, workers parked on the pool's **own** `Std.Condvar`, `new (workers : Nat)` starting the
+workers and `shutdown`/`shutdownAndWait` ending them. `spawnBlocking (p) (hooks) (act) : Task.Async α`
+is the operation, with `spawnBlockingE : … → Task.EAsync IO.Error α` as its failure-carrying sibling.
+The handle is the ordinary `Task.Task α` the task layer already gives a spawned computation, so
+`await`, `Runtime.cancel` and `concurrently` work on a blocking job with no new handle type
+([`interface.md`](interface.md) §4).
+
+**The first new direct external operation, named.** The pool's worker-launch path calls
+`IO.asTask (act) Task.Priority.dedicated` (`Init/System/IO.lean:450`, extern `lean_io_as_task`), which
+is **A6** — a new OS thread runs the closure, creation *happens-before* its first instruction, and it
+is joinable ([`primitive-theory.md`](primitive-theory.md):63). It is named in D7's table as a
+primitive, and A6's `needed` column reads `v1 (W4), v2`. Everything else the pool reaches — the lock,
+the condvar, the queue — is A1–A5, already registered; the witness's promise calls are D7's second row,
+named below.
+
+**The second new direct external operation: the liveness witness.** `spawnBlockingE` reaches
+`IO.Promise.new`, `Promise.resolve` and `Promise.result?` *directly*
+(`LeanIn/Runtime/Blocking.lean:163-176`), with `Task.map … (sync := true)` as the derived witness and
+`IO.getTaskState` as what `Runtime.pending` reads it with, so they are D7's second row: a direct
+`IO.Promise` call required its own cited primitive and control (`AGENTS.md`, "Proof and trusted-base
+audit"). **Why a promise and not a counter:** `Runtime.pending` must count a blocking job the way it
+counts a leaf registration, so the witness has to be a stock `Task Unit` — the shape `Hooks` already
+stores — and the count cannot be an `IO.Ref`, because the job thread writes it while the carrier reads
+it, and an `IO.Ref` read outside a lock is exactly what D8 forbids. A promise-backed task is therefore
+the one shape that needs no second registry and no change to `Hooks`' type. Its control is
+`controlWitness` in the default `controls` mode (a witness not `.finished` before `resolve` and
+`.finished` after, with a never-resolved promise as the affirmative control), and SC12's `pendingPeak`
+and `pendingAfter` are the same property read at the work level.
+
+**It is not a new axiom.** A6 is *consumed* through `Task`, which D3 already places in the TCB; no raw
+`pthread_create` is called, so D11's conditional is satisfied by construction. Raw `pthread_create`
+through FFI was rejected for exactly this reason — it would add A6 as a raw axiom — and the bounded
+pool needs no such call.
+
+**What the pool is not.** *Not a source of boundedness*: Lean creates one OS thread per dedicated
+`asTask`, so the boundedness is our own loop, not the primitive's. *Not interruptible, and not
+re-joinable by us*: the worker handles are dropped, leaning on `IO.asTask` running a task with no
+reference to it, and a running job cannot be stopped from outside. *Not fair, and not bounded in
+latency*: A6 gives no scheduling guarantee, so nothing in the pool may be read as promising a job
+*will* run or finish. *Not a carrier, and not on the executor's queue*: the pool's threads hold no
+executor state and take no items, and `submit` writes the pool's own lock and nothing else, so a job
+cannot starve or be starved by the ready queue. `Executor`, `Item` and `Hooks`' type are unchanged.
+
+**The decisions a reader is most likely to need.** Width is the caller's argument, because the runtime
+has no configuration surface and a default width would be an unstated policy; there is no global or
+lazy pool. The queue is a `List` whose `submit` appends under the lock, so its cost is **O(queue
+length)** — a function of the backlog rather than a constant, which is why the round-trip row keeps the
+queue short. There is no bound on the backlog: bounding it with back-pressure is W6's. A submit to a stopping pool **throws**
+rather than enqueuing a job no worker will take, which would hang its awaiter. `shutdownAndWait` drains
+the queue and then waits for every worker to exit, so a job submitted before the shutdown still runs; a
+job that never returns makes that wait unbounded, which is W13's deadline and not a promise here. A
+job a caller awaits cannot outlive the driver's stop condition — the driver returns only when its
+`finished` predicate holds, and the job's completion is what makes it hold — so `blockOn`'s signature
+and its drain wait are unchanged. An abandoned job is not cancelled: it runs to completion, and its
+completion item is skipped by `Item.fire` when the submitting computation was cancelled, so a
+cancelled computation runs no step of it. `Runtime.pending hooks` counts a blocking job, because the
+step registers the job's liveness witness in `Hooks` exactly as a leaf registration does; the pool's
+own counts stay on the pool, under its own lock.
+
+**The remit, and what is not in it.** The pool is for the leaves that genuinely block — file I/O, the
+synchronous APIs (`IO.FS`, `IO.sleep`), foreign or CPU-heavy calls — and **not DNS**: `uv_getaddrinfo`
+runs on libuv's own pool (`tokio-workplan.md:289-290`), so that leaf is already off-carrier, and Lean
+binds no general threadpool API to duplicate. The pool exposes `submit` and no file API, so it stays
+**bounded and separable** rather than baking file I/O into it (`tokio-workplan.md:52-53`) — this is the
+line to check when a leaf is added, and it lives here rather than only in `Blocking.lean`'s module doc.
+
+**Its control.** A6's control is `controlDedicated` in the default `controls` mode: a dedicated `Task`
+reads a value written before its spawn, reports a tid distinct from the caller's, and is `IO.wait`ed.
+SC12's off-carrier detector reads the same fact where the work ran, and the standing `dedicat` row
+prices a thread per job.
 
 ______________________________________________________________________
 

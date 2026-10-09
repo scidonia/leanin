@@ -288,6 +288,71 @@ trace.
 
 ______________________________________________________________________
 
+### SC12 — blocking jobs run off the carrier, on a bounded pool, without stalling the executor
+
+**Actor.** A Lean executable client of the runtime's blocking pool: four **blocking jobs** submitted through
+the pool, each recording the thread it ran on, and a **heartbeat** computation whose every step is a carrier
+step, so the executor has work to do while the jobs run. Nothing on the carrier blocks.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC12`, which invokes
+`lake exe controls --runtime-blocking`. The check reads the one `block|` record the mode prints, and the mode's
+own detached `blockctl|` detector control; nothing here calls a private function, reads a queue or a slot, or
+inspects a thread table — the observation is the mode's record.
+
+**Given.** A fresh executor (`Sched.Executor.new LeanIn.Task.Item 256 1`), a fresh `Runtime.Hooks.new`, a pool
+`Runtime.BlockingPool.new 2`, four jobs, a twenty-five-millisecond `IO.sleep` each, a heartbeat of two hundred
+cheap steps, and one stock task at `_root_.Task.Priority.default`. The carrier's tid is read on the mode's own
+thread.
+
+**When.** In one invocation the mode, inside one `Runtime.run`: spawns the four jobs, each
+`Runtime.spawnBlocking pool hooks (jobBody i)` where `jobBody i` appends `job<i>-start`, records `IO.getTID`,
+sleeps, and appends `job<i>-done`; spawns the heartbeat, whose every step appends `hb` and reads
+`Runtime.pending hooks` into `pendingPeak`; submits one stock default-priority task and awaits it, recording
+whether `stock` precedes the last `job<i>-done`; awaits every job, recording in each continuation the thread it
+resumed on into `resumeTids`; awaits the heartbeat, then calls `Runtime.BlockingPool.shutdownAndWait pool`; and
+returns. The returned unit is the synchronisation point — no clock enters any assertion — and the mode then
+reads `Runtime.pending hooks` into `pendingAfter` and the pool's `exited` into `workersExited`.
+
+**Then.** There is exactly one `block|` record, and its fields are exactly `jobs`, `carrier`, `jobTids`,
+`poolWorkers`, `carrierDuringFirstJob`, `resumeTids`, `stockBeforeJobs`, `pendingPeak`, `pendingAfter`,
+`workersExited` and `runUs`, in that order with nonempty values. `jobTids` and `resumeTids` are bracketed
+comma-separated tid lists read with the fixture's existing bracket syntax, one tid per job in job order.
+
+**The blocking jobs ran off the carrier:** every `jobTids` entry differs from `carrier`, and the shape cannot
+be vacuous — `jobs ≥ 2` and `poolWorkers < jobs` with `poolWorkers ≥ 1`. It is a **bounded pool**, not a
+thread per job: `distinct(jobTids) ≤ poolWorkers`, so four jobs shared at most two threads. `carrier` and
+`jobTids` are read from the same record, so assertion 2 is not satisfied by a value appearing elsewhere in the
+output, and `distinct` is computed rather than read. `carrierDuringFirstJob = yes` says the executor was **not
+stalled** — the recorded event order carries a carrier `hb` step strictly between the first job's start and its
+completion — and `resumeTids` all equal to `carrier` says every completion was delivered back on the carrier,
+so nothing of ours ran on a job thread. `stockBeforeJobs = yes` says the stock pool was left untouched.
+`pendingPeak = jobs` and `pendingAfter = 0` are the accounting: the runtime's outstanding-registration reader
+saw every job while they were outstanding and none after the run returned and the pool was shut down, the first
+being the affirmative control that makes the second a claim rather than an unbacked absence. `workersExited =
+poolWorkers` says the pool's own shutdown drained and every worker exited. `runUs` is printed and never
+asserted on.
+
+The detector is exercised inside the same invocation: it accepts a well-formed record and rejects nine near
+misses, among them `jobTids` all equal to `carrier` — the shape blocking jobs run to completion on the carrier
+produce — four distinct `jobTids`, `carrierDuringFirstJob=no`, a completion resumed off the carrier,
+`stockBeforeJobs=no`, `pendingPeak=0`, `pendingAfter=1`, a worker short of `poolWorkers`, and a record with
+nothing to observe. Every near miss is built from the record syntax and the expectation, never from the mode's
+output, and a control that does not hold is a fixture defect rather than this `Then`. The mode's own
+`blockctl|` readings must also hold: the distinct-thread detector counts two on two distinct tids and one on a
+repeat, the order detector rejects the blocking-shaped order `job0-start,job0-done,hb` and accepts the
+interleaved `job0-start,hb,job0-done`, and the stock guard rejects a record that says the stock pool was taken.
+The `Then` must hold in each of the mode's three invocations.
+
+**Why, and what it rests on.** The executor has one carrier, so `IO.sleep` — and every synchronous leaf — blocks
+it. The pool moves that work to dedicated threads (`Task.Priority.dedicated` is above `Task.Priority.max`),
+bounded by the caller's width rather than one thread per job, and assertion 2 is the off-carrier claim itself
+while `carrierDuringFirstJob` and `pendingPeak` read the same defect from the executor's and the registry's
+side. The order reading is the actors' own annotation order rather than elapsed time, which is why the scenario
+can state that a carrier step fell inside the first job's start→completion without reading a clock: on the
+unfixed route the job is one carrier step, so its start and completion are adjacent in the log.
+
+______________________________________________________________________
+
 ### SC11 — a disconnect cancels the work, and no step of it runs afterwards
 
 **Actor.** A Lean executable server, one process, three actors on one executor: a **work** computation that counts

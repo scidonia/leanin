@@ -86,6 +86,7 @@ Each multiplier is same-run, as in §2.
 | a stop with a connection in flight, draining it | 0.6–1.9 ms to return the loop's value | — | ⚪ not a comparison: the poll interval bounds it, because accept-versus-shutdown is a `select` and we have none yet (W7); an earlier shape whose stop arrived with an empty pool read 95 µs – 1.0 ms | `--runtime-drain` |
 | a cancellation, decomposed | spawn and await 1.40–1.56 µs without one; spawn and cancel 1.16–1.21 µs; the parts measured alone over one computation and one cell: token set 0.11–0.33 µs, `resolveFirst` 0.14–0.58 µs, **retire 7.9–8.7 µs** (200 iterations each) | — | ⚪ no baseline: the operation did not exist before this milestone. The two whole-operation loops differ in shape as well as in the cancellation they do or do not make, so the parts are the decomposition and the retire is its finding — a linear scan of the registry, measured over the 201 entries the parkers leave, while the cancel loop's own retire scans a registry its own cycles keep empty | `--runtime-cancel` |
 | the registration registry, with 200 awaits in flight on a leaf | 200 live registrations, and 0 after those are cancelled (201 entries by list length, one of them the cancelling computation's own) | — | ⚪ no baseline; a same-run pair, and the live count is a count of registrations whose leaf has not completed | `--runtime-cancel` |
+| the blocking pool, over 20 000 trivial jobs on 4 workers | submit **1 974–2 655 ns** alone, with the queue kept short by awaiting each job before the next submit; a `spawnBlocking` spawn-and-await round trip **34.7–40.1 µs per job** through the runtime | — | ⚪ no baseline: the pool is new, and neither figure is readable without the job count and pool width its line prints | `--runtime-ops` |
 | critical section, notification with nobody parked | 27 ns / 1 ns | — | ⚪ no baseline | `--runtime-ops` |
 
 Re-measured after the cancellation milestone, the round-trip row above reads **1 369–1 394 ns** across three runs
@@ -101,14 +102,15 @@ row is the one that shows the *async* path is genuinely non-blocking while the b
 
 ## 4. 🔴 Where we are worse
 
-Stated before anything above it, because it is the honest part of this document. Two rows carry no factor: one
+Stated before anything above it, because it is the honest part of this document. Three rows carry no factor: the
+§4.1 row is now **parity** — W4's blocking pool is what moved it, and the residual below is what remains — one
 has no baseline to divide by yet, and one is about the instruments rather than the runtime. Each multiplier is
 same-run, like every other in this document, and the subsections below explain the mechanism rather than repeat
 the arithmetic.
 
 | worse, and where it comes from | ours | baseline | leanin is | source |
 |---|---|---|---|---|
-| blocking work on a carrier (§4.1) | 100 375 µs | stock pool 25 134 µs | 🔴 **4.0× worse** | `--runtime-bench` |
+| blocking work, on a carrier or through the pool (§4.1) | 25 767 µs through the pool | stock pool 25 146 µs | ⚪ parity: W4's blocking pool moved it from 🔴 4.0× worse; a blocking call that does not take the pool still stops everything | `--runtime-bench` |
 | no core parallelism at all (§4.2) | 1 distinct thread for 64 tasks | — | ⚪ no baseline yet: structural until W8 | `--runtime-bench` |
 | a burst submit into an undrained pool (§4.3) | 830 ns | 41 ns of lock, state copy and enqueue | 🔴 **20× worse** | `--runtime-unit` |
 | a burst spawn into an undrained pool (§4.3) | 2 730 ns | the same 41 ns | 🔴 **67× worse** | `--runtime-unit` |
@@ -117,17 +119,24 @@ the arithmetic.
 | carriers added to a serial client (§4.6) | 1 worker: 10 795 µs | 4 workers: 7 988 µs | 🔴 **1.35×, then flat** | `--runtime-async` |
 | what the instruments can resolve (§4.7) | ±30% run-to-run | — | ⚪ no factor: a limit of the measurement, not of the runtime | all of the above |
 
-### 4.1 Blocking work stops everything
+### 4.1 Blocking work stops everything, unless it takes the pool
 
 ```
-4 x 25ms sleeps      : stock 25134us / leanin 100375us
+4 x 25ms sleeps      : stock 25146us / leanin 25767us
 64 spawned tasks     : 1 distinct threads
 ```
 
-Four tasks that sleep with `IO.sleep` take **100 ms** on our runtime and 25 ms on the stock pool, because one
-carrier serialises them. The stock pool is better here for an uncomfortable reason — it has eight workers to
-lose. Either way this is the pathology `spawn_blocking` exists for, and it is the motive for W4: the row should
-become ~25 ms once blocking work can leave the carrier.
+Four tasks that sleep with `IO.sleep` take **25.8 ms** on our runtime against **25.1 ms** on the stock pool —
+parity, both ≈25 ms, where before W4 the row read 100 ms here because the four sleeps serialised on the one
+carrier. The sentence this subsection used to carry — "the row should become ~25 ms once blocking work can
+leave the carrier" — is now the record of what happened: W4's blocking pool is the change, and
+`--runtime-bench`'s shape 2 routes each sleep through `Runtime.spawnBlocking`, so the four overlap off the
+carrier exactly as they do on the stock pool's eight workers. The ~2.5% by which the pool-backed reading sits
+above the stock row is inside §1's ±30% drift and is not attributed. What is *not* fixed is a blocking call
+that does not take the pool route: a leaf that blocks on the carrier still stops everything, which is the
+residual this subsection keeps — the pool is a route blocking work must take, not a change to the carrier. The
+`64 spawned tasks : 1 distinct threads` line stays, as the vacuity control for "one carrier"; the pool's own
+cost is the blocking-pool row in §3, and its effect on the queued workload is the `blockqueue` lines in §5.
 
 ### 4.2 One carrier, so no core parallelism
 
@@ -177,29 +186,40 @@ wall-clock time, and there is no ThreadSanitizer in the runtime. Combined with t
 effects cannot be resolved today: the reorder in `Executor`'s take path was worth 2–8%, which is inside the
 noise of a single run and needed five interleaved pairs to see.
 
-## 5. ⚪ Rows that are about Lean's pool, not about us
+## 5. ⚪ Rows that are about a pool, not about us
 
-These appear in the same diagnostics and are the motivation for W4 and W8; they are not comparisons with this
-runtime, and they should not be read as such:
+These appear in the same diagnostics — Lean's pool's starvation shape, W4's blocking pool beside it, and the
+one escape Lean offers from the stock pool. They are not comparisons with this runtime's scheduler, and they
+should not be read as such:
 
 ```
-queue   : 8 workers blocked 300ms; 8 further tasks finished at 300229us
-dedicat : 10000 dedicated tasks, one thread each, ran in 476336us
+queue      : 8 workers blocked 300ms; 8 further tasks finished at 300229us
+blockqueue : 8 pool jobs of 300ms on 8 workers; last finished at 300883us
+blockqueue : 8 pool jobs of 300ms on 1 workers; last finished at 2401532us
+dedicat    : 10000 dedicated tasks, one thread each, ran in 476336us
 ```
 
 `queue` is the stock pool's starvation shape — with all eight workers blocked, ready work does not run at all.
-`dedicat` is the only escape Lean offers from the pool: `Task.Priority.dedicated` gives a task its own OS
-thread, which is one thread per task rather than a bounded blocking pool.
+`blockqueue` is the *same* 8 × 300 ms workload with the blockers routed through W4's blocking pool, at a pool
+width printed on each line: at eight workers the work queued behind the blockers finishes about a blocker
+later, and at one worker it serialises again (8 × 300 ms), so the two lines are a same-run pair and the
+movement is the pool's width, from `W×d` to `d`. It is the same reading under `LEAN_NUM_THREADS=1` as under the
+default — 301 411 µs against 300 883/301 050 µs at eight workers — because the blockers are no longer on the
+stock pool at all. `dedicat` is the only escape the stock pool offers: `Task.Priority.dedicated` gives a task
+its own OS thread, which is one thread per task rather than a bounded blocking pool — the per-job price the
+blocking-pool row in §3 avoids by reusing threads. It carries no baseline, and on the W4 re-run it read
+746–773 ms against the 476 ms recorded above, so it is a drifting machine fact rather than a comparison — this
+record is not updated for it.
 
 ## 6. Reproduce
 
 | command | what it measures |
 |---|---|
-| `nix develop -c lake exe controls --runtime-bench` | the two server shapes: 10 000 tasks spawn+join (native, leanin, `Std.Async`) and 4 × 25 ms blocking sleeps; plus the thread count our tasks ran on |
+| `nix develop -c lake exe controls --runtime-bench` | the two server shapes: 10 000 tasks spawn+join (native, leanin, `Std.Async`) and 4 × 25 ms blocking sleeps routed through the blocking pool; plus the thread count our tasks ran on |
 | `nix develop -c lake exe controls --runtime-async` | that workload swept over worker counts, with a no-body control, and the `Std.Async` row; also the one to run under `LEAN_NUM_THREADS=1` and `8` |
-| `nix develop -c lake exe controls --runtime-ops` | per-operation costs: enqueue, take, a spawn+await round trip, a critical section, a notification, a reference pair |
+| `nix develop -c lake exe controls --runtime-ops` | per-operation costs: enqueue, take, a spawn+await round trip, a critical section, a notification, a reference pair; plus the blocking pool's submit alone and a spawn-and-await round trip through it, over 20 000 jobs on 4 workers |
 | `nix develop -c lake exe controls --runtime-unit` | one transaction decomposed: plumbing, pool operations, and the ring's array sharing |
-| `nix develop -c lake exe controls --runtime-tail` | how late the last of 10 000 tasks starts, and the stock pool's starvation and dedicated-thread shapes |
+| `nix develop -c lake exe controls --runtime-tail` | how late the last of 10 000 tasks starts, the stock pool's starvation shape, the same 8 × 300 ms workload in the blocking pool at two widths, and the dedicated-thread shape |
 | `nix develop -c lake exe controls --runtime-shared` | the same counter under each design's required discipline, and what the stock pool loses without its lock |
 | `nix develop -c lake exe controls --runtime-sleep` | four 50 ms libuv timers on one carrier — 51 ms, against 200 ms for a serial sleep path |
 | `nix develop -c lake exe controls --runtime-net` | 16 concurrent echo connections on one carrier: the connection count, the server's thread count, whether the client shares it, the byte-identical replies, and the pool alongside |

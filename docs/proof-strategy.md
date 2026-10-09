@@ -91,8 +91,16 @@ If we prove the scheduler in Lean, then the trusted computing base is:
 | Lean kernel + `iris-lean` soundness | as with any Lean proof | no (and no need) |
 | The **deque's atomics** — whichever C++/FFI primitives the implementation really calls | Iris reasoning is *about* a model of these; the model↔machine step is a leap | partially: keep the atomic set tiny and enumerate it |
 | The **thread creation/parking syscalls** (pthreads, `futex`, `eventfd`) | the OS scheduler is outside every proof | no |
-| **Lean's `Task`/`Promise`** if `leanin` is built *on top of* them — concretely `lean_task_spawn`, `lean_task_map`, `lean_task_bind`, `lean_task_get_own`, `lean_io_wait`, `lean_io_wait_any`, `lean_io_cancel`, `lean_io_get_task_state`, `lean_io_promise_new/resolve/result_opt`, `lean_option_get_or_block` | they are the substrate we cannot replace, and they have **no semantics** (Gap A) | partially: use as few as possible, or replace with our own |
+| **Lean's `Task`/`Promise`** if `leanin` is built *on top of* them — concretely `lean_task_spawn`, `lean_io_as_task`, `lean_task_map`, `lean_task_bind`, `lean_task_get_own`, `lean_io_wait`, `lean_io_wait_any`, `lean_io_cancel`, `lean_io_get_task_state`, `lean_io_promise_new/resolve/result_opt`, `lean_option_get_or_block` | they are the substrate we cannot replace, and they have **no semantics** (Gap A) | partially: use as few as possible, or replace with our own |
 | **The refinement from the proven model to the running Lean code** | unless the proven code *is* the running code | this is the hard one — see §4 |
+
+W4's blocking pool reaches a thread through `IO.asTask … Task.Priority.dedicated` (`lean_io_as_task`),
+i.e. through `Task`, so its workers are named with the rest of the `Task` substrate above rather than
+entering as a primitive of their own. The pool's liveness witness is the other direction: `spawnBlockingE`
+reaches `IO.Promise.new`, `Promise.resolve` and `Promise.result?` **directly**, with `Task.map … (sync :=
+true)` (`LeanIn/Runtime/Blocking.lean:163-176`), and `IO.getTaskState` is what `Runtime.pending` reads the
+witness with (`LeanIn/Runtime/Leaf.lean:105-113`), so those substrate entries are direct reaches of the
+blocking pool rather than inherited from `Leaf.lean`. The TCB's shape does not change (D13).
 
 The honest framing: **the proof is about a model of the scheduler, and the model is a design decision
 that we control.** The project's central architectural question is therefore not "what do we prove"

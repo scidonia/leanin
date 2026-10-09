@@ -60,7 +60,7 @@ ______________________________________________________________________
 | A3 | `BaseMutex.unlock` | requires ownership; releasing without holding is undefined | v1, v2 |
 | A4 | `Condvar.wait` | **atomically** releases the mutex and blocks; reacquires before returning | v1, v2 |
 | A5 | `Condvar.notifyOne` / `notifyAll` | unblocks ≥1 / all *current* waiters | v1, v2 |
-| A6 | dedicated task ⇒ `pthread_create` | a new OS thread runs the closure; creation *happens-before* its first instruction; joinable | **v2 only** |
+| A6 | dedicated task ⇒ `pthread_create` | a new OS thread runs the closure; creation *happens-before* its first instruction; joinable | v1 (W4), v2 |
 | A7 | `IO.monoNanosNow` | non-decreasing | v1 |
 
 Sources: A1–A3 `mutex.cpp:27–39` → `std::mutex`, ISO C++ `[thread.mutex.requirements]`; A4–A5
@@ -163,7 +163,7 @@ never fires passes forever:
 | A2 | `tryLock` returns `false` exactly while another thread holds the lock, and never blocks. |
 | A4 | a bare `wait` without a predicate returns even though nobody notified — demonstrating why `waitUntil` is mandatory. |
 | A5 | `notify` with no waiter, then `wait`, blocks: the notification is lost. Then the same shape with state+lock held does not. |
-| A6 | writes before spawn are visible in the thread (happens-before), and the thread is joinable. |
+| A6 | `controlDedicated` (default `controls` mode): a dedicated `Task` reads a value written before its spawn (happens-before), reports a tid distinct from the caller's (a new OS thread), and `IO.wait` returns its result (joinable). SC12's off-carrier detector reads the same fact where the work ran, and the standing `dedicat` row prices a thread per job, the price the bounded pool avoids. |
 | A7 | `monoNanosNow` is non-decreasing across samples in several threads. |
 
 ______________________________________________________________________
@@ -173,10 +173,14 @@ ______________________________________________________________________
 - **Atomics.** Not exposed by Lean (grepped `Std.Sync`, `Init/System`: no load/store/CAS). Lock-per-queue
   (D4) means v1 does not need them; adding them later means adding a primitive *and* weak-memory
   reasoning, which is a separate decision.
-- **`IO.Promise`.** Mutex+Condvar covers everything we need, so it stays out of the TCB. Anything not
-  on the list is not used (D7).
 - **`IO.Ref`.** Open as O1 in [`decisions.md`](decisions.md); the leaning is to keep it invisible
   behind `Mutex α` so that reasoning outside a lock is unrepresentable.
 - **Fairness and real time.** Not provable from A1–A7 and not claimed. See §3 absences.
 - **The compiler and FFI.** Lean's code generator, the C++ compiler, and the ABI are trusted and
   unmodelled. They are part of the TCB and belong in the same table as the axioms, not in a footnote.
+
+The list used to carry `IO.Promise`. It no longer does: the blocking pool's liveness witness reaches
+`IO.Promise.new`, `Promise.resolve` and `Promise.result?` directly
+(`LeanIn/Runtime/Blocking.lean:163-176`), so they are D7's second row, controlled by `controlWitness` —
+what Mutex+Condvar covers is the *queue*, which is not what the witness needed. Anything not on D7's list
+is not used.

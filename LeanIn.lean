@@ -10,6 +10,7 @@ import LeanIn.Sched.Scheduler
 import LeanIn.Sched.Executor
 import LeanIn.Task.Basic
 import LeanIn.Runtime.Basic
+import LeanIn.Runtime.Blocking
 
 /-- Placeholder root module; the library proper lands here. -/
 def hello : String := "leanin"

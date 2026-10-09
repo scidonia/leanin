@@ -299,6 +299,22 @@ the stock pool must be left untouched — plus two existing rows that must move:
 (2401 ms at one worker today; it should become about the blocker's duration) and the 4 × 25 ms sleep row
 (100 ms → about 25 ms).
 
+**Met, and what the rows read.** The scenario is SC12, and it is green: four blocking
+jobs submitted through the pool run on two threads that are not the carrier, a carrier step falls strictly
+between the first job's start and its completion, the stock-priority task finishes before the jobs do, the
+accounting reads four while they are outstanding and zero once the pool is shut down, and both workers exit —
+`nix develop -c bash tests/executor-contract.sh SC12`, green on every run since the submission path landed. The
+two rows moved as the acceptance asked, and each is recorded with its command in `docs/PERFORMANCE.md`. The
+`queue` line's requirement is met by the `blockqueue` lines beside it in §5 (the stock line stays, as the
+citation of the problem): the same 8 × 300 ms workload with
+the blockers routed through the pool of eight finishes at ~300 ms — the blocker's duration, against the stock
+line's ~2401 ms at one worker — and reads the same ~300 ms at `LEAN_NUM_THREADS=1`, because the blockers are
+no longer on the stock pool at all. The 4 × 25 ms sleep row is met by `--runtime-bench`'s §4.1 row, which reads
+~25.8 ms against the stock row's ~25.1 ms where its own record before the pool was 100 ms. What W4 does *not*
+claim is W6's ground: a blocking lock held across an `await` still wedges the carrier, because moving work to
+the pool does not make a blocking lock awaitable, and the pool is not a runtime flavour (`docs/interface.md`
+§5 is unchanged).
+
 ### W5 — The safety trio
 
 **Deliverable.** Cancellation (dropping a task stops it being stepped and removes its registrations),
@@ -569,7 +585,7 @@ CPS indirection, which is P1.
 | 4 | **W3** timers | met (SC8) | timeouts, deadlines, keep-alive |
 | 5 | **W11** buffered I/O helpers | collapsed into W9 — the codec frames and buffers its own bytes | — |
 | 6 | **W5** safety trio, and cancellation safety | the error channel is in (SC9), a stop drains a connection in flight (SC10), and a disconnect cancels the work (SC11) — by an explicit operation rather than by dropping; `panic!` totality to go | operability: disconnect, failure, signal |
-| 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |
+| 7 | **W4** blocking pool | met (SC12) | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | | the product |
 | 10 | **W12** task-locals, connection registry | | log context, drainable shutdown |

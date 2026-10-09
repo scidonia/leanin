@@ -1712,6 +1712,182 @@ check_sc10() {
   printf 'SC10 ok: served=%s echoed=%s inFlightAfter=%s pendingHooks=%s\n' "$served" "$echoed" "$pool" "$pending"
 }
 
+# bracket_elems <bracketed comma list> — the inner elements, one per line. Exits nonzero when the field
+# is not `[...]`, is empty, or carries an empty element, so a dropped, doubled or malformed entry is
+# rejected before any entry is compared. This is the syntax id_sequence_is accepts, factored out here
+# because SC12 reads the shape of a thread-identity list and then counts it rather than comparing ids.
+bracket_elems() {
+  local list="$1" inner e
+  case "$list" in
+  '['*']')
+    inner="${list#"["}"
+    inner="${inner%"]"}"
+    ;;
+  *) return 1 ;;
+  esac
+  case "$inner" in '' | ',' | ','* | *',' | *',,'*) return 1 ;; esac
+  local IFS=','
+  for e in $inner; do printf '%s\n' "$e"; done
+}
+
+# block_ok <record> — the blocking pool's observations as a detector, so its own control can reuse it:
+# every job ran on a thread other than the carrier (2), the four jobs shared at most `poolWorkers`
+# threads, so it is a pool and not a thread per job (3), the carrier ran a heartbeat step while the first
+# job was outstanding (4), every completion resumed on the carrier (5), the stock-priority task finished
+# before the jobs did (6), the accounting reader saw every job while they were outstanding (7) and none
+# after the run returned (8), and every worker exited (9). Every operand is read through `field` from this
+# record, so a value is never bound from a neighbouring field, and `jobTids`/`resumeTids` are parsed as
+# bracketed identity lists, so a dropped, empty, doubled or extra entry is rejected before any comparison.
+block_ok() {
+  local rec="$1"
+  local jobs carrier tids workers during rtids stock peak after exited
+  jobs="$(field jobs "$rec")" || return 1
+  carrier="$(field carrier "$rec")" || return 1
+  tids="$(field jobTids "$rec")" || return 1
+  workers="$(field poolWorkers "$rec")" || return 1
+  during="$(field carrierDuringFirstJob "$rec")" || return 1
+  rtids="$(field resumeTids "$rec")" || return 1
+  stock="$(field stockBeforeJobs "$rec")" || return 1
+  peak="$(field pendingPeak "$rec")" || return 1
+  after="$(field pendingAfter "$rec")" || return 1
+  exited="$(field workersExited "$rec")" || return 1
+  local v
+  for v in "$jobs" "$workers" "$peak" "$after" "$exited"; do
+    case "$v" in '' | *[!0-9]*) return 1 ;; esac
+  done
+  # 1: the shape can show reuse at all — a bounded pool smaller than the job count.
+  [ "$jobs" -ge 2 ] || return 1
+  [ "$workers" -ge 1 ] || return 1
+  [ "$workers" -lt "$jobs" ] || return 1
+
+  local jt_str rt_str distinct t
+  local -a jt rt
+  jt_str="$(bracket_elems "$tids")" || return 1
+  mapfile -t jt <<<"$jt_str"
+  [ "${#jt[@]}" -eq "$jobs" ] || return 1
+  # 2: every blocking job ran off the carrier.
+  for t in "${jt[@]}"; do [ "$t" != "$carrier" ] || return 1; done
+  # 3: a bounded pool — at most `workers` distinct job threads, whichever worker served which job.
+  distinct="$(printf '%s\n' "${jt[@]}" | sort -u | wc -l | tr -d ' ')"
+  [ "$distinct" -le "$workers" ] || return 1
+  # 4: the carrier was not stalled — it ran a step while the first job was outstanding.
+  [ "$during" = "yes" ] || return 1
+
+  rt_str="$(bracket_elems "$rtids")" || return 1
+  mapfile -t rt <<<"$rt_str"
+  [ "${#rt[@]}" -eq "$jobs" ] || return 1
+  # 5: every completion resumed on the carrier.
+  for t in "${rt[@]}"; do [ "$t" = "$carrier" ] || return 1; done
+
+  # 6, 7, 8, 9.
+  [ "$stock" = "yes" ] || return 1
+  [ "$peak" = "$jobs" ] || return 1
+  [ "$after" = "0" ] || return 1
+  [ "$exited" = "$workers" ] || return 1
+}
+
+# --- SC12 — blocking jobs run off the carrier, on a bounded pool, without stalling the executor ————————————————
+check_sc12() {
+  local out status line round ctl
+  local ctl_two ctl_repeat ctl_blocking ctl_interleaved ctl_guard_yes ctl_guard_no
+  local near
+  local -a records=()
+
+  # The detector's own control, from the record syntax and the expectation alone: it must accept a
+  # well-formed record and reject each of the nine near misses a runtime that ran the jobs on the carrier,
+  # used a thread per job, stalled the carrier, resumed off it, took the stock pool with the jobs, left the
+  # accounting reader blind, left a job outstanding, failed to drain a worker, or had nothing to observe
+  # would produce. The near misses are written here rather than taken from the mode, because the detector's
+  # contract is shaped by the record syntax and the eleven assertions, not by any value the mode produced.
+  block_ok 'jobs=4|carrier=100|jobTids=[200,200,201,201]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[100,100,100,100]|stockBeforeJobs=yes|pendingPeak=4|pendingAfter=0|workersExited=2|runUs=1' ||
+    setup_error "SC12: the blocking-pool detector rejected a well-formed record" \
+      "the detectors' own control, not the SC12 Then"
+  for near in \
+    'jobs=4|carrier=100|jobTids=[100,100,100,100]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[100,100,100,100]|stockBeforeJobs=yes|pendingPeak=4|pendingAfter=0|workersExited=2|runUs=1' \
+    'jobs=4|carrier=100|jobTids=[200,201,202,203]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[100,100,100,100]|stockBeforeJobs=yes|pendingPeak=4|pendingAfter=0|workersExited=2|runUs=1' \
+    'jobs=4|carrier=100|jobTids=[200,200,201,201]|poolWorkers=2|carrierDuringFirstJob=no|resumeTids=[100,100,100,100]|stockBeforeJobs=yes|pendingPeak=4|pendingAfter=0|workersExited=2|runUs=1' \
+    'jobs=4|carrier=100|jobTids=[200,200,201,201]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[200,100,100,100]|stockBeforeJobs=yes|pendingPeak=4|pendingAfter=0|workersExited=2|runUs=1' \
+    'jobs=4|carrier=100|jobTids=[200,200,201,201]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[100,100,100,100]|stockBeforeJobs=no|pendingPeak=4|pendingAfter=0|workersExited=2|runUs=1' \
+    'jobs=4|carrier=100|jobTids=[200,200,201,201]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[100,100,100,100]|stockBeforeJobs=yes|pendingPeak=0|pendingAfter=0|workersExited=2|runUs=1' \
+    'jobs=4|carrier=100|jobTids=[200,200,201,201]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[100,100,100,100]|stockBeforeJobs=yes|pendingPeak=4|pendingAfter=1|workersExited=2|runUs=1' \
+    'jobs=4|carrier=100|jobTids=[200,200,201,201]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[100,100,100,100]|stockBeforeJobs=yes|pendingPeak=4|pendingAfter=0|workersExited=1|runUs=1' \
+    'jobs=1|carrier=100|jobTids=[200]|poolWorkers=2|carrierDuringFirstJob=yes|resumeTids=[100]|stockBeforeJobs=yes|pendingPeak=1|pendingAfter=0|workersExited=2|runUs=1'; do
+    if block_ok "$near"; then
+      setup_error "SC12: the blocking-pool detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC12 Then"
+    fi
+  done
+  printf 'SC12 control: rejected jobs that ran on the carrier, a thread per job, a stalled carrier, a completion off the carrier, a job that kept the stock pool, a blind accounting reader, a job left outstanding, a worker that did not exit and a run with nothing to observe\n'
+
+  # Three invocations, each of which must satisfy the Then: the accounting reader turns zero only once a job's
+  # witness is marked finished, and the record's own note does not rest that ordering on a single sample.
+  for round in 1 2 3; do
+    out="$(bounded lake exe controls --runtime-blocking)"
+    status=$?
+    check_status SC12 "$status" "lake exe controls --runtime-blocking"
+    require_header "$out"
+
+    mapfile -t records < <(grep '^block|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC12 Then: the blocking pool's behaviour not observed exactly once" \
+        "expected exactly one block| record, saw ${#records[@]} in invocation $round"
+    line="${records[0]}"
+
+    record_is "${line#block|}" jobs carrier jobTids poolWorkers carrierDuringFirstJob resumeTids stockBeforeJobs pendingPeak pendingAfter workersExited runUs ||
+      fail "SC12 Then: the blocking pool's behaviour not observed exactly once" \
+        "the record is not exactly jobs/carrier/jobTids/poolWorkers/carrierDuringFirstJob/resumeTids/stockBeforeJobs/pendingPeak/pendingAfter/workersExited/runUs with nonempty values: [$line]"
+
+    # The mode's own detached readings, read as SC7's and SC8's controls are: a fixture defect if they do
+    # not hold, strictly separately from the Then.
+    ctl="$(grep '^blockctl|' <<<"$out" | head -1)"
+    [ -n "$ctl" ] ||
+      setup_error "SC12: the detector controls are missing" "no blockctl record in the invocation"
+    record_is "${ctl#blockctl|}" distinctTwo distinctRepeat orderBlocking orderInterleaved stockGuardYes stockGuardNo ||
+      setup_error "SC12: the detector-control record is not the expected shape" "control: [$ctl]"
+    bound_field ctl_two distinctTwo "$ctl" "SC12 control"
+    bound_field ctl_repeat distinctRepeat "$ctl" "SC12 control"
+    bound_field ctl_blocking orderBlocking "$ctl" "SC12 control"
+    bound_field ctl_interleaved orderInterleaved "$ctl" "SC12 control"
+    bound_field ctl_guard_yes stockGuardYes "$ctl" "SC12 control"
+    bound_field ctl_guard_no stockGuardNo "$ctl" "SC12 control"
+    [ "$ctl_two" = "2" ] ||
+      setup_error "SC12: the distinct-thread detector did not count two on two distinct tids" \
+        "distinctTwo=$ctl_two"
+    [ "$ctl_repeat" = "1" ] ||
+      setup_error "SC12: the distinct-thread detector did not collapse a repeat" \
+        "distinctRepeat=$ctl_repeat"
+    [ "$ctl_blocking" = "false" ] ||
+      setup_error "SC12: the order detector did not reject a blocking-shaped order" \
+        "orderBlocking=$ctl_blocking"
+    [ "$ctl_interleaved" = "true" ] ||
+      setup_error "SC12: the order detector did not accept an interleaved order" \
+        "orderInterleaved=$ctl_interleaved"
+    [ "$ctl_guard_yes" = "accepted" ] ||
+      setup_error "SC12: the stock-guard detector did not accept the stock pool untouched" \
+        "stockGuardYes=$ctl_guard_yes"
+    [ "$ctl_guard_no" = "rejected" ] ||
+      setup_error "SC12: the stock-guard detector did not reject a stock pool taken" \
+        "stockGuardNo=$ctl_guard_no"
+
+    block_ok "${line#block|}" ||
+      fail "SC12 Then: a blocking job did not run off the carrier, on a bounded pool, without stalling the executor" \
+        "invocation=$round" \
+        "record=[$line]"
+
+    bound_field jobs jobs "$line" "SC12 Then"
+    bound_field carrier carrier "$line" "SC12 Then"
+    bound_field tids jobTids "$line" "SC12 Then"
+    bound_field workers poolWorkers "$line" "SC12 Then"
+    bound_field during carrierDuringFirstJob "$line" "SC12 Then"
+    bound_field peak pendingPeak "$line" "SC12 Then"
+    bound_field after pendingAfter "$line" "SC12 Then"
+    bound_field exited workersExited "$line" "SC12 Then"
+    printf 'SC12 ok (invocation %s): jobs=%s carrier=%s jobTids=%s poolWorkers=%s carrierDuringFirstJob=%s pendingPeak=%s pendingAfter=%s workersExited=%s\n' \
+      "$round" "$jobs" "$carrier" "$tids" "$workers" "$during" "$peak" "$after" "$exited"
+  done
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -1724,8 +1900,9 @@ SC8) check_sc8 ;;
 SC9) check_sc9 ;;
 SC10) check_sc10 ;;
 SC11) check_sc11 ;;
+SC12) check_sc12 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12\n' >&2
   exit 2
   ;;
 esac

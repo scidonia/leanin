@@ -180,6 +180,17 @@ and notifies — Tokio's `wake()` → `inject.push` + `unpark`
 (`scheduler/current_thread/mod.rs:734`). Our task bodies are never `Task`s. *This bridge is D3/O3, and it is built:
 `Runtime/Leaf.lean` is the whole of it, and SC7, SC9 and SC10 drive it at the public executable.*
 
+**Blocking work gets off the carrier through a pool.** `Runtime.spawnBlocking (p : BlockingPool) (hooks : Hooks) (act : IO α) : Task.Async α`
+submits `act` to a `BlockingPool` — a bounded set of worker threads off the executor's queue, with its own
+queue and its own shutdown — and returns the ordinary `Task.Task α` this layer gives a spawned computation, so
+`await`, `Runtime.cancel` and `concurrently` work on a blocking job with no new handle type. Its step registers
+the job's liveness witness in `Hooks`, so `Runtime.pending` counts a blocking job exactly as it counts a leaf
+registration; the completion is delivered as an item on the carrier through `ctx.resume`, and `Item.fire` skips
+it when the submitting computation was cancelled. `spawnBlockingE` is the failure-carrying sibling
+(`Task.EAsync IO.Error`), in `Runtime/Leaf.lean`'s `awaitTask`/`awaitTaskE` shape. The pool's threads come from
+`Task.Priority.dedicated` (D13), so the layer gains a route rather than a primitive. *This is D13's design, and
+it is built: `Runtime/Blocking.lean`, and SC12 drives it at the public executable.*
+
 ______________________________________________________________________
 
 ## 5. Deliberately absent

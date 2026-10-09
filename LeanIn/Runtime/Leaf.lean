@@ -43,7 +43,15 @@ namespace LeanIn.Runtime
 
 The token is what makes an entry *attributable* — to the computation that left it, and to the cancellation that
 should retire it. Without it a registry can only grow, because nothing can tell an entry that will never run again
-from one that is simply still waiting. -/
+from one that is simply still waiting.
+
+**The invariant relied on.** Every write to the registry happens on the carrier: `Hooks.add` and `Hooks.retire`
+are the work of a step, so the list is only ever mutated by carrier threads, one step at a time, and no foreign
+thread writes it. The blocking pool adds no carrier step and no writer of the list: its job thread resolves its
+own job's promise and nothing else. The only entry that resolution can settle is the one the job's own submission
+registered, whose stock `Task` it drives to finished — the same fact the next carrier-side `Hooks.add` would
+record — and it never touches another computation's entry. A job thread resolving only its own promise is what
+keeps the registry's writers on the carrier. -/
 abbrev Hooks := IO.Ref (List (Task.Cancel × _root_.Task Unit))
 
 def Hooks.new : IO Hooks := IO.mkRef []

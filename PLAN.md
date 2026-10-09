@@ -390,7 +390,8 @@ concurrency: polling stays single-threaded (D11), and for files a thread is the 
 
 **Build** — `LeanIn/Runtime/Blocking.lean`: a bounded pool of carrier threads, off the executor's
 queue, with its own queue and its own shutdown. Threads come from `Task.Priority.dedicated`, so no new
-primitive and no A6.
+primitive; A6 (dedicated task ⇒ `pthread_create`) was written as v2-only when v1 created no thread, and
+v1 now *consumes* it through `Task` (D13).
 
 **Test** — the two measured cases, as regression guards: `N` blocking jobs must not stall the
 executor, and the stock pool must be left untouched.

@@ -235,6 +235,13 @@ controls for the bridge axioms
   A1  guarded   → 2000000  exact = true  (affirmative control)
 ```
 
+> ⚠️ **Superseded by W4 (2026-10-09).** The transcript above is pasted output from before the blocking
+> pool and is kept as history rather than edited. Its first line is out of date: A6 is now *consumed*
+> by the blocking pool through `Task` (D13) and is controlled by `controlDedicated`, so the `controls`
+> header today reads only `A3 (release without ownership) is not tested`. The current reading of this
+> mode is the run recorded in [`PERFORMANCE.md`](PERFORMANCE.md), and the register is
+> [`decisions.md`](decisions.md) D13.
+
 Readings **[M]**:
 
 1. **A1 — mutual exclusion is load-bearing.** Without a lock, 4 threads × 500 000 increments lost
@@ -258,6 +265,11 @@ because violating it is undefined behaviour, so the test *is* the defect; A4 bec
 is permitted to wake spuriously, not obliged to, so a spurious wakeup cannot be forced. Both are
 discharged by reading `mutex.cpp` against the standard, and A3 additionally by the model having no
 transition for it (`unlock_without_ownership_has_no_transition`). **A6** is absent from v1.
+
+> ⚠️ **Superseded by W4 (2026-10-09).** The closing sentence above — "**A6** is absent from v1" — is no
+> longer true and is kept as history rather than rewritten: A6 is consumed by the blocking pool through
+> `Task` (D13) and is controlled by `controlDedicated`, so the current reading is A3 alone untested.
+> See [`decisions.md`](decisions.md) D13 and [`proof-strategy.md`](proof-strategy.md) §2.
 
 ______________________________________________________________________
 

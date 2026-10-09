@@ -26,10 +26,14 @@ by reading rather than taken on faith.
 
 ## What is not here
 
-**A6 (thread creation) is absent**, because v1 is single-carrier and spawns no threads. It joins this
-file when the multi-carrier scheduler does (D2, D11).
+**A6's direct form is absent**, because v1 reaches its blocking-pool threads through `Task`
+(`IO.asTask … Task.Priority.dedicated`, D13), which D3's seam already trusts, rather than through a raw
+`pthread_create`; that direct form joins this file when the multi-carrier scheduler does (D2, D11).
 
-**`IO.Promise` and atomics are absent**, because they are not used (D7).
+**Atomics are absent**, because they are not used (D7). **`IO.Promise` is reached directly**: the
+blocking pool's liveness witness calls `IO.Promise.new`, `Promise.resolve` and `Promise.result?` itself
+(D7's second row, D13), not only transitively through the leaf seam. It still has no axiom here — it is
+trusted substrate, not one of the bridge contracts — but the reach is direct.
 -/
 
 namespace LeanIn
