@@ -205,11 +205,14 @@ operation that drops scheduled work, and both are W5's. What is *not* left untes
 timer genuinely firing after the winner wrote — and the loud `resolve` in either position would raise out of the
 driver instead, so reaching the record at all is part of that evidence.
 
-**The comparison, and the one it is missing.** Sixteen 50 ms sleeps on one carrier cost 51 ms against **801 ms**
-for the same sleeps on the thread they run on — 15.4× — which is the "parked, not occupied" claim measured on a
-workload that is the feature's own. Against the shipped timer path the row is *parity* (51 ms against `spike`'s
-64 × 100 ms in 102 ms), and that one is a citation rather than a same-run pair, because the shipped timer
-fan-out does not elaborate inside the test client; it is marked as a crossing in `docs/PERFORMANCE.md`.
+**The comparison, and what it is against.** Sixteen 50 ms sleeps cost 51 ms on one carrier against **100 ms** for
+the same sixteen sleeps run *concurrently* on the stock pool, one `IO.asTask` each — **1.9×, and it is one thread
+against eight**. That number is the mechanism rather than a caveat: a blocking sleep occupies the worker it runs
+on, so eight workers do two rounds of 50 ms, while one carrier parks and overlaps all sixteen. The same waits
+issued *one after another* on one thread take 801 ms, and that reading stays in the table labelled as what not
+overlapping costs rather than as a baseline. Against the shipped timer path the row is parity (51 ms against
+`spike`'s 64 × 100 ms in 102 ms), cited rather than re-run, because the shipped timer fan-out does not elaborate
+in the test client; the crossing is marked in `docs/PERFORMANCE.md`.
 
 ### W10 — The HTTP surface we would actually be reusing
 

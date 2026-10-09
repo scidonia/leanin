@@ -65,9 +65,10 @@ Each multiplier is same-run, as in §2.
 | enqueue, one call | 464 ns | — | ⚪ not like-for-like: the native row is a spawn *and* a join, so set it against the round trip above | `--runtime-ops` |
 | tail: last of 10 000 tasks started | 14 038 µs after the first | stock pool 46 013 µs | 🟢 **3.3× better** | `--runtime-tail` |
 | shared counter, 10 000 increments | 14 014 µs, a plain `IO.Ref` (correct for one carrier) | stock pool with the mutex its 8 threads require: 49 741 µs | 🟢 **3.5× faster** | `--runtime-shared` |
-| four 50 ms timers on one carrier, via libuv | 51 ms | a serial blocking path: 200 ms | 🟢 **3.9× better** | `--runtime-sleep` |
-| 16 × 50 ms sleeps, one carrier | 51–52 ms | `IO.sleep` on the thread it runs on: 801 ms | 🟢 **15.4× better** | `--runtime-time` |
-| the same 16 sleeps against the shipped timer path | 51–52 ms | 64 × 100 ms in 102 ms | ⚪ parity, and a citation rather than a same-run pair (`docs/evidence.md`) | `spike` |
+| four 50 ms timers on one carrier, via libuv | 51 ms | four waits one after another: 200 ms | ⚪ **not a baseline**, for the reason the pair below gives: it shows the timers overlap, which was the point when it was written | `--runtime-sleep` |
+| 16 concurrent 50 ms sleeps, one carrier | 51–52 ms | the same 16 sleeps as stock tasks on the pool: 100 ms — two rounds on eight workers, because a blocking sleep occupies the worker it runs on | 🟢 **1.9× better, one thread against eight** | `--runtime-time` |
+| those 16 waits issued one after another on one thread | — | 801 ms | ⚪ **not a baseline**: this is what *not* overlapping them costs, which is the reason the row above exists | `--runtime-time` |
+| the same 16 sleeps against the shipped *timer* path | 51–52 ms | 64 × 100 ms in 102 ms | ⚪ parity, and a citation rather than a same-run pair (`docs/evidence.md`) | `spike` |
 | 16 concurrent echo connections on one carrier | 4.8–6.9 ms wall (≈ 2.3–3.3 k connections/s) | — | ⚪ no baseline yet: the shipped server on this workload is W16 | `--runtime-net` |
 | critical section, notification with nobody parked | 27 ns / 1 ns | — | ⚪ no baseline | `--runtime-ops` |
 

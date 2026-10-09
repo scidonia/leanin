@@ -1001,19 +1001,24 @@ def runtimeTime : IO UInt32 := do
     let late ← Runtime.withTimeout hooks 5 (pure 7)
     Runtime.sleep hooks 40
     return (first, late))
-  -- The other path for the same workload: a sleep that occupies the thread it runs on. The `Std.Async` half of
-  -- this comparison is already measured and cited rather than re-run here — `spike` reports 64 concurrent
-  -- `Async.sleep 100` in 102 ms (`docs/evidence.md`), which is the parity this row exists to state — because the
-  -- shipped timer fan-out does not elaborate inside this module. Printed, never asserted.
+  -- Two baselines, and they are not the same kind of thing. The first is like-for-like: the same sixteen sleeps,
+  -- *concurrently*, on the stock pool, one `IO.asTask` each — the shipped way to run something off the calling
+  -- thread, and the number ours should be read against. The second issues the same waits one after another on
+  -- one thread; it is not a baseline for "faster", it is what not overlapping them costs, and it belongs beside
+  -- the first as the reason the first exists.
+  let t2 ← IO.monoNanosNow
+  let ts ← (List.range n).mapM (fun _ => IO.asTask (IO.sleep 50) _root_.Task.Priority.default)
+  for t in ts do let _ ← IO.wait t
   let t3 ← IO.monoNanosNow
-  for _ in List.range n do IO.sleep 50
   let t4 ← IO.monoNanosNow
+  for _ in List.range n do IO.sleep 50
+  let t5 ← IO.monoNanosNow
   let hitStr := match hit with | none => "none" | some _ => "some"
   let missStr := match miss with | none => "none" | some v => s!"some:{v}"
   let firstStr := match firstWins with | none => "none" | some v => s!"some:{v}"
   let lateStr := match lateTimerIgnored with | none => "none" | some v => s!"some:{v}"
   IO.println s!"time|sleepers={n}|overlap={overlap}|lateBeforeWake={lateBeforeWake}|wakes={wakes}|timeoutHit={hitStr}|timeoutMiss={missStr}|firstWins={firstStr}|lateTimerIgnored={lateStr}|sleepUs={(t1 - t0) / 1000}"
-  IO.println s!"timebase|blockingSleepUs={(t4 - t3) / 1000}"
+  IO.println s!"timebase|stockPoolSleepUs={(t3 - t2) / 1000}|serialSleepUs={(t5 - t4) / 1000}"
   IO.println s!"timectl|blockingOrderOverlaps={blockingOrderOverlaps}|missingWakeWakes={missingWakeWakes}"
   return 0
 
