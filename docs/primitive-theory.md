@@ -184,3 +184,12 @@ The list used to carry `IO.Promise`. It no longer does: the blocking pool's live
 (`LeanIn/Runtime/Blocking.lean:163-176`), so they are D7's second row, controlled by `controlWitness` —
 what Mutex+Condvar covers is the *queue*, which is not what the witness needed. Anything not on D7's list
 is not used.
+
+**No change from the sync primitives (W6, D14).** `LeanIn/Task/Sync.lean` adds no primitive above and no
+citation. Its whole mechanism is one `Std.Mutex` critical section per operation — `Std.Mutex.new` and
+`atomically`, which is **A1**, already on the list — over pure list and natural-number code: no atomics
+(the absence above still holds), no new syscall, and no `IO.Promise` reach, so `Blocking.lean`'s direct
+promise reach stays the only one and the register is unchanged. `#print axioms` is unchanged too, because
+W6 adds no theorem — the semaphore's invariant is stated and deferred in D14, not proved here. The finding
+is the same one D13 made of the blocking pool: a new mechanism over already-registered primitives adds a
+design, not a primitive.

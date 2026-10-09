@@ -102,6 +102,13 @@ true)` (`LeanIn/Runtime/Blocking.lean:163-176`), and `IO.getTaskState` is what `
 witness with (`LeanIn/Runtime/Leaf.lean:105-113`), so those substrate entries are direct reaches of the
 blocking pool rather than inherited from `Leaf.lean`. The TCB's shape does not change (D13).
 
+**W6's sync primitives change the TCB in no way (D14).** Their whole mechanism is one `Std.Mutex` critical
+section per operation — A1, already trusted — over pure list and natural-number code; they reach no
+`IO.Promise`, no atomics and no new syscall, so no entry is added above and `Blocking.lean`'s direct promise
+reach stays the only one. Their flat `Async` surface (`Mutex.lock`, `Semaphore.acquire`, `Channel.send`/`recv`)
+is a retry step stamped by `ctx.resume`, so it introduces no new substrate. The semaphore's model obligation is
+stated and deferred in D14, and `docs/primitive-theory.md` §6 records the register's non-change.
+
 The honest framing: **the proof is about a model of the scheduler, and the model is a design decision
 that we control.** The project's central architectural question is therefore not "what do we prove"
 but **"how thin can we make the layer between the proven model and the running code."** That is why

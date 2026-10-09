@@ -1888,6 +1888,189 @@ check_sc12() {
   done
 }
 
+# order_ok <comma-separated event stream> — the six events `a-enter`, `a-exit`, `b-enter`, `b-exit`,
+# `u`, `u`, once each; the two sections do not interleave; and a `u` falls strictly inside the first
+# section. The relations are read from the events' positions, never from the stream compared to a
+# fixed string, and either holder may be the first.
+order_ok() {
+  local ord="$1" e i
+  local -a ev
+  IFS=',' read -r -a ev <<<"$ord"
+  [ "${#ev[@]}" -eq 6 ] || return 1
+  local u=0 ae=0 ax=0 be=0 bx=0
+  for e in "${ev[@]}"; do
+    case "$e" in
+    u) u=$((u + 1)) ;;
+    a-enter) ae=$((ae + 1)) ;;
+    a-exit) ax=$((ax + 1)) ;;
+    b-enter) be=$((be + 1)) ;;
+    b-exit) bx=$((bx + 1)) ;;
+    *) return 1 ;;
+    esac
+  done
+  [ "$u" -eq 2 ] && [ "$ae" -eq 1 ] && [ "$ax" -eq 1 ] && [ "$be" -eq 1 ] && [ "$bx" -eq 1 ] || return 1
+  local ai=-1 axi=-1 bi=-1 bxi=-1 firstEnter firstExit inside=0
+  for i in "${!ev[@]}"; do
+    case "${ev[$i]}" in
+    a-enter) ai=$i ;;
+    a-exit) axi=$i ;;
+    b-enter) bi=$i ;;
+    b-exit) bxi=$i ;;
+    esac
+  done
+  [ "$ai" -lt "$axi" ] && [ "$bi" -lt "$bxi" ] || return 1
+  [ "$axi" -lt "$bi" ] || [ "$bxi" -lt "$ai" ] || return 1
+  if [ "$ai" -lt "$bi" ]; then firstEnter=$ai; firstExit=$axi; else firstEnter=$bi; firstExit=$bxi; fi
+  for i in "${!ev[@]}"; do
+    if [ "${ev[$i]}" = "u" ] && [ "$i" -gt "$firstEnter" ] && [ "$i" -lt "$firstExit" ]; then inside=1; fi
+  done
+  [ "$inside" -eq 1 ]
+}
+
+# sync_ok <record> — the synchronisation observations as a detector, so its own control can reuse it.
+# Every operand is read through `field` from this record: the two holders returned distinct values, the
+# two sections do not overlap and an unrelated step falls inside the first section, the bound holds
+# exactly with its affirmative control and every parked send is delivered, the semaphore's count is
+# exact, and each cancellation probe reads the expected field. A cancelled lock waiter that was granted
+# the lock (`cancelLockAcquired=no`), or a cancelled receiver that consumed a message
+# (`cancelRecvValue=lost`), is rejected.
+sync_ok() {
+  local rec="$1"
+  record_is "$rec" cap order aResult bResult sent tryAccepted tryRejected parkedDelivered \
+    controlAccepted controlRejected semAccepted semRejected semAfterRelease cancelLockAcquired \
+    cancelRecvValue cancelSendGhost cancelSendAccepted runUs || return 1
+  local cap ord ares bres sent ta tr pd ca cr sa sre sar cla crv csg csa v
+  cap="$(field cap "$rec")" || return 1
+  ord="$(field order "$rec")" || return 1
+  ares="$(field aResult "$rec")" || return 1
+  bres="$(field bResult "$rec")" || return 1
+  sent="$(field sent "$rec")" || return 1
+  ta="$(field tryAccepted "$rec")" || return 1
+  tr="$(field tryRejected "$rec")" || return 1
+  pd="$(field parkedDelivered "$rec")" || return 1
+  ca="$(field controlAccepted "$rec")" || return 1
+  cr="$(field controlRejected "$rec")" || return 1
+  sa="$(field semAccepted "$rec")" || return 1
+  for v in "$cap" "$sent" "$ta" "$tr" "$pd" "$ca" "$cr" "$sa"; do
+    case "$v" in '' | *[!0-9]*) return 1 ;; esac
+  done
+  [ "$ares" != "$bres" ] || return 1
+  order_ok "$ord" || return 1
+  [ "$sent" -eq $((cap + 1)) ] || return 1
+  [ "$ta" -eq "$cap" ] || return 1
+  [ "$tr" -eq 1 ] || return 1
+  [ "$pd" -eq "$sent" ] || return 1
+  [ "$ca" -eq "$sent" ] || return 1
+  [ "$cr" -eq 0 ] || return 1
+  [ "$sa" -eq 2 ] || return 1
+  sre="$(field semRejected "$rec")" || return 1
+  sar="$(field semAfterRelease "$rec")" || return 1
+  cla="$(field cancelLockAcquired "$rec")" || return 1
+  crv="$(field cancelRecvValue "$rec")" || return 1
+  csg="$(field cancelSendGhost "$rec")" || return 1
+  csa="$(field cancelSendAccepted "$rec")" || return 1
+  [ "$sre" = "no" ] || return 1
+  [ "$sar" = "yes" ] || return 1
+  [ "$cla" = "yes" ] || return 1
+  [ "$crv" = "present" ] || return 1
+  [ "$csg" = "absent" ] || return 1
+  [ "$csa" = "yes" ] || return 1
+}
+
+# --- SC13 — async synchronisation: a mutex, a semaphore and a bounded channel on one carrier ————————————
+check_sc13() {
+  local out status line ctl round k n g
+  local near
+  local -a records=()
+
+  # The detector's own control, from the record syntax and the expectation alone: it must accept a
+  # well-formed record and reject each near miss a primitive that let two sections overlap, stalled
+  # unrelated work, miscounted a bound or a permit, or let a cancelled waiter take what it was
+  # cancelled for would produce. The near misses are written here rather than taken from the mode.
+  sync_ok 'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' ||
+    setup_error "SC13: the synchronisation detector rejected a well-formed record" \
+      "the detectors' own control, not the SC13 Then"
+  for near in \
+    'cap=2|order=a-enter,b-enter,a-exit,b-exit,u,u|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,a-exit,u,u,b-enter,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=7|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=1|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=1|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=1|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=no|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=no|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=lost|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0' \
+    'cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=present|cancelSendAccepted=yes|runUs=0' \
+    ''; do
+    if sync_ok "$near"; then
+      setup_error "SC13: the synchronisation detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC13 Then"
+    fi
+  done
+  printf 'SC13 control: rejected overlapping sections, unrelated work outside them, empty or equal holder values, a miscounted bound, a control that accepted nothing, a miscounted permit, a release that admitted no one, a granted cancelled waiter, a message consumed by a cancelled receiver, a slot consumed by a cancelled sender, and a record with nothing to observe\n'
+
+  # Three invocations, each of which must satisfy the Then.
+  for round in 1 2 3; do
+    out="$(bounded lake exe controls --runtime-sync)"
+    status=$?
+    check_status SC13 "$status" "lake exe controls --runtime-sync"
+    require_header "$out"
+
+    mapfile -t records < <(grep '^sync|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC13 Then: the synchronisation behaviour not observed exactly once" \
+        "expected exactly one sync| record, saw ${#records[@]} in invocation $round"
+    line="${records[0]}"
+
+    record_is "${line#sync|}" cap order aResult bResult sent tryAccepted tryRejected parkedDelivered \
+      controlAccepted controlRejected semAccepted semRejected semAfterRelease cancelLockAcquired \
+      cancelRecvValue cancelSendGhost cancelSendAccepted runUs ||
+      fail "SC13 Then: the synchronisation behaviour not observed exactly once" \
+        "the record is not exactly cap/order/aResult/bResult/sent/tryAccepted/tryRejected/parkedDelivered/controlAccepted/controlRejected/semAccepted/semRejected/semAfterRelease/cancelLockAcquired/cancelRecvValue/cancelSendGhost/cancelSendAccepted/runUs with nonempty values: [$line]"
+
+    # The mode's own checker readings, read as SC7's and SC8's controls are: a fixture defect if they do
+    # not hold, strictly separately from the Then.
+    ctl="$(grep '^syncctl|' <<<"$out" | head -1)"
+    [ -n "$ctl" ] ||
+      setup_error "SC13: the checker controls are missing" "no syncctl record in the invocation"
+    record_is "${ctl#syncctl|}" orderOverlapNear orderOverlapGood unrelatedInsideNear unrelatedInsideGood \
+      countExactNear countExactGood controlShowsNear controlShowsGood semCountNear semCountGood \
+      semAfterNear semAfterGood lockProbeNear lockProbeGood recvProbeNear recvProbeGood \
+      sendProbeNear sendProbeGood ||
+      setup_error "SC13: the checker-control record is not the expected shape" "control: [$ctl]"
+    for k in orderOverlap unrelatedInside countExact controlShows semCount semAfter lockProbe recvProbe sendProbe; do
+      bound_field n "$k""Near" "$ctl" "SC13 control"
+      bound_field g "$k""Good" "$ctl" "SC13 control"
+      [ "$n" = "rejected" ] ||
+        setup_error "SC13: the $k checker did not reject its near miss" "$k""Near=$n"
+      [ "$g" = "accepted" ] ||
+        setup_error "SC13: the $k checker did not accept a well-formed record" "$k""Good=$g"
+    done
+    printf '%s\n' "$ctl"
+
+    sync_ok "${line#sync|}" ||
+      fail "SC13 Then: a cancelled waiter took what it was cancelled for, or a primitive's count is not exact" \
+        "invocation=$round" \
+        "record=[$line]"
+
+    bound_field cap cap "$line" "SC13 Then"
+    bound_field ord order "$line" "SC13 Then"
+    bound_field ares aResult "$line" "SC13 Then"
+    bound_field bres bResult "$line" "SC13 Then"
+    bound_field ta tryAccepted "$line" "SC13 Then"
+    bound_field tr tryRejected "$line" "SC13 Then"
+    bound_field pd parkedDelivered "$line" "SC13 Then"
+    bound_field ca controlAccepted "$line" "SC13 Then"
+    bound_field sa semAccepted "$line" "SC13 Then"
+    bound_field cla cancelLockAcquired "$line" "SC13 Then"
+    bound_field crv cancelRecvValue "$line" "SC13 Then"
+    printf 'SC13 ok (invocation %s): order=%s aResult=%s bResult=%s tryAccepted=%s tryRejected=%s parkedDelivered=%s controlAccepted=%s semAccepted=%s cancelLockAcquired=%s cancelRecvValue=%s\n' \
+      "$round" "$ord" "$ares" "$bres" "$ta" "$tr" "$pd" "$ca" "$sa" "$cla" "$crv"
+  done
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -1901,8 +2084,9 @@ SC9) check_sc9 ;;
 SC10) check_sc10 ;;
 SC11) check_sc11 ;;
 SC12) check_sc12 ;;
+SC13) check_sc13 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13\n' >&2
   exit 2
   ;;
 esac

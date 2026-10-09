@@ -6,6 +6,7 @@ import LeanIn.Runtime.Leaf
 import LeanIn.Runtime.Net
 import LeanIn.Runtime.Time
 import LeanIn.Runtime.Blocking
+import LeanIn.Task.Sync
 
 /-!
 # Runtime controls for the bridge axioms
@@ -1565,6 +1566,398 @@ def runtimeBlocking : IO UInt32 := do
   IO.println s!"blockctl|distinctTwo={(distinctOf [0, 1]).length}|distinctRepeat={(distinctOf [7, 7]).length}|orderBlocking={carrierBetween ["job0-start", "job0-done", "hb"]}|orderInterleaved={carrierBetween ["job0-start", "hb", "job0-done"]}|stockGuardYes={if stockGuard "yes" then "accepted" else "rejected"}|stockGuardNo={if stockGuard "no" then "accepted" else "rejected"}"
   return 0
 
+/- **SC13 — async synchronisation: a mutex, a semaphore and a bounded channel on one carrier.**
+
+Three computations share an async mutex across awaits and their sections do not overlap; an unrelated
+step falls strictly inside the first section; a flood of sends against a bounded channel holds with an
+exact accepted/rejected count beside a channel with room; a semaphore's permits are counted exactly;
+and each primitive's cancellation law is read from a non-parking probe — a cancelled lock waiter is
+not granted the lock, a cancelled receiver consumes no message, a cancelled sender consumes no slot.
+Every comparison is a named field of the mode's one `sync|` record, and every event in its `order`
+field was appended by the actor that caused it, where it happened. Nothing reads a queue or a slot:
+the boundary is the executable's stdout. The mode also prints its own checker's readings on a
+well-formed record and on near misses (`syncctl|`), and a `syncbench|` measurement line that is
+printed and never asserted. -/
+
+/-- The `sync|` record's fields, in the order the mode prints them. -/
+def syncFields : List String :=
+  ["cap", "order", "aResult", "bResult", "sent", "tryAccepted", "tryRejected", "parkedDelivered",
+   "controlAccepted", "controlRejected", "semAccepted", "semRejected", "semAfterRelease",
+   "cancelLockAcquired", "cancelRecvValue", "cancelSendGhost", "cancelSendAccepted", "runUs"]
+
+/-- One field of a `key=value|…` record: its value when the key appears exactly once and nonempty,
+and `none` when it is absent, repeated or empty — so a value is never bound from a neighbour. -/
+def syncField (rec key : String) : Option String :=
+  let vals := (rec.splitOn "|").filterMap (fun tok =>
+    match tok.splitOn "=" with
+    | [k, v] => if k == key then some v else none
+    | _      => none)
+  match vals with
+  | [v] => if v == "" then none else some v
+  | _   => none
+
+/-- A nonempty natural field. -/
+def syncNat (rec key : String) : Option Nat :=
+  (syncField rec key).bind String.toNat?
+
+/-- The record's fields are exactly `syncFields`, in order, each nonempty. -/
+def syncShaped (rec : String) : Bool :=
+  let toks := rec.splitOn "|"
+  toks.length == syncFields.length &&
+  (toks.zip syncFields).all (fun (tok, key) =>
+    match tok.splitOn "=" with
+    | [k, v] => k == key && v != ""
+    | _      => false)
+
+/-- The `order` stream: exactly the six events `a-enter`, `a-exit`, `b-enter`, `b-exit`, `u`, `u`,
+once each; the two sections do not interleave; and a `u` falls strictly inside the first section. The
+relations are read from the events' positions, never from a stream compared to a fixed string. -/
+def syncOrderOk (events : List String) : Bool :=
+  events.length == 6 &&
+  events.count "u" == 2 && events.count "a-enter" == 1 && events.count "a-exit" == 1 &&
+  events.count "b-enter" == 1 && events.count "b-exit" == 1 &&
+  events.all (fun e => e == "u" || e == "a-enter" || e == "a-exit" || e == "b-enter" || e == "b-exit") &&
+  (match events.findIdx? (· == "a-enter"), events.findIdx? (· == "a-exit"),
+         events.findIdx? (· == "b-enter"), events.findIdx? (· == "b-exit") with
+   | some ai, some ax, some bi, some bx =>
+       ai < ax && bi < bx && (ax < bi || bx < ai) &&
+       (let first := if ai < bi then (ai, ax) else (bi, bx)
+        ((List.range events.length).filter (fun i => events.getD i "" == "u")).any
+          (fun i => first.1 < i && i < first.2))
+   | _, _, _, _ => false)
+
+/-- The record satisfies every binding of the contract: both holders' values are distinct and
+present, the bound holds exactly with its affirmative control, every parked send is delivered, the
+semaphore's count is exact, and the three cancellation probes read the expected fields. -/
+def syncOk (rec : String) : Bool :=
+  syncShaped rec &&
+  (match syncField rec "order" with
+   | some o => syncOrderOk (o.splitOn ",")
+   | none   => false) &&
+  (match syncField rec "aResult", syncField rec "bResult" with
+   | some a, some b => a != b
+   | _, _           => false) &&
+  (match syncNat rec "cap", syncNat rec "sent", syncNat rec "tryAccepted", syncNat rec "tryRejected",
+         syncNat rec "parkedDelivered", syncNat rec "controlAccepted", syncNat rec "controlRejected",
+         syncNat rec "semAccepted" with
+   | some cap, some sent, some ta, some tr, some pd, some ca, some cr, some sa =>
+       sent == cap + 1 && ta == cap && tr == 1 && pd == sent && ca == sent && cr == 0 && sa == 2
+   | _, _, _, _, _, _, _, _ => false) &&
+  syncField rec "semRejected" == some "no" &&
+  syncField rec "semAfterRelease" == some "yes" &&
+  syncField rec "cancelLockAcquired" == some "yes" &&
+  syncField rec "cancelRecvValue" == some "present" &&
+  syncField rec "cancelSendGhost" == some "absent" &&
+  syncField rec "cancelSendAccepted" == some "yes"
+
+/-- The checker's verdict as one word, so a reading is `accepted` or `rejected` and nothing else. -/
+def syncReading (b : Bool) : String := if b then "accepted" else "rejected"
+
+/-- A well-formed `sync|` record, built from the record syntax and the expected values rather than
+from the mode's output, so the checker's controls cannot agree with the mode by construction. -/
+def syncGoodRec : String :=
+  "cap=2|order=a-enter,u,a-exit,b-enter,u,b-exit|aResult=7|bResult=9|sent=3|tryAccepted=2|tryRejected=1|parkedDelivered=3|controlAccepted=3|controlRejected=0|semAccepted=2|semRejected=no|semAfterRelease=yes|cancelLockAcquired=yes|cancelRecvValue=present|cancelSendGhost=absent|cancelSendAccepted=yes|runUs=0"
+
+def syncNearOrderOverlap : String :=
+  syncGoodRec.replace "order=a-enter,u,a-exit,b-enter,u,b-exit" "order=a-enter,b-enter,a-exit,b-exit,u,u"
+
+def syncNearUnrelated : String :=
+  syncGoodRec.replace "order=a-enter,u,a-exit,b-enter,u,b-exit" "order=a-enter,a-exit,u,u,b-enter,b-exit"
+
+def syncNearCount : String := syncGoodRec.replace "tryAccepted=2" "tryAccepted=1"
+def syncNearControl : String := syncGoodRec.replace "controlRejected=0" "controlRejected=1"
+def syncNearSemCount : String := syncGoodRec.replace "semAccepted=2" "semAccepted=1"
+def syncNearSemAfter : String := syncGoodRec.replace "semAfterRelease=yes" "semAfterRelease=no"
+def syncNearLock : String := syncGoodRec.replace "cancelLockAcquired=yes" "cancelLockAcquired=no"
+def syncNearRecv : String := syncGoodRec.replace "cancelRecvValue=present" "cancelRecvValue=lost"
+def syncNearSend : String := syncGoodRec.replace "cancelSendGhost=absent" "cancelSendGhost=present"
+
+def syncCtlPair (name near : String) : String :=
+  s!"{name}Near={syncReading (syncOk near)}|{name}Good={syncReading (syncOk syncGoodRec)}"
+
+/-- The mode's own checker readings, on a record whose named relation is broken and on a well-formed
+record: each pair is `rejected` then `accepted` when the checker discriminates. -/
+def syncCtlLine : String :=
+  "syncctl|" ++ String.intercalate "|" [
+    syncCtlPair "orderOverlap" syncNearOrderOverlap,
+    syncCtlPair "unrelatedInside" syncNearUnrelated,
+    syncCtlPair "countExact" syncNearCount,
+    syncCtlPair "controlShows" syncNearControl,
+    syncCtlPair "semCount" syncNearSemCount,
+    syncCtlPair "semAfter" syncNearSemAfter,
+    syncCtlPair "lockProbe" syncNearLock,
+    syncCtlPair "recvProbe" syncNearRecv,
+    syncCtlPair "sendProbe" syncNearSend]
+
+/-- `n` lock/unlock pairs on one mutex, as one computation. -/
+def syncLockPairs (m : LeanIn.Task.Sync.Mutex) : Nat → LeanIn.Task.Async Unit
+  | 0     => pure ()
+  | n + 1 => do
+      LeanIn.Task.Sync.Mutex.lock m
+      LeanIn.Task.Sync.Mutex.unlock m
+      syncLockPairs m n
+
+/-- Yield the rest of this computation as a fresh step on the same carrier, so another computation's step can
+run at the boundary. The task layer exposes no primitive for this, so it is spelled here as `ctx.resume` of a
+continuation. -/
+def syncYield : LeanIn.Task.Async Unit := ⟨fun k ctx => do
+  ctx.resume (LeanIn.Task.Item.ofAction (k ()))⟩
+
+/-- `n` lock/unlock pairs where each pair **holds the permit across a yield**, so two computations running this
+interleave at the mutex: one takes the permit, yields, and the other's non-parking `tryLock` **finds it held** —
+which is the observation recorded in `held`, and the difference between real contention and two chains that each
+run straight through — before parking via `lock` until the first releases. The acquisition is the probe: a
+`tryLock` that succeeds takes the permit exactly as `lock` would, and only a `tryLock` that fails (the permit
+gone, i.e. held by the sibling across its yield) records `held` and then parks. This — not two spawned chains
+that each run straight through — is the case an async mutex exists for. -/
+def syncLockPairsYielding (m : LeanIn.Task.Sync.Mutex) (held : IO.Ref Bool) : Nat → LeanIn.Task.Async Unit
+  | 0     => pure ()
+  | n + 1 => do
+      let got ← LeanIn.Task.Sync.Mutex.tryLock m
+      if got then
+        pure ()
+      else do
+        held.set true
+        LeanIn.Task.Sync.Mutex.lock m
+      syncYield
+      LeanIn.Task.Sync.Mutex.unlock m
+      syncLockPairsYielding m held n
+
+/-- `n` acquires on one semaphore, as one computation. -/
+def syncSemAcquires (s : LeanIn.Task.Sync.Semaphore) : Nat → LeanIn.Task.Async Unit
+  | 0     => pure ()
+  | n + 1 => do
+      LeanIn.Task.Sync.Semaphore.acquire s
+      syncSemAcquires s n
+
+/-- `n` releases on one semaphore, as one computation. -/
+def syncSemReleases (s : LeanIn.Task.Sync.Semaphore) : Nat → LeanIn.Task.Async Unit
+  | 0     => pure ()
+  | n + 1 => do
+      LeanIn.Task.Sync.Semaphore.release s
+      syncSemReleases s n
+
+/-- The `syncbench|` rows: per-op nanoseconds for the uncontended and contended lock, a release that
+wakes `16` parked waiters, the semaphore's acquire and release, and the bounded channel's per-message
+cost beside the same message count through the stock channel in one run. Printed, never asserted.
+
+The contended row runs two computations that each hold the permit across a yield, so they genuinely
+interleave at the mutex — one parks while the other holds it — rather than each running its whole chain inside
+one step. `heldAcrossYield` prints whether that interleaving was **observed**: a non-parking `tryLock` inside
+the yielding chains found the permit already held by the sibling while this computation expected to acquire it.
+It prints `no` rather than being omitted, so a construction that failed to interleave shows as `no` instead of
+going silent. -/
+def syncBench : IO String := do
+  let n := 2000
+  let timeRun (prog : LeanIn.Task.Async Unit) : IO Nat := do
+    let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+    let t0 ← IO.monoNanosNow
+    let _ ← Runtime.run e prog
+    let t1 ← IO.monoNanosNow
+    return t1 - t0
+  let m1 ← LeanIn.Task.Sync.Mutex.new
+  let lockNs ← timeRun (syncLockPairs m1 n)
+  let m2 ← LeanIn.Task.Sync.Mutex.new
+  let heldRef ← IO.mkRef false
+  let contNs ← timeRun (do
+    let h1 ← LeanIn.Task.Async.spawn (syncLockPairsYielding m2 heldRef (n / 2))
+    let h2 ← LeanIn.Task.Async.spawn (syncLockPairsYielding m2 heldRef (n / 2))
+    let _ ← LeanIn.Task.Async.await h1
+    let _ ← LeanIn.Task.Async.await h2)
+  let heldAcross ← heldRef.get
+  let heldStr := if heldAcross then "yes" else "no"
+  let s1 ← LeanIn.Task.Sync.Semaphore.new n
+  let semAcqNs ← timeRun (syncSemAcquires s1 n)
+  let s2 ← LeanIn.Task.Sync.Semaphore.new n
+  let semRelNs ← timeRun (syncSemReleases s2 n)
+  let w := 16
+  let s3 ← LeanIn.Task.Sync.Semaphore.new 0
+  let relNs ← timeRun (do
+    for _ in List.range w do
+      let _ ← LeanIn.Task.Async.spawn (LeanIn.Task.Sync.Semaphore.acquire s3)
+      pure ()
+    LeanIn.Task.Sync.Semaphore.release s3)
+  let cap := n
+  let c1 ← LeanIn.Task.Sync.Channel.new Nat cap
+  let chanOursNs ← timeRun (do
+    for i in List.range n do LeanIn.Task.Sync.Channel.send c1 i
+    for _ in List.range n do
+      let _ ← LeanIn.Task.Sync.Channel.recv c1
+      pure ())
+  let c2 ← Std.Channel.new (some n)
+  let scT0 ← IO.monoNanosNow
+  for i in List.range n do
+    let _ ← IO.wait (← Std.Channel.send c2 i)
+    let _ ← IO.wait (← Std.Channel.recv c2)
+  let scT1 ← IO.monoNanosNow
+  let ours := max 1 (chanOursNs / n)
+  let stdNs := (scT1 - scT0) / n
+  return s!"nsLockUncontended={lockNs / n}|nsLockContended={contNs / n}|heldAcrossYield={heldStr}|nsReleaseWakeW={relNs / w}|nsSemAcquire={semAcqNs / n}|nsSemRelease={semRelNs / n}|nsChanOurs={ours}|nsChanStd={stdNs}|chanRatioPct={stdNs * 100 / ours}"
+
+/-- **SC13's mode.** One invocation, one `Runtime.run`: the mutex clause, the channel flood with its
+control, the semaphore's count, and the three cancellation laws, each probe non-parking so a locked-out
+or lost-value production state prints a field rather than hanging. -/
+def runtimeSync : IO UInt32 := do
+  let hooks ← Runtime.Hooks.new
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let order ← IO.mkRef ([] : List String)
+  let aResultRef ← IO.mkRef (0 : Nat)
+  let bResultRef ← IO.mkRef (0 : Nat)
+  let tryAccRef ← IO.mkRef (0 : Nat)
+  let tryRejRef ← IO.mkRef (0 : Nat)
+  let parkedRef ← IO.mkRef (0 : Nat)
+  let ctlAccRef ← IO.mkRef (0 : Nat)
+  let ctlRejRef ← IO.mkRef (0 : Nat)
+  let semAccRef ← IO.mkRef (0 : Nat)
+  let semRejRef ← IO.mkRef "no"
+  let semAfterRef ← IO.mkRef "no"
+  let lockRef ← IO.mkRef "no"
+  let recvRef ← IO.mkRef "none"
+  let ghostRef ← IO.mkRef "none"
+  let sendAccRef ← IO.mkRef "no"
+  let record (s : String) : IO Unit := order.modify (fun l => l ++ [s])
+  let setNat (r : IO.Ref Nat) (v : Nat) : IO Unit := do r.set v
+  let addNat (r : IO.Ref Nat) (v : Nat) : IO Unit := do r.modify (fun x => x + v)
+  let setStr (r : IO.Ref String) (v : String) : IO Unit := do r.set v
+  let gateResolve (p : IO.Promise (Except IO.Error Unit)) : IO Unit := do p.resolve (Except.ok ())
+
+  let cap := 2
+  let sent := cap + 1
+
+  let m ← LeanIn.Task.Sync.Mutex.new
+  let aGate ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let bGate ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let bReady ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+
+  let unrelatedFirst : LeanIn.Task.Async Unit := do
+    let _ ← Runtime.awaitPromiseE hooks bReady
+    record "u"
+    gateResolve aGate
+  let unrelatedSecond : LeanIn.Task.Async Unit := do
+    record "u"
+    gateResolve bGate
+  let holderB : LeanIn.Task.Async Nat := do
+    gateResolve bReady
+    LeanIn.Task.Sync.Mutex.lock m
+    record "b-enter"
+    let _ ← LeanIn.Task.Async.spawn unrelatedSecond
+    let _ ← Runtime.awaitPromiseE hooks bGate
+    record "b-exit"
+    LeanIn.Task.Sync.Mutex.unlock m
+    return 9
+  let holderA : LeanIn.Task.Async Nat := do
+    LeanIn.Task.Sync.Mutex.lock m
+    record "a-enter"
+    let hb ← LeanIn.Task.Async.spawn holderB
+    let _ ← LeanIn.Task.Async.spawn unrelatedFirst
+    let _ ← Runtime.awaitPromiseE hooks aGate
+    record "a-exit"
+    LeanIn.Task.Sync.Mutex.unlock m
+    let vb ← LeanIn.Task.Async.await hb
+    setNat bResultRef vb
+    return 7
+
+  let program : LeanIn.Task.Async Unit := do
+    let ha ← LeanIn.Task.Async.spawn holderA
+    let va ← LeanIn.Task.Async.await ha
+    setNat aResultRef va
+
+    -- the flood: `sent` non-parking sends against a channel of `cap`, then the same count again with
+    -- `recv` draining as they park; the control channel is the same count into a channel with room.
+    let c ← LeanIn.Task.Sync.Channel.new Nat cap
+    for i in List.range sent do
+      let ok ← LeanIn.Task.Sync.Channel.trySend c (100 + i)
+      addNat (if ok then tryAccRef else tryRejRef) 1
+    let senders ← (List.range sent).mapM (fun i => LeanIn.Task.Async.spawn (do
+      LeanIn.Task.Sync.Channel.send c (200 + i)
+      addNat parkedRef 1))
+    for _ in List.range sent do
+      let _ ← LeanIn.Task.Sync.Channel.recv c
+      pure ()
+    for h in senders do
+      let _ ← LeanIn.Task.Async.await h
+      pure ()
+
+    let ctl ← LeanIn.Task.Sync.Channel.new Nat sent
+    for i in List.range sent do
+      let ok ← LeanIn.Task.Sync.Channel.trySend ctl (300 + i)
+      addNat (if ok then ctlAccRef else ctlRejRef) 1
+
+    -- the semaphore's count: two permits, a third refused, one release, one more admitted.
+    let sem ← LeanIn.Task.Sync.Semaphore.new 2
+    let s1 ← LeanIn.Task.Sync.Semaphore.tryAcquire sem
+    let s2 ← LeanIn.Task.Sync.Semaphore.tryAcquire sem
+    let s3 ← LeanIn.Task.Sync.Semaphore.tryAcquire sem
+    setNat semAccRef ((if s1 then 1 else 0) + (if s2 then 1 else 0))
+    setStr semRejRef (if s3 then "yes" else "no")
+    LeanIn.Task.Sync.Semaphore.release sem
+    let s4 ← LeanIn.Task.Sync.Semaphore.tryAcquire sem
+    setStr semAfterRef (if s4 then "yes" else "no")
+
+    -- (a) a cancelled lock waiter is not granted the lock: this computation holds the mutex, the
+    -- waiter parks on it, the waiter is cancelled, the mutex is released, and a non-parking tryLock
+    -- reads whether the permit is still there.
+    let m2 ← LeanIn.Task.Sync.Mutex.new
+    let wReady ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+    LeanIn.Task.Sync.Mutex.lock m2
+    let w ← LeanIn.Task.Async.spawn (do
+      gateResolve wReady
+      LeanIn.Task.Sync.Mutex.lock m2)
+    let _ ← Runtime.awaitPromiseE hooks wReady
+    Runtime.cancel hooks w ()
+    LeanIn.Task.Sync.Mutex.unlock m2
+    let got ← LeanIn.Task.Sync.Mutex.tryLock m2
+    setStr lockRef (if got then "yes" else "no")
+
+    -- (b) a cancelled receiver consumes no message: the receiver parks on an empty channel, is
+    -- cancelled, one value is sent, and a non-parking tryRecv reads whether it is still there.
+    let rc ← LeanIn.Task.Sync.Channel.new Nat 1
+    let rReady ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+    let r ← LeanIn.Task.Async.spawn (do
+      gateResolve rReady
+      let _ ← LeanIn.Task.Sync.Channel.recv rc
+      pure ())
+    let _ ← Runtime.awaitPromiseE hooks rReady
+    Runtime.cancel hooks r ()
+    LeanIn.Task.Sync.Channel.send rc 42
+    -- The receiver's value is taken by its own stock task once the send resolves its queue entry; that
+    -- task runs on the pool, so the probe waits for a stock completion scheduled after the send before
+    -- reading the channel. The wait is a completion, not a clock.
+    let settle ← IO.asTask (pure (Except.ok () : Except IO.Error Unit)) _root_.Task.Priority.default
+    let _ ← Runtime.awaitTask hooks settle
+    let gotR ← LeanIn.Task.Sync.Channel.tryRecv rc
+    setStr recvRef (match gotR with | some _ => "present" | none => "lost")
+
+    -- (c) a cancelled sender consumes no slot: the sender parks on a full channel, is cancelled,
+    -- one value is drained, and a non-parking trySend reads whether a slot is free and whether the
+    -- cancelled sender's value has appeared.
+    let sc ← LeanIn.Task.Sync.Channel.new Nat 1
+    let _ ← LeanIn.Task.Sync.Channel.trySend sc 901
+    let sReady ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+    let s ← LeanIn.Task.Async.spawn (do
+      gateResolve sReady
+      LeanIn.Task.Sync.Channel.send sc 999)
+    let _ ← Runtime.awaitPromiseE hooks sReady
+    Runtime.cancel hooks s ()
+    let _ ← LeanIn.Task.Sync.Channel.tryRecv sc
+    let sentOk ← LeanIn.Task.Sync.Channel.trySend sc 555
+    let held ← LeanIn.Task.Sync.Channel.tryRecv sc
+    setStr sendAccRef (if sentOk then "yes" else "no")
+    setStr ghostRef (match held with
+      | some v => if v == 999 then "present" else "absent"
+      | none   => "absent")
+    pure ()
+
+  let runAt ← IO.monoNanosNow
+  let _ ← Runtime.run e program
+  let returnedAt ← IO.monoNanosNow
+  let ord ← order.get
+  IO.println s!"sync|cap={cap}|order={String.intercalate "," ord}|aResult={← aResultRef.get}|bResult={← bResultRef.get}|sent={sent}|tryAccepted={← tryAccRef.get}|tryRejected={← tryRejRef.get}|parkedDelivered={← parkedRef.get}|controlAccepted={← ctlAccRef.get}|controlRejected={← ctlRejRef.get}|semAccepted={← semAccRef.get}|semRejected={← semRejRef.get}|semAfterRelease={← semAfterRef.get}|cancelLockAcquired={← lockRef.get}|cancelRecvValue={← recvRef.get}|cancelSendGhost={← ghostRef.get}|cancelSendAccepted={← sendAccRef.get}|runUs={(returnedAt - runAt) / 1000}"
+  IO.println syncCtlLine
+  let bench ← syncBench
+  IO.println s!"syncbench|{bench}"
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -1589,6 +1982,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-drain" :: _ => return ← runtimeDrain
   | "--runtime-cancel" :: _ => return ← runtimeCancel
   | "--runtime-blocking" :: _ => return ← runtimeBlocking
+  | "--runtime-sync" :: _ => return ← runtimeSync
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

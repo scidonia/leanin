@@ -100,6 +100,59 @@ actually needs — ours is single-carrier, so a plain reference is correct and w
 its lock, and the same diagnostic shows why (`253 115 of 800 000` increments survive without it). And the timer
 row is the one that shows the *async* path is genuinely non-blocking while the blocking path is the hole in §4.
 
+### 3.1 The synchronisation primitives (W6), and the one comparison that is not ahead
+
+`nix develop -c lake exe controls --runtime-sync` prints these on its `syncbench|` line, in one invocation and
+never asserted. Each is over n = 2 000 operations: the uncontended lock is n lock/unlock pairs run by one
+computation; the contended row is the same n pairs split across two spawned computations, **each pair holding the
+permit across a yield** so the two genuinely interleave at the mutex — one finds the permit gone and parks while
+the other is in its held section — and the row prints `heldAcrossYield=yes|no` beside the contended figure, the
+observation that the interleaving actually happened: a non-parking `tryLock` inside the yielding chains found the
+permit already held by the other computation while this one expected to acquire it, and it reads `no`, never
+omitted, when it did not; the wake row prices one
+release that wakes 16 parked waiters, per waiter; the semaphore rows are n acquires and n releases, uncontended;
+the channel rows send n values into a **capacity-n** channel and drain them with n receives — capacity n for n
+sends, so the queue reaches its bound only as the last send completes and the send-park path is never exercised —
+and pair our per-message
+figure with the same n messages through `Std.Sync.Channel` **in the same run**, the run computing the ratio
+itself.
+
+| shape | ours | the other one | ours is | source |
+|---|---|---|---|---|
+| lock/unlock, uncontended | 343–667 ns per pair | — | ⚪ no baseline | `--runtime-sync` |
+| lock/unlock, two computations contending (permit held across a yield) | 1 356–2 059 ns per pair | — | ⚪ no baseline | `--runtime-sync` |
+| a release waking 16 parked waiters | 628–1 275 ns per waiter | — | ⚪ no baseline: the design's O(w) wake cost, with no earlier mechanism to divide by | `--runtime-sync` |
+| semaphore acquire / release, uncontended | 69–135 ns / 67–148 ns | — | ⚪ no baseline | `--runtime-sync` |
+| a message through our bounded channel (capacity n with n sends, so it never fills and the send-park path is not priced) | **275–919 ns** | `Std.Sync.Channel`, same run: **187–531 ns** | 🔴 **~1.3–2.3× worse** on the typical run; the run's own `chanRatioPct` reads 44–76 there, and 33–106 across the whole set | `--runtime-sync` |
+
+The lock and semaphore rows are first measurements — the primitives did not exist before W6 — so they carry no
+baseline and are ⚪. `nsLockContended` now reads *above* `nsLockUncontended` (1 356–2 059 ns against 343–667 ns
+per pair across four runs), the direction the shape predicts: each contended pair holds the permit across a
+yield, so one computation finds the permit gone and parks whenever the other is inside its held section, and the
+row prices that park and wake on top of the pair. The construction this replaces — two chains of `lock; unlock`
+with no yield — ran each chain's whole sequence inside one step, so the two never interleaved and the row priced
+two sequential chains plus one spawn and await; its reading fell *below* the uncontended row (140–295 ns), which
+nothing predicted. A direct trace of the corrected shape shows the contention: `A-try` is separated from
+`A-acq` by the other computation's `B-rel`/`B-try`/`B-acq` records, i.e. A's `lock` found the permit gone and
+waited — the case an async mutex exists for. The line carries that evidence itself: its `heldAcrossYield` field
+reads `yes` when the yielding chains' `tryLock` probe finds the permit held — the same observation the trace
+records — so the row states the interleaving happened instead of inferring it from the shape. The wake row below
+— not this one — is where the design's O(w) cost
+is priced. The channel row is the one that is
+not ahead, and the residual is the task layer rather than the queue. The queue used to be a `List` appended under
+the lock — `state.queue ++ [v]`, O(queue length) per send, so O(n²) to fill a capacity-n channel — and it is now a
+two-list FIFO with an explicit size, O(1) amortised in both directions. The reading this row replaces was
+**9.4–14.3 µs** per message against **246–304 ns** for the stock channel in those same runs, the mode's own
+`chanRatioPct` 1–3. After the change the row reads **275–919 ns** ours against **187–531 ns** stock in the same
+runs, and what is left of the gap is not the queue: every send and receive is a step with its item and context
+bookkeeping and a full mutex transaction, where `Std.Sync.Channel` is a straight promise-based hand-off, and that
+per-operation step machinery is the **~1.3–2.3×** the row still reads. The comparison is same-run — both figures
+come from one `syncbench|` line, as §1 requires — and the run's own `chanRatioPct` reads 44–76 on the typical run
+and 33–106 across the whole set, a spread wider than §1's ±30% because the box was shared while these ran (load
+average ~4 on 8 cores, and the lock rows moved up and down with it). At `LEAN_NUM_THREADS=1` the same rows read
+**323–904 ns** for ours against **220–540 ns** for the stock channel, the ratio in the same band; the invocation is
+the one in §6.
+
 ## 4. 🔴 Where we are worse
 
 Stated before anything above it, because it is the honest part of this document. Three rows carry no factor: the
@@ -226,6 +279,8 @@ record is not updated for it.
 | `nix develop -c lake exe controls --runtime-time` | 16 × 50 ms sleeps and their event order, two timeout outcomes, the task layer's first-writer law, and the blocking path for the same sleeps |
 | `nix develop -c lake exe controls --runtime-drain` | a stop with a connection in flight: whether the connection completes after the stop, whether the pool is empty and whether a leaf registration is outstanding when the run returns, and how long the drain takes |
 | `nix develop -c lake exe controls --runtime-cancel` | a disconnect cancelling the work: the counter as it stood in the cancelling step and after the run returns, the work's own registrations before and after, the cancelled handle's outcome, and a second cancellation; plus the cost of the new operation — spawn-and-await against cancelling a parked task — and the registry's size before and after cancelling 200 parked awaits |
+| `nix develop -c lake exe controls --runtime-sync` | the sync primitives' cost (§3.1): lock/unlock uncontended, and contended with the permit held across a yield — the row printing `heldAcrossYield=yes\|no` from the yielding chains' own `tryLock` probe — a release that wakes 16 parked waiters, the semaphore's acquire and release, and a message through the bounded channel beside the same message count through `Std.Sync.Channel` in one run; plus SC13's `sync\|` record and its checker's `syncctl\|` readings |
+| `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-sync` | the same `syncbench\|` rows, and the invocation §3.1's `LEAN_NUM_THREADS=1` channel figures come from — the stock channel beside ours at one pool thread |
 
 ## 7. What these numbers are not
 

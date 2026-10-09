@@ -191,6 +191,26 @@ it when the submitting computation was cancelled. `spawnBlockingE` is the failur
 `Task.Priority.dedicated` (D13), so the layer gains a route rather than a primitive. *This is D13's design, and
 it is built: `Runtime/Blocking.lean`, and SC12 drives it at the public executable.*
 
+**Synchronisation is ours, and it guards no value.** `LeanIn/Task/Sync.lean` gives the task layer an async
+mutex, an async semaphore and a bounded channel. `Mutex.lock`/`unlock` and `Semaphore.acquire`/`release` park
+the *computation*, not the carrier, and `Channel.send`/`recv` are the same: an awaiting operation is a
+`Task.Async`, and one that cannot park (`Mutex.tryLock`, `Semaphore.tryAcquire`, `Channel.trySend`,
+`Channel.tryRecv`) is an `IO` — the same split as `Join.resolve` against `Async.await`. None of them guards a
+value or promises an order. The mutex is one permit and no guard (Lean has no drop hook that could release, so
+`unlock` is explicit), it is not reentrant and carries no owner check, and the order in which waiters are
+admitted is unspecified — §5's "no fairness or priority guarantee" governs here too. `Channel.new` refuses a
+capacity of zero rather than handing back a channel that can serve no sender.
+
+The mechanism is the task layer's own, on `Join` and `ctx.resume` — **not** an adapter over `Std.Sync`, and the
+reason is the cancellation law stated above. An adapter hands a waiter what it asked for *irrevocably*:
+`Std.Sync.Semaphore.release` resolves the waiter's promise (`Std/Sync/Semaphore.lean:76-87`) and
+`Std.Sync.Channel.recv` dequeues the message into the task it returns (`Std/Sync/Channel.lean:542-546`). Our gate
+is `Item.fire`, which skips a cancelled computation's step — but nothing can un-resolve a promise or re-enqueue a
+dequeued message, so a waiter the runtime skips has already consumed the permit or the message. The law forbids
+exactly that: a cancelled waiter is granted nothing and consumes nothing. Our mechanism satisfies it because a
+wake is only a hint — the waiter acquires in its own step, and a skipped wake transfers nothing. *This is D14's
+design, and it is built: `LeanIn/Task/Sync.lean`, and SC13 drives it at the public executable.*
+
 ______________________________________________________________________
 
 ## 5. Deliberately absent
@@ -206,7 +226,9 @@ Each of these is a decision, not an oversight:
 - **No bare `wait`.** Only `awaitUntil`-shaped operations, because A4 permits spurious wakeups. A
   `Condvar.wait` without a predicate should be unrepresentable in `leanin`'s API.
 - **No fairness or priority guarantee.** A1 gives none and A6 gives none. Nothing in the interface may
-  read as promising that a task *will* run, only that it is queued.
+  read as promising that a task *will* run, only that it is queued. This governs §4's sync primitives too:
+  a mutex's or semaphore's waiter order is unspecified, and a channel serves its queue FIFO and its waiters
+  in no promised order.
 - **No atomics.** Not exposed (D4, D7).
 - **No `Send`/`Sync`.** Lean has none; O2 in [`decisions.md`](decisions.md) is unresolved. Until it
   closes, the interface cannot be frozen — this is the one thing that blocks it.

@@ -353,7 +353,9 @@ cannot starve or be starved by the ready queue. `Executor`, `Item` and `Hooks`' 
 has no configuration surface and a default width would be an unstated policy; there is no global or
 lazy pool. The queue is a `List` whose `submit` appends under the lock, so its cost is **O(queue
 length)** — a function of the backlog rather than a constant, which is why the round-trip row keeps the
-queue short. There is no bound on the backlog: bounding it with back-pressure is W6's. A submit to a stopping pool **throws**
+queue short. There is no bound on the backlog: bounding it with back-pressure is a separate item — W6 built the
+mechanism such an item would use, a semaphore with a capacity (D14), but back-pressuring `submit` changes its
+signature and SC12's accounting and needs its own scenario, so it is named rather than silently taken. A submit to a stopping pool **throws**
 rather than enqueuing a job no worker will take, which would hang its awaiter. `shutdownAndWait` drains
 the queue and then waits for every worker to exit, so a job submitted before the shutdown still runs; a
 job that never returns makes that wait unbounded, which is W13's deadline and not a promise here. A
@@ -376,6 +378,86 @@ line to check when a leaf is added, and it lives here rather than only in `Block
 reads a value written before its spawn, reports a tid distinct from the caller's, and is `IO.wait`ed.
 SC12's off-carrier detector reads the same fact where the work ran, and the standing `dedicat` row
 prices a thread per job.
+
+______________________________________________________________________
+
+### D14 — The sync primitives are the task layer's own mechanism on `Join`; the `Std.Sync` adapters are rejected.
+
+**What it is, and where it lives.** `LeanIn/Task/Sync.lean` holds an async mutex, an async semaphore and a
+bounded channel. A `Semaphore` is a permit count and a waiter list under one `Std.Mutex`; a `Mutex` is a
+semaphore of one permit; a `Channel α` is a bounded FIFO queue with a sender list and a receiver list beside it,
+and a capacity the caller supplies — the runtime has no configuration surface, so a default bound would be an
+unstated policy. Awaiting operations (`Mutex.lock`, `Semaphore.acquire`, `Channel.send`, `Channel.recv`) are
+`Task.Async`; operations that cannot park (`Mutex.tryLock`, `Semaphore.tryAcquire`, `Channel.trySend`,
+`Channel.tryRecv`) are `IO` — the same split as `Join.resolve` against `Async.await`. `Channel.new` refuses a
+capacity of zero, loudly, as `BlockingPool.new` refuses a zero width: a channel that can hold no value serves no
+sender, and a rendezvous needs a different shape than a buffer.
+
+**The mechanism, and the one idea it turns on.** A wake is a *hint*, never a hand-off. An operation that cannot
+be served registers its own fresh `Join` (made before the lock, so no lock is taken while holding another) and,
+outside the critical section, parks with `Join.onReady`; its continuation re-enters the operation's step through
+`ctx.resume`, so the retry is a step stamped with the waiting computation's own token
+(`LeanIn/Runtime/Basic.lean:26`). A release — or a `recv` that frees room, or a `send` that fills a slot — takes
+the whole waiter list, clears it inside the critical section, and resolves each taken cell with
+`Join.resolveFirst` *outside* the lock; the woken waiter re-reads the state and either acquires or registers a
+fresh `Join` and parks again. The cost is O(w) wakeups per release where w is the number of parked waiters; it is
+measured (`docs/PERFORMANCE.md` §3.1), and it is not a fairness guarantee.
+
+**Why the `Std.Sync` adapters are rejected.** The workplan's premise was that the semaphore and the channel are
+adapters over what exists. They cannot be, because both stock shapes hand what a waiter asked for to that waiter
+*irrevocably*: `Std.Sync.Semaphore.release` dequeues a waiter and resolves the promise it parked on
+(`Std/Sync/Semaphore.lean:76-87`), so the permit is gone whether or not that waiter ever runs again, and
+`Std.Sync.Channel.recv` dequeues the message into the `Task` it returns (`Std/Sync/Channel.lean:542-546`),
+before any awaiter is resumed. Our cancellation gate is `Item.fire` (`LeanIn/Task/Basic.lean:99-100`), which
+skips a cancelled computation's step — but it cannot un-resolve a promise or re-enqueue a dequeued message, so a
+waiter whose token is set between the hand-off and its resumed step consumes a permit or a message it is never
+granted. This is the milestone's sharpest finding, and it is why W6's "adapters over what exists" sentence is
+corrected. A `Std.Sync.Notify`-based channel is rejected for the same reason in a different shape: `notifyOne`
+resolves one consumer's promise, so a cancelled consumer's notification is lost. A blocking `Std.Sync.Mutex` is
+the other half — `BaseMutex.lock` is `opaque` (`Std/Sync/Mutex.lean:39`), A1's C++ `std::mutex`, so taking it on
+the carrier wedges it.
+
+**The law the mechanism satisfies.** A cancelled waiter is granted nothing and consumes nothing: it was never
+granted a permit (the wake only enqueued a step, and `Item.fire` skips it), and a cancelled sender enqueues
+nothing and a cancelled receiver consumes no message, because each acts only inside its own step. Nothing
+changes in `Hooks`: a sync waiter is a *computation*, not a leaf registration — its wake is produced by another
+computation's step on the carrier — so there is nothing to retire, and `Runtime.pending` therefore does not count
+a parked lock waiter. That residual is stated rather than hidden, and it is what W13's deadline is for.
+
+**What it does not touch, and what it does not promise.** `Sched.Executor`, `Task.Item` and `Hooks` are
+unchanged; items are built with `Item.ofAction` as everywhere else, and the only new item is the retry step,
+stamped by the same `Ctx.resume`. There is **no** `MutexGuard`/RAII release (Lean has no drop hook that could
+release, so a guard would silently never release, and guarding a value stays the caller's business), **no** owner
+or reentrancy check (a mutex is one permit; an `unlock` by a computation that did not `lock` is undetected),
+**no** `close`/`Broadcast`/`select`/`Notify` or cancellation-token surface, and **no** fairness or FIFO promise
+for waiters — the queue is FIFO, the waiter order is not (§5 of [`interface.md`](interface.md)). A capacity of
+zero is refused rather than silently serving nothing.
+
+**The model obligation, stated and deferred.** A semaphore does admit a real invariant — over
+`{ permits : Nat, holders : Nat, waiters : List Id }`, `permits + holders = capacity` under the discipline that
+every acquire is matched by one release, plus the cancel property "a computation whose token is set never
+transitions from parked to holding". It is deferred, with reasons: it would add no primitive (the mechanism is
+one `Std.Mutex` critical section per operation, the same class as the blocking pool, which took no model); the
+safety conjunct is a one-line arithmetic invariant over lists and naturals, and the cancel conjunct is discharged
+by the task layer's *existing* gate — acquisition is a step, and `Item.fire` skips a cancelled computation's
+step, which SC11 already asserts at the boundary; and a model with no refinement theorem proves nothing about the
+code, while the refinement needs the serializability lemma (`docs/primitive-theory.md` §4) applied to the sync
+critical sections — materially larger than W6's acceptance. **Trigger to take it:** before a primitive gains a
+`close`, broadcast or select surface, or before the sync layer is used by a server whose liveness is argued —
+then `LeanIn/Model/Sync.lean` with that invariant and a reachability probe in the idiom of
+`LeanIn/Test/Dynamics.lean`.
+
+**The register and the TCB are unchanged.** The mechanism reaches `Std.Mutex.new`/`atomically` (A1, D7's first
+row) and pure list and natural-number code; it reaches no `IO.Promise`, so it adds no citation and needs no
+control of its own, and `Blocking.lean`'s direct promise reach stays the only one. A direct `IO.Promise` call
+would have owed D7's second row a cited primitive and a control; the waiter-queue mechanism does not, and neither
+does the staged adapter revision that preceded it (it went through `Std.Sync` and
+`Std.Async.AsyncTask.ofPromise`). `Cancel.isSet` is `IO.Ref`-backed and is read *inside* these critical
+sections — the sync layer's only read is the private `live`, called under `st.state.atomically` — while the
+token's *write* (`Cancel.set`, from `Task.cancel`) is the unsynchronized half, taken under no state lock. That
+asymmetry is a pre-existing fact of `Task.Cancel` (`LeanIn/Task/Basic.lean:42-`), whose doc already states that a
+second carrier is where it becomes a race — so the new code inherits that comment rather than adding a new
+instance. Until W8, no sync primitive may be read as cross-carrier-safe.
 
 ______________________________________________________________________
 

@@ -410,12 +410,40 @@ carrier.
 `Task`s, and `Broadcast`/`Notify`/`CancellationToken` are the same shape — so those arrive across W1's seam as an
 ordinary `await`, because a `Promise` or a `Task` *is* the waker substrate. What does not cross is the **OS-lock
 family** — `Mutex`, `RecursiveMutex` and `SharedMutex` are real C++ locks, so taking one blocks the carrier —
-and anything whose only interface is a blocking call. The async mutex is the item; the semaphore and the channel
-are adapters over what exists, and the deliverable should say which is which.
-carrier.
+and anything whose only interface is a blocking call. All three of the mutex, the semaphore and the channel are
+built on the task layer's own `Join` and `ctx.resume` — *not* as adapters over `Std.Sync` — and the reason the
+adapter route is rejected is recorded with the milestone below.
 
 **Acceptance.** Two tasks sharing a mutex across awaits both complete, and a task waiting on it does not stall
 unrelated tasks; a flood scenario where the bounded queue holds and the accepted/rejected counts are exact.
+
+**Met, and the premise it corrected.** `LeanIn/Task/Sync.lean` holds the async mutex, the async semaphore and
+the bounded channel; the scenario is SC13, green on every run —
+`nix develop -c bash tests/executor-contract.sh SC13`, whose record reads two holders' sections non-overlapping
+with an unrelated step falling strictly inside the first, the accepted/rejected counts exact against a bound of
+two with an affirmative control in the same run, and every parked send delivered. The three cancellation laws
+are read through non-parking probes (`tryLock`/`trySend`/`tryRecv`), so no assertion about a primitive depends on
+a watchdog. The milestone's measurement rows are `--runtime-sync`'s `syncbench|` line, recorded with their
+command in `docs/PERFORMANCE.md`; the primitive's classification and the rejected adapter route are in
+`docs/decisions.md` D14 and in the module prose.
+
+The premise at the end of "what is missing" — "the semaphore and the channel are adapters over what exists" — is
+**wrong**, and this milestone is what disproved it. Both stock shapes hand what a waiter asked for to that
+waiter *irrevocably*: `Std.Sync.Semaphore.release` dequeues a waiter and resolves the promise it parked on
+(`Std/Sync/Semaphore.lean:76-87`), so the permit is gone whether or not that waiter ever runs again, and
+`Std.Sync.Channel.recv` dequeues the message into the `Task` it returns (`Std/Sync/Channel.lean:542-546`),
+before any awaiter is resumed. Our cancellation gate is `Item.fire` (`LeanIn/Task/Basic.lean:99-100`), which
+skips a cancelled computation's step — but it cannot un-resolve a promise or re-enqueue a dequeued message, so a
+waiter whose token is set between the hand-off and its resumed step has consumed a permit or a message and is
+never granted it. The deliverable is therefore *our* mechanism on the task layer: an operation registers a fresh
+`Join`, parks on it, and **acquires in its own step** when woken, so a wake is only a hint and a skipped wake
+transfers nothing. An adapter could not satisfy that law, which is why it is rejected rather than layered over.
+
+**What it does not bound.** D13's blocking-pool backlog stays unbounded, and `submit` stays O(queue length). W6
+supplies the mechanism a bounded pool would use — a semaphore with a capacity — but back-pressuring `submit`
+changes its signature and `spawnBlocking`'s shape and changes SC12's accounting, and it is a different
+observable that needs its own scenario. It is therefore a separate item, now unblocked by W6, and D13's row says
+so.
 
 ### W7 — Selection, racing and priority
 

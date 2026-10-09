@@ -288,6 +288,97 @@ trace.
 
 ______________________________________________________________________
 
+### SC13 — async synchronisation: a mutex, a semaphore and a bounded channel on one carrier
+
+**Actor.** A Lean executable client of the task layer (`lake exe controls --runtime-sync`), driving the
+three primitives of `LeanIn/Task/Sync.lean` — an async mutex, an async semaphore and a bounded channel —
+from computations on one `Sched.Executor.new LeanIn.Task.Item 256 1`, with `Runtime.Hooks.new` for the
+fake completions.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC13`, which invokes
+`lake exe controls --runtime-sync` three times and asserts on the one `sync|` record each invocation
+prints, plus the mode's own `syncctl|` checker readings. Nothing here reads a private field, a queue or a
+slot: every compared value is a named field of that record, and every event in its `order` field was
+appended by the actor that caused it, where it happened.
+
+**Given.** A fresh executor (`Sched.Executor.new LeanIn.Task.Item 256 1`) and a fresh `Runtime.Hooks.new`.
+Two `IO.Promise (Except IO.Error Unit)` gates, resolved only by the unrelated computation's own steps — a
+mutex/condvar-shaped handshake, never a timer — and a third such gate which the second holder resolves at the
+start of its step, so the unrelated computation's first step is caused while the first holder still holds the
+mutex. `Sync.Mutex.new`; `Sync.Semaphore.new 0` for the parked acquirers; `Sync.Channel.new k` for a bound `k`
+with `sent = k + 1`, and a second `Sync.Channel.new sent` as the affirmative control. The carrier's tid is read
+on the mode's own thread.
+
+**When.** One invocation, inside one `Runtime.run`. The first holder acquires the mutex, records
+`a-enter`, spawns the second holder and the unrelated computation, and awaits the first gate. The second
+holder records `b-enter` only after it is granted the mutex, spawns the unrelated computation's second
+step inside its own section, and awaits the second gate. The unrelated computation's first step waits on the
+third gate, records `u` and releases the first gate — the only wake that ends the first holder's section — and
+its second step, spawned only from inside the second holder's section, records `u` and releases the second
+gate. Both holders return their own value. Then, on the channel of bound `k`: `sent` non-parking `trySend`s,
+then `sent` `send`s against the full channel, each drained by a `recv` (which the parked senders wait on),
+then the control channel, capacity `sent`, `sent` `trySend`s. Then the semaphore's permits: two
+`tryAcquire`s, a third, one `release`, and a fourth. Then the three cancellation laws, each read from a
+non-parking probe:
+
+1. a holder takes the mutex, a waiter parks on it, the waiter is cancelled, the mutex is released, and a
+   non-parking `tryLock` reads whether the permit is still there;
+2. a receiver parks on an empty channel, is cancelled, one value is sent, and a non-parking `tryRecv`
+   reads whether the value is still there;
+3. a sender parks on a full channel, is cancelled, one value is drained, and a non-parking `trySend`
+   reads whether a slot is free and whether the cancelled sender's value has appeared.
+
+The second law's probe follows a stock completion scheduled after the send, because the receiver's value
+is taken by the receiver's own stock task and that task runs on the pool; the wait is a completion, not a
+clock. The mode then prints the `sync|` record, its `syncctl|` readings and its `syncbench|` line, and
+returns.
+
+**Then.** There is exactly one `sync|` record, and its fields are exactly, in this order with nonempty
+values: `cap`, `order`, `aResult`, `bResult`, `sent`, `tryAccepted`, `tryRejected`, `parkedDelivered`,
+`controlAccepted`, `controlRejected`, `semAccepted`, `semRejected`, `semAfterRelease`,
+`cancelLockAcquired`, `cancelRecvValue`, `cancelSendGhost`, `cancelSendAccepted`, `runUs`. Records are
+parsed by named key; a key absent, repeated or empty fails the check rather than resolving to another
+field. `order` is a comma-separated event stream read as an ordered sequence of exactly the six events
+`a-enter`, `a-exit`, `b-enter`, `b-exit`, `u`, `u`, once each; the order of the two sections relative to
+each other is not asserted, and `aResult`/`bResult` are distinct values the holders returned.
+
+**Both holders complete, and their sections do not overlap:** `aResult` and `bResult` are nonempty and
+distinct, `a-enter` precedes `a-exit` and `b-enter` precedes `b-exit`, and one section lies wholly before
+the other — read from the events' positions, never by comparing the whole stream to a fixed string. **An
+unrelated step does not wait:** a `u` falls strictly between the first section's `-enter` and its
+`-exit`. **The bound holds, exactly:** `sent = cap + 1`, `tryAccepted = cap`, `tryRejected = 1`, with the
+affirmative control `controlAccepted = sent`, `controlRejected = 0`. **Every parked send is delivered:**
+`parkedDelivered = sent`. **The semaphore's permits are exact:** `semAccepted = 2`, `semRejected = no`
+(a third acquirer is refused), and one release admits exactly one more (`semAfterRelease = yes`). **The
+cancellation law holds for each primitive:** `cancelLockAcquired = yes` (a cancelled lock waiter is not
+granted the lock), `cancelRecvValue = present` (a cancelled receiver consumes no message), and
+`cancelSendGhost = absent`, `cancelSendAccepted = yes` (a cancelled sender consumes no slot). `runUs` is
+printed and never asserted on.
+
+The checker is exercised inside the same invocation: it accepts a well-formed record and rejects near
+misses whose `order` overlaps, whose `u` falls outside both sections, whose holder values are empty or
+equal, whose accepted count is one short of the bound, whose control rejected a send, whose admitted
+permit count is one, whose release admitted no one, whose cancelled lock waiter was granted, whose
+cancelled receiver consumed a message, whose cancelled sender consumed a slot, and a record with nothing
+to observe. Every near miss is built from the record syntax and the expectation, never from the mode's
+output, and a control that does not hold is a fixture defect rather than this `Then`. The mode's own
+`syncctl|` readings must hold too: on a record whose named relation is broken the checker says
+`rejected`, and on a well-formed record it says `accepted`. The `Then` must hold in each of the mode's
+three invocations.
+
+**Why, and what it rests on.** The mutex, the semaphore and the bounded channel park a *computation*
+rather than the carrier, and the two clauses of the acceptance are stated by the actors themselves: the
+holders' `-enter`/`-exit` events carry exclusion and the unrelated `u` carries that a waiter does not
+stall other work, and the exact accepted/rejected counts carry that the bound holds. On the revision
+whose bodies are adapters over the stock shapes, the last two probes print `cancelLockAcquired = no` and
+`cancelRecvValue = lost`: a release hands a permit to a waiter irrevocably, and a receive dequeues a
+message into the task it returns, so a waiter the runtime then skips has already consumed it. A mechanism
+whose wake is only a hint and whose waiter acquires in its own step prints `yes` and `present` here;
+those two fields are the scenario's own outcome assertions on unfixed behaviour, and the rest of the
+record holds either way. `syncbench|` is printed and never asserted.
+
+______________________________________________________________________
+
 ### SC12 — blocking jobs run off the carrier, on a bounded pool, without stalling the executor
 
 **Actor.** A Lean executable client of the runtime's blocking pool: four **blocking jobs** submitted through
