@@ -119,8 +119,11 @@ else, and a check in the suite can say so. Everything else in the runtime stays 
 
 ### W2 — Sockets
 
-**Deliverable.** An accept loop and per-connection tasks over `Std.Async.TCP`'s `accept`/`recv?`/`send`,
-reached through W1; a minimal `Runtime.serve`-shaped entry point.
+**Deliverable.** Drive `Std.Async`'s socket operations from our carriers through W1 — `Socket.Server.accept`,
+and `Socket.Client.recv?`/`sendAll` — and an instance of `Std.Http.Transport` over that, so
+`Std.Http.Server.serve` runs on our executor. W10's survey settles that the accept loop is the server's rather
+than ours, so this item is the seam rather than a loop. The default `Socket.Client` transport is the thing
+being adapted, and the channel-backed `Mock` transport is what lets the adaptation be tested without a socket.
 
 **Why Tokio.** `TcpListener`/`TcpStream` and the accept loop are the floor of any network service.
 
