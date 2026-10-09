@@ -66,6 +66,23 @@ def Join.resolve (j : Join α) (v : α) : IO Unit := do
     | none   => set (some v, ([] : List (α → IO Unit))); return st.2
   for k in ks do k v
 
+/-- **Resolve unless it is already resolved**: the first writer wins and a later one is *ignored* rather than a
+defect.
+
+Separate from `resolve` on purpose, and the difference is a law rather than a convenience. `resolve` states
+that a handle has one writer, and is loud when that is broken; this states that several writers may race and
+the result is the first of them, which is what a timeout or a `select`-shaped operation needs and what a
+computation which is simply finishing normally must not rely on. -/
+def Join.resolveFirst (j : Join α) (v : α) : IO Unit := do
+  let ks? ← j.lock.atomically do
+    let st ← get
+    match st.1 with
+    | some _ => return none
+    | none   => set (some v, ([] : List (α → IO Unit))); return some st.2
+  match ks? with
+  | some ks => for k in ks do k v
+  | none    => pure ()
+
 /-- **Register, or run now.** An awaiter that arrives after the value did must not be left waiting: it runs
 immediately, which is also what makes awaiting a finished handle return at once instead of yielding. -/
 def Join.onReady (j : Join α) (k : α → IO Unit) : IO Unit := do

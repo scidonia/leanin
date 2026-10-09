@@ -168,6 +168,32 @@ rows so regressions are visible.
 sleeping `d` finish in about `d`, not N × d (`spike` already measures 64 × 100 ms at 102 ms for
 `Async.sleep`), and a task spawned *while* another sleeps still runs.
 
+**Met.** `LeanIn/Runtime/Time.lean`: `sleep` over `Std.Async`'s timer through W1's seam, and `withTimeout` as
+the race a timeout actually is. The item also carries one addition to the task layer, and it is the interesting
+part: `Join.resolve` states that a handle has one writer and is loud when that is broken, which is right for a
+normal completion and wrong for a race, where two writers are the design and one must lose — so
+`Join.resolveFirst` is that second law, and it is the seed W7's select grows from.
+
+SC8 is the scenario, and the reading is deliberately clock-free: **every one of the sixteen starts precedes the
+first wake**, which is what "they finish in about `d`, not `N × d`" means once a clock is not allowed to decide
+a check. A task spawned while all sixteen sleeps were pending ran before the first wake too, and the two timeout
+outcomes are chosen so that neither depends on how long anything takes.
+
+```
+SC8 ok: sleepers=16 overlap=true lateBeforeWake=true wakes=16 timeoutHit=none timeoutMiss=some:7
+SC8 control: rejected sleeps that occupied the carrier, a late task that did not run, a missed wake and either timeout outcome swapped
+```
+
+**The control earned its keep before the check did.** The first version of the overlap detector required every
+event before the first wake to be a start, and the late spawn sits there — so it read `false` while the measured
+block showed sixteen sleeps completing in 51 ms, and its own control reported that it would equally have
+accepted a blocking-shaped order. The claim is "no start comes after the first wake", which is what the detector
+now tests.
+
+**What is left behind, stated.** A `withTimeout` that returns because its computation finished leaves its timer
+pending until it fires: one parked task, and nothing else. Cancelling it needs a handle on the timer and an
+operation that drops scheduled work, and both are W5's.
+
 ### W10 — The HTTP surface we would actually be reusing
 
 **Deliverable.** A survey of `Std.Http.Server` and its neighbours under `Std/Http/`, answering what decides W9:
@@ -448,7 +474,7 @@ CPS indirection, which is P1.
 | 1 | **W1** leaf seam | met | every leaf — sockets, timers, DNS, channels, `Std.Http` |
 | 2 | **W10** the `Std.Http.Server` survey | met | whether W9 is an integration or an implementation |
 | 3 | **W2** sockets | met (SC7) | any service at all |
-| 4 | **W3** timers | | timeouts, deadlines, keep-alive |
+| 4 | **W3** timers | met (SC8) | timeouts, deadlines, keep-alive |
 | 5 | **W11** buffered I/O helpers | | framing, and any parser |
 | 6 | **W5** safety trio, and cancellation safety | | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |

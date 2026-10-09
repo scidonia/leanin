@@ -1402,6 +1402,94 @@ check_sc7() {
     "$connections" "$server_threads" "$client_among" "$echoes" "$held_before" "$in_flight_after"
 }
 
+# time_ok <record> — W3's observations as a detector, so its own control can reuse it rather than a lookalike:
+# every sleeper started before the first one woke, so the sleeps parked on the timer instead of occupying the
+# carrier; the task spawned while all of them slept ran between those two; each sleeper woke exactly once; and
+# each timeout outcome is the one its inner computation must produce.
+time_ok() {
+  local rec="$1" sl ov lb w hit miss
+  sl="$(field sleepers "$rec")" || return 1
+  ov="$(field overlap "$rec")" || return 1
+  lb="$(field lateBeforeWake "$rec")" || return 1
+  w="$(field wakes "$rec")" || return 1
+  hit="$(field timeoutHit "$rec")" || return 1
+  miss="$(field timeoutMiss "$rec")" || return 1
+  [ "$ov" = "true" ] || return 1
+  [ "$lb" = "true" ] || return 1
+  [ "$w" = "$sl" ] || return 1
+  [ "$hit" = "none" ] || return 1
+  [ "$miss" = "some:7" ] || return 1
+}
+
+# --- SC8 — timers on our carriers: sleeps that park rather than occupy, and timeouts that fire ————————————
+check_sc8() {
+  local out status line ctl sleepers overlap late_before_wakes wakes timeout_hit timeout_miss
+  local ctl_blocking ctl_missing
+  local near
+  local -a records=()
+
+  out="$(bounded lake exe controls --runtime-time)"
+  status=$?
+  check_status SC8 "$status" "lake exe controls --runtime-time"
+  require_header "$out"
+
+  mapfile -t records < <(grep '^time|' <<<"$out" || true)
+  [ "${#records[@]}" -eq 1 ] ||
+    fail "SC8 Then: timer work on the carrier not observed exactly once" \
+      "expected exactly one time| record, saw ${#records[@]}"
+  line="${records[0]}"
+
+  record_is "${line#time|}" sleepers overlap lateBeforeWake wakes timeoutHit timeoutMiss sleepUs ||
+    fail "SC8 Then: timer work on the carrier not observed exactly once" \
+      "the record is not exactly sleepers/overlap/lateBeforeWake/wakes/timeoutHit/timeoutMiss/sleepUs with nonempty values: [$line]"
+
+  # The detector's own control, from the record syntax and the expectation alone.
+  time_ok 'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=some:7|sleepUs=1' ||
+    setup_error "SC8: the timer-observation detector rejected a well-formed record" \
+      "the detectors' own control, not the SC8 Then"
+  for near in \
+    'sleepers=16|overlap=false|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=false|wakes=16|timeoutHit=none|timeoutMiss=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=15|timeoutHit=none|timeoutMiss=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=some|timeoutMiss=some:7|sleepUs=1' \
+    'sleepers=16|overlap=true|lateBeforeWake=true|wakes=16|timeoutHit=none|timeoutMiss=none|sleepUs=1'; do
+    if time_ok "$near"; then
+      setup_error "SC8: the timer-observation detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC8 Then"
+    fi
+  done
+  printf 'SC8 control: rejected sleeps that occupied the carrier, a late task that did not run, a missed wake and either timeout outcome swapped\n'
+
+  ctl="$(grep '^timectl|' <<<"$out" | head -1)"
+  [ -n "$ctl" ] ||
+    setup_error "SC8: the detector controls are missing" "no timectl record in the invocation"
+  record_is "${ctl#timectl|}" blockingOrderOverlaps missingWakeWakes ||
+    setup_error "SC8: the detector-control record is not the expected shape" "control: [$ctl]"
+  bound_field ctl_blocking blockingOrderOverlaps "$ctl" "SC8 control"
+  bound_field ctl_missing missingWakeWakes "$ctl" "SC8 control"
+  bound_field sleepers sleepers "$line" "SC8 Then"
+  [ "$ctl_blocking" = "false" ] ||
+    setup_error "SC8: the overlap detector did not reject a blocking-shaped order" \
+      "blockingOrderOverlaps=$ctl_blocking"
+  [ "$ctl_missing" = "$((sleepers - 1))" ] ||
+    setup_error "SC8: the wake counter did not read one fewer when a wake was removed" \
+      "missingWakeWakes=$ctl_missing against sleepers=$sleepers"
+
+  time_ok "${line#time|}" ||
+    fail "SC8 Then: sleeps were not observed to park on the timer with every sleeper waking" \
+      "record=[$line]"
+
+  bound_field overlap overlap "$line" "SC8 Then"
+  bound_field late_before_wakes lateBeforeWake "$line" "SC8 Then"
+  bound_field wakes wakes "$line" "SC8 Then"
+  bound_field timeout_hit timeoutHit "$line" "SC8 Then"
+  bound_field timeout_miss timeoutMiss "$line" "SC8 Then"
+
+  printf 'SC8 ok: sleepers=%s overlap=%s lateBeforeWake=%s wakes=%s timeoutHit=%s timeoutMiss=%s\n' \
+    "$sleepers" "$overlap" "$late_before_wakes" "$wakes" "$timeout_hit" "$timeout_miss"
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -1410,8 +1498,9 @@ SC4) check_sc4 ;;
 SC5) check_sc5 ;;
 SC6) check_sc6 ;;
 SC7) check_sc7 ;;
+SC8) check_sc8 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8\n' >&2
   exit 2
   ;;
 esac

@@ -4,6 +4,7 @@ import LeanIn.Sched.Executor
 import LeanIn.Runtime.Basic
 import LeanIn.Runtime.Leaf
 import LeanIn.Runtime.Net
+import LeanIn.Runtime.Time
 
 /-!
 # Runtime controls for the bridge axioms
@@ -932,6 +933,62 @@ def executorQueue : IO UInt32 := do
     ++ s!"|remaining={st.1.inFlight}")
   return 0
 
+/-- **W3's evidence: timers on our carriers.**
+
+`n` sleepers and one late spawn, with the *order* of the events doing the work a clock would otherwise be asked
+to do. Every sleeper records that it started before it sleeps and that it woke afterwards, and a task spawned
+while all `n` sleeps are pending records that it ran. If the sleeps occupied the carrier rather than parking on
+a timer, the first sleeper's wake would land between the first two starts — so "everything before the first
+wake is a start" *is* the overlap, read from the recorded order and not from elapsed time. The two timeout
+outcomes are deterministic for the same reason: one inner computation never finishes and must time out, the
+other finishes immediately and must not. The measured row is printed and never asserted, for the reason the
+socket check gives.
+
+Diagnostic: `lake exe controls --runtime-time`. -/
+def runtimeTime : IO UInt32 := do
+  let n := 16
+  let d : Std.Time.Millisecond.Offset := 50
+  let hooks ← Runtime.Hooks.new
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let ev ← IO.mkRef ([] : List String)
+  let firstWakeOf (xs : List String) : Nat :=
+    (xs.findIdx? (fun s => s.startsWith "wake:")).getD xs.length
+  let overlaps (xs : List String) : Bool :=
+    let w := firstWakeOf xs
+    let startsBefore (ys : List String) : Nat := (ys.filter (fun s => s.startsWith "start:")).length
+    w != 0 && startsBefore (xs.take w) == startsBefore xs
+  let wakeCount (xs : List String) : Nat :=
+    (xs.filter (fun s => s.startsWith "wake:")).length
+  let sleeper : Nat → LeanIn.Task.Async Unit := fun i => do
+    ev.modify (· ++ [s!"start:{i}"])
+    Runtime.sleep hooks d
+    ev.modify (· ++ [s!"wake:{i}"])
+  let t0 ← IO.monoNanosNow
+  let _ ← Runtime.run e (do
+    let hs ← (List.range n).mapM (fun i => LeanIn.Task.MonadAsync.spawn (sleeper i))
+    let late ← LeanIn.Task.MonadAsync.spawn (ev.modify (· ++ ["ran:late"]))
+    hs.forM (fun h => LeanIn.Task.MonadAwait.await h)
+    LeanIn.Task.MonadAwait.await late)
+  let t1 ← IO.monoNanosNow
+  let events ← ev.get
+  let firstWake := firstWakeOf events
+  let overlap := overlaps events
+  let lateBeforeWake := decide ((events.findIdx? (· == "ran:late")).getD events.length < firstWake)
+  let wakes := wakeCount events
+  -- the detectors' own controls: the same two readings on deliberately wrong orders
+  let blockingOrder := (List.range 4).flatMap (fun i => [s!"start:{i}", s!"wake:{i}"])
+  let blockingOrderOverlaps := overlaps blockingOrder
+  let missingWakeWakes := wakeCount (events.filter (fun s => s != "wake:0"))
+  let (hit, miss) ← Runtime.run e (do
+    let hit ← Runtime.withTimeout hooks 50 (Runtime.never : LeanIn.Task.Async Unit)
+    let miss ← Runtime.withTimeout hooks 200 (pure 7)
+    return (hit, miss))
+  let hitStr := match hit with | none => "none" | some _ => "some"
+  let missStr := match miss with | none => "none" | some v => s!"some:{v}"
+  IO.println s!"time|sleepers={n}|overlap={overlap}|lateBeforeWake={lateBeforeWake}|wakes={wakes}|timeoutHit={hitStr}|timeoutMiss={missStr}|sleepUs={(t1 - t0) / 1000}"
+  IO.println s!"timectl|blockingOrderOverlaps={blockingOrderOverlaps}|missingWakeWakes={missingWakeWakes}"
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -951,6 +1008,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-async" :: _ => return ← runtimeAsync
   | "--runtime-unit" :: _ => return ← runtimeUnit
   | "--runtime-net" :: _ => return ← runtimeNet
+  | "--runtime-time" :: _ => return ← runtimeTime
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

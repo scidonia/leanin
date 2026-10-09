@@ -288,6 +288,53 @@ trace.
 
 ______________________________________________________________________
 
+### SC8 — timers on our carriers: sleeps that park rather than occupy, and timeouts that fire
+
+**Actor.** A Lean executable client of LeanIn's timer leaf and its timeout combinator: `16` sleepers of 50 ms
+each as steps of one executor driven by one thread, a task spawned while all of them are pending, and two
+`withTimeout` calls whose inner computations are chosen so that the outcome is not a matter of timing.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC8`, which invokes
+`lake exe controls --runtime-time`. The sleeps and the timeouts are the public operations; the check reads the
+event order the client recorded where the events happened, plus the two outcome values, and nothing else.
+
+**Given.** A fresh executor, `16` sleepers on a 50 ms timer, one extra task spawned after them, one inner
+computation that never finishes, and one that finishes immediately.
+
+**When.** In one invocation the client spawns the sleepers, spawns the late task, awaits all of them, and then
+runs the two timeouts. Each sleeper records `start:i` before it sleeps and `wake:i` after; the late task records
+that it ran.
+
+**Then.** There is exactly one `time|` record, and its fields are exactly `sleepers`, `overlap`,
+`lateBeforeWake`, `wakes`, `timeoutHit`, `timeoutMiss` and `sleepUs` in that order with nonempty values.
+
+`overlap` is `true`, and it is the whole point: **every one of the `16` starts precedes the first wake**, so the
+sleeps parked on the timer rather than occupying the carrier. That is the clock-free form of "they finish in
+about `d`, not `N × d`" — an implementation that slept on the carrier would wake the first sleeper between the
+first two starts, and this reading would be `false`. `lateBeforeWake` is `true`: the task spawned while every
+sleeper was pending ran before the first wake, which is the same fact seen from the other side. `wakes` equals
+`sleepers`, so every sleeper did wake, and `timeoutHit` is `none` while `timeoutMiss` is `some:7` — the inner
+computation that never finishes times out, the one that finishes immediately does not, and neither outcome
+depends on how long a run takes. `sleepUs` is printed and never asserted, for the reason SC7 gives.
+
+The detector reading those five conditions is exercised inside the same invocation: it accepts a well-formed
+record and rejects five near misses — `overlap=false`, `lateBeforeWake=false`, `wakes` one short, each timeout
+outcome swapped, and `timeoutMiss=none`. Every near miss is built from the record syntax and the expectation,
+never from the executable's output, and a control that does not hold is a fixture defect rather than this
+`Then`. The executable's own two controls are read from its `timectl|` record and required to hold: its overlap
+detector reads `false` on a deliberately blocking-shaped order (`start,wake,start,wake`), and its wake counter
+reads one fewer than `sleepers` when a wake is removed — the second derived from the record's own `sleepers`
+field rather than retyped.
+
+**Why.** A timer is the leaf a service leans on for every deadline it has, and the claim being checked is not
+that a clock advanced but *where the waiting happened*: on libuv's loop, with the carrier free. Reading that
+from the recorded order rather than from elapsed time is what makes the check survive a loaded machine — and it
+is why the one block that does measure is printed rather than asserted, and why the first version of this
+detector, which demanded that everything before the first wake be a start, was caught by its own control rather
+than by the `Then`.
+
+______________________________________________________________________
+
 ### SC7 — sockets on our carriers: one server thread, and a client that is not on it
 
 **Actor.** A Lean executable server that binds a loopback socket, accepts `16` connections through an accept
