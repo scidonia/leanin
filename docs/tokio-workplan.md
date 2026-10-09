@@ -199,8 +199,10 @@ accepted a blocking-shaped order. The claim is "no start comes after the first w
 now tests.
 
 **What is left behind, stated.** A `withTimeout` that returns because its computation finished leaves its timer
-pending until it fires: one parked task, and nothing else. Cancelling it needs a handle on the timer and an
-operation that drops scheduled work, and both are W5's. What is *not* left untested is the loser's write:
+pending until it fires: one parked task, and nothing else. Cancelling it needs a handle on the timer — the
+`IO.Promise` and `Task` seam is where one would come from — and an operation that drops scheduled work, which
+`Runtime.cancel` now is (W5). What is still missing is the timer's half, so a pending fire is still the loser's
+write to ignore rather than a cancellation to make. What is *not* left untested is the loser's write:
 `firstWins` and `lateTimerIgnored` in SC8's record are the first-writer law itself, the second of them with the
 timer genuinely firing after the winner wrote — and the loud `resolve` in either position would raise out of the
 driver instead, so reaching the record at all is part of that evidence.
@@ -366,8 +368,18 @@ advancing); one connection erroring leaves the others served; and after `stop`, 
 `run` returns, with `remaining = 0`.
 
 The third is met by SC10, which reads the connection's own echo coming back *after* the stop and an empty pool when
-`run` returns. The first two are the cancellation-on-drop half and are not written yet; "a malformed request must
-not panic" is separate again, because a `panic!` aborts rather than raising.
+`run` returns. The first is met by SC11, which reads a disconnect cancelling the work: the counter as it stood in
+the cancelling step and again after the run returns, equal, so no step of a cancelled computation ran afterwards.
+The second clause's half of that is the second connection SC11 serves *after* the cancellation — work the
+cancellation did not touch is unaffected — while "one connection erroring leaves the others served" as its own
+scenario is still to write. `panic!` totality is separate again, because a `panic!` aborts rather than raising.
+
+**Cancellation is explicit, and dropping is not it.** The deliverable above says "dropping a task stops it being
+stepped"; what exists is an operation on a handle. Two facts from the toolchain decide that. A task created by
+`IO.bindTask` "will run even if the last reference to the task is dropped" (`Init/System/IO.lean:266-269`), so
+dropping a registration is not cancellation; and Lean's only drop hook, `IO.CancelToken`'s finalizer, runs on a
+finalizer thread, which cannot carry the deterministic abort law SC11 asserts. Drop-driven cancellation is a stated
+non-goal of this milestone rather than an omission, and the status row says so.
 
 ### W6 — Async synchronisation and backpressure
 
@@ -556,7 +568,7 @@ CPS indirection, which is P1.
 | 3 | **W2** sockets | met (SC7) | any service at all |
 | 4 | **W3** timers | met (SC8) | timeouts, deadlines, keep-alive |
 | 5 | **W11** buffered I/O helpers | collapsed into W9 — the codec frames and buffers its own bytes | — |
-| 6 | **W5** safety trio, and cancellation safety | the error channel is in (SC9) and a stop drains a connection in flight (SC10); cancellation on drop to go | operability: disconnect, failure, signal |
+| 6 | **W5** safety trio, and cancellation safety | the error channel is in (SC9), a stop drains a connection in flight (SC10), and a disconnect cancels the work (SC11) — by an explicit operation rather than by dropping; `panic!` totality to go | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | | the product |

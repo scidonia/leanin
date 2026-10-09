@@ -17,8 +17,10 @@ file adds to the task layer.
 
 **The timer is not cancelled when the computation wins.** A `withTimeout` that returns because its computation
 finished leaves the timer pending until it fires, which costs one parked task and nothing else. Cancelling it
-needs a handle on the timer and an operation that drops scheduled work, and both are W5's item rather than this
-one — so this is a combinator that is correct about its *result* and honest about what it leaves behind.
+needs a handle on the timer — the promise and `Task` seam is where one would come from, and it is W7's item — and
+the operation that drops scheduled work, which is `Runtime.cancel` (W5). So this is a combinator that is correct
+about its *result* and honest about what it leaves behind: what it leaves is a timer that will fire with nobody
+waiting, rather than a cancellation.
 -/
 
 namespace LeanIn.Runtime
@@ -45,6 +47,7 @@ def withTimeout (hooks : Hooks) (d : Std.Time.Millisecond.Offset) (a : Task.Asyn
   Task.background (do
     sleep hooks d
     Task.Join.resolveFirst cell none)
-  Task.Async.await (show Task.Task (Option α) from ⟨cell⟩)
+  let token ← (Task.Cancel.new : IO Task.Cancel)
+  Task.Async.await (show Task.Task (Option α) from ⟨cell, token⟩)
 
 end LeanIn.Runtime

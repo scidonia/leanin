@@ -597,7 +597,7 @@ def runtimeOps : IO UInt32 := do
     let r := (full.keepFirst (256 / 2)).push 0
     if r.size ≠ 256 / 2 + 1 then IO.println "overflow kept the wrong count"
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1
-  let item : LeanIn.Task.Item := ⟨pure ()⟩
+  let item : LeanIn.Task.Item := LeanIn.Task.Item.ofAction (pure ())
   let spawnNs ← best do for _ in List.range k do e.spawn item
   let e2 ← Sched.Executor.new LeanIn.Task.Item 256 1
   let submitNs ← best do for _ in List.range k do e2.submit item
@@ -672,7 +672,7 @@ def runtimeUnit : IO UInt32 := do
       let t1 ← IO.monoNanosNow
       if b == 0 || t1 - t0 < b then b := t1 - t0
     return b / k
-  let item : LeanIn.Task.Item := ⟨pure ()⟩
+  let item : LeanIn.Task.Item := LeanIn.Task.Item.ofAction (pure ())
   let m ← Std.Mutex.new ({ pool := LeanIn.Sched.emptyPool LeanIn.Task.Item 256,
                             sched := LeanIn.Sched.Scheduler.initial 1 } :
                           LeanIn.Sched.State LeanIn.Task.Item 256)
@@ -733,7 +733,7 @@ def runtimeNet : IO UInt32 := do
     Runtime.echoConn hooks c
   -- the control: the pool holds work only until a carrier takes it, so the reader is shown a queue nothing is
   -- draining. These three no-op items are taken first when the driver starts, and they change nothing else.
-  for _ in List.range 3 do e.submit ⟨pure ()⟩
+  for _ in List.range 3 do e.submit (LeanIn.Task.Item.ofAction (pure ()))
   let (heldBefore, _) ← e.observe
   let server ← IO.asTask (Runtime.run e (do
     srvTids.modify (· ++ [← IO.getTID])
@@ -1014,7 +1014,8 @@ def runtimeTime : IO UInt32 := do
     let cell ← LeanIn.Task.Join.new
     LeanIn.Task.Join.resolveFirst cell (some 1)
     LeanIn.Task.Join.resolveFirst cell (some 2)
-    let first ← LeanIn.Task.Async.await (show LeanIn.Task.Task (Option Nat) from ⟨cell⟩)
+    let token ← (LeanIn.Task.Cancel.new : IO LeanIn.Task.Cancel)
+    let first ← LeanIn.Task.Async.await (show LeanIn.Task.Task (Option Nat) from ⟨cell, token⟩)
     let late ← Runtime.withTimeout hooks 5 (pure 7)
     Runtime.sleep hooks 40
     return (first, late))
@@ -1074,28 +1075,213 @@ def runtimeConnect : IO UInt32 := do
   IO.println s!"connect|refused={refusedStr}|accepted={acceptedStr}|listener={stillBound}"
   return 0
 
-/- The shutdown probe that lived here is now `--runtime-drain` below, and the reason it hung was a real bug rather
-than a puzzle: `Runtime.blockOn` ended the driver as soon as the pool was empty and the executor was stopping, and
-a stopped executor still holds work as continuations registered on leaves — those are not in the pool by
-construction, because an awaited leaf yields and queues nothing. `Runtime.run` then threw "the driver stopped
-before the computation finished", the connection's continuation was never resumed, and the client hung in `recv`.
-The model's shutdown says *drain*; the driver aborted. That is fixed in `blockOn`, and this mode is the reading
-that shows it. -/
+/- **The cancellation: does a disconnect stop the work, and is a cancelled registration retired?**
 
-/- **The drain: does the loop return its own value after a stop, with nothing to serve?**
+SC11 drives this. One process, three actors on one executor: a **work** computation that counts and then parks on
+a leaf; the **watcher**, which is the run's own computation — it accepts the first connection, awaits the peer
+leaving, and in that same step reads the counter and cancels the work; and a **second connection**, served after
+the cancellation and echoed.
 
-This started as the first rung of a ladder — the loop with no connections at all, so that `tryAccept` returns
-`none`, the poll sleeps, and the stop flag is the only thing that can end it — and it is what found the bug: the
-run came back as `error: Runtime.run: the driver stopped before the computation finished`, because `blockOn` ended
-the driver when the pool was empty and the executor was stopping, abandoning work held as continuations on
-leaves. Fixed there, this reads `stopping-before=false`, `stopping-after=true`, `returned=true` with the loop's
-own value, and returns in 95 µs to 1.0 ms — the poll interval bounding it, which is W7's absence showing through.
+The assertion is `counterAtCancel = counterFinal`: no step of a cancelled computation runs after the cancellation
+was requested. It is the abort law rather than a timing claim — the counter is read in the cancelling step and
+again after the run returns, so no clock enters it, and the leaf is resolved *after* the cancellation, so the
+resumed step is one that would otherwise run.
 
-What it does not cover is the server-shaped half: a connection in flight when the stop arrives, completing rather
-than being dropped. That wants a scenario, and this is its control.
+`pendingAtCancel` and `pendingAfterCancel` are the registry's half. The work is parked when the cancellation
+arrives, so a registration of its own is outstanding; once the computation it belongs to is gone it must not go on
+being counted as work in flight. The second leaf is what makes that visible: it never completes, so a step of the
+cancelled computation that ran would leave a registration behind for good.
 
-A diagnostic, not a scenario: the sleep of 20 ms that gives the loop time to reach its first poll is a clock, and
-a scenario may not use one. -/
+`runUs` is printed and never asserted: the drain's latency is the poll interval, which is W7's absence rather than
+a property of cancellation. -/
+def runtimeCancel : IO UInt32 := do
+  let hooks ← Runtime.Hooks.new
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let counter ← IO.mkRef (0 : Nat)
+  -- The leaf the work parks on, resolved by the watcher *after* it cancels.
+  let gate ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  -- The leaf that never completes: the work reaches it only if a cancelled step ran, so its registration is what
+  -- makes "not counted as in flight" observable rather than assumed.
+  let dead ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let workRes ← IO.mkRef (none : Option (Except IO.Error Unit))
+  let workTok ← IO.mkRef (none : Option LeanIn.Task.Cancel)
+  let pendingAfterRef ← IO.mkRef (0 : Nat)
+  let disconnectRef ← IO.mkRef "no"
+  let secondRef ← IO.mkRef "no"
+  let atCancelRef ← IO.mkRef (0 : Nat)
+  let pendingAtRef ← IO.mkRef (0 : Nat)
+  let doubleRef ← IO.mkRef "no"
+  let l ← Runtime.Listener.bind (Runtime.loopback 0)
+  let keep ← IO.mkRef l
+  let addrRef ← IO.mkRef (none : Option Std.Net.SocketAddress)
+  -- The new operation, measured: the fields are the plan's (`§5`), and every figure comes from a loop of its own
+  -- inside one run, so nothing about the machine's state between runs enters them.
+  --
+  --   hooksAwaits / hooksCancelled  the registry's *live* registrations with N awaits in flight, and after those N
+  --                                 are cancelled; registrySize is the same registry by list length, which the
+  --                                 entries of a cancelled computation no longer appear in at all
+  --   nsAwait                       spawn and await, without a cancellation
+  --   nsCancel, and its three parts  the token set, the `resolveFirst`, and the retire, each measured alone
+  --
+  -- Two corrections are baked in, both found by measurement rather than by reading. A bare statement of a
+  -- computation in this monad is not run, so the parkers get an explicit await before they are counted. And the
+  -- promise they await is held by a reference this function reads *after* the run: a `Promise` whose last reference
+  -- is dropped makes its task finish with `none`, so the first version of this bench was cancelling two hundred
+  -- computations that had already completed, and counting a registry of dead entries as though it were in flight.
+  -- That is the same lifetime rule SC9 and SC10 found for sockets, here for a promise.
+  let benchN := 200
+  let benchE ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let benchHooks ← Runtime.Hooks.new
+  let never ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let hold ← IO.mkRef (some never)
+  let benchProg : LeanIn.Task.EAsync IO.Error String := do
+    let clock : IO Nat := IO.monoNanosNow
+    let t0 ← monadLift clock
+    for _ in List.range benchN do
+      let h ← LeanIn.Task.MonadAsync.spawn (pure ())
+      let _ ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await h)
+      pure ()
+    let t1 ← monadLift clock
+    -- The loop cancels a computation that will never finish on its own, so the cancellation's `resolveFirst` is
+    -- that cell's only writer. Cancelling one that *can* finish would make production without the gate — the state
+    -- this mode must still be able to run, because the scenario's red lives there — resolve the same cell twice,
+    -- which `Join.resolve` is loud about. Awaiting the handle here would be worse still: it would make the whole
+    -- mode depend on the gate being present, which is what a red must not do.
+    for _ in List.range benchN do
+      let h ← LeanIn.Task.MonadAsync.spawn (LeanIn.Task.EAsync.ofAsync (Runtime.never : LeanIn.Task.Async Unit))
+      monadLift (Runtime.cancel benchHooks h (.error (.userError "bench")) : IO Unit)
+      pure ()
+    let t2 ← monadLift clock
+    let ran ← monadLift (IO.mkRef (0 : Nat) : BaseIO (IO.Ref Nat))
+    let parkers ← (List.range benchN).mapM (fun _ =>
+      LeanIn.Task.MonadAsync.spawn (do
+        monadLift (ran.modify (· + 1) : BaseIO Unit)
+        Runtime.awaitPromiseE benchHooks never))
+    let _ ← LeanIn.Task.EAsync.ofAsync (Runtime.sleep benchHooks 20)
+    let awaits ← monadLift (Runtime.pending benchHooks : IO Nat)
+    let size ← monadLift (Runtime.Hooks.size benchHooks : IO Nat)
+    let ranN ← monadLift (ran.get : IO Nat)
+    -- The parts of a cancellation, each alone. The retire runs over the registry as it stands — the N parkers'
+    -- entries — which is the shape a cancellation meets: one scan of the list it is about to shorten.
+    let one ← LeanIn.Task.MonadAsync.spawn (pure ())
+    let t3 ← monadLift clock
+    for _ in List.range benchN do monadLift (one.token.set : BaseIO Unit)
+    let t4 ← monadLift clock
+    let cell ← monadLift (LeanIn.Task.Join.new : IO (LeanIn.Task.Join Unit))
+    for _ in List.range benchN do monadLift (LeanIn.Task.Join.resolveFirst cell () : IO Unit)
+    let t5 ← monadLift clock
+    for _ in List.range benchN do monadLift (Runtime.Hooks.retire benchHooks : IO Unit)
+    let t6 ← monadLift clock
+    for h in parkers do
+      monadLift (Runtime.cancel benchHooks h (.error (.userError "bench")) : IO Unit)
+    let cancelled ← monadLift (Runtime.pending benchHooks : IO Nat)
+    return s!"hooksAwaits={awaits}|hooksCancelled={cancelled}|registrySize={size}|nsAwait={(t1 - t0) / benchN}|nsCancel={(t2 - t1) / benchN}|nsCancelFlag={(t4 - t3) / benchN}|nsCancelResolve={(t5 - t4) / benchN}|nsCancelRetire={(t6 - t5) / benchN}|parkersRan={ranN}"
+  let benchOut ← Runtime.run benchE benchProg
+  let benchStr := match benchOut with
+    | .ok s => s
+    | .error _ => "failed"
+  -- A use after the run, so the promise outlives the parkers that await it.
+  let _held ← hold.get
+  IO.println s!"cancelbench|{benchStr}"
+  let runAt ← IO.mkRef (0 : Nat)
+  runAt.set (← IO.monoNanosNow)
+  let payload : ByteArray := "cancel me".toUTF8
+  let program : LeanIn.Task.EAsync IO.Error Unit := do
+    let a ← monadLift (Runtime.Listener.sockName (← keep.get) : IO Std.Net.SocketAddress)
+    addrRef.set (some a)
+    let work : LeanIn.Task.EAsync IO.Error Unit := do
+      counter.modify (· + 1)
+      let _ ← Runtime.awaitPromiseE hooks gate
+      counter.modify (· + 1)
+      let _ ← Runtime.awaitPromiseE hooks dead
+      pure ()
+    let handle ← LeanIn.Task.MonadAsync.spawn work
+    workTok.set (some handle.token)
+    let c1 ← Runtime.Listener.accept (← keep.get) hooks
+    -- The first connection is served by watching its read side: the peer closing *is* the disconnect, and no
+    -- clock is involved. The work was spawned before this step, so it is parked by the time the peer leaves.
+    let arrived ← Runtime.Conn.recv c1 hooks
+    disconnectRef.set (if arrived == none then "yes" else "no")
+    let atCancel ← counter.get
+    let tok ← workTok.get
+    let ofWork (k : LeanIn.Task.Cancel) : LeanIn.Task.EAsync IO.Error Nat :=
+      monadLift (Runtime.pendingFor hooks k : IO Nat)
+    let pendingAt ← match tok with
+      | some tk => ofWork tk
+      | none    => pure 0
+    atCancelRef.set atCancel
+    pendingAtRef.set pendingAt
+    monadLift (Runtime.cancel hooks handle (.error (.userError "canceled")) : IO Unit)
+    let afterCancel ← match tok with
+      | some tk => ofWork tk
+      | none    => pure 0
+    pendingAfterRef.set afterCancel
+    let ok : Except IO.Error Unit := .ok ()
+    monadLift (IO.Promise.resolve ok gate : BaseIO Unit)
+    let secondTry ← try
+        monadLift (Runtime.cancel hooks handle (.error (.userError "canceled")) : IO Unit)
+        pure "ok"
+      catch _ => pure "raised"
+    doubleRef.set secondTry
+    -- The second connection: accepted and echoed after the cancellation, which is W5's second clause.
+    let c2 ← Runtime.Listener.accept (← keep.get) hooks
+    match ← Runtime.Conn.recv c2 hooks with
+    | some bs =>
+      Runtime.Conn.send c2 hooks bs
+      -- The payload is compared rather than assumed: "served" here means the echo came back, not only that the
+      -- connection was accepted.
+      secondRef.set (if bs == payload then "yes" else "no")
+    | none => secondRef.set "no"
+    let res ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await handle)
+    workRes.set (some res)
+    pure ()
+  let server ← IO.asTask (Runtime.run e program) _root_.Task.Priority.dedicated
+  let addr ← do
+    let mut a : Option Std.Net.SocketAddress := none
+    while a.isNone do a ← addrRef.get
+    pure (a.getD (Runtime.loopback 0))
+  let echoed ← Std.Async.Async.block do
+    let c ← Std.Async.TCP.Socket.Client.mk
+    c.connect addr
+    c.shutdown
+    let c2 ← Std.Async.TCP.Socket.Client.mk
+    c2.connect addr
+    c2.send payload
+    let got ← c2.recv? 65536
+    c2.shutdown
+    return got
+  let outcome ← IO.wait server
+  let returnedAt ← IO.monoNanosNow
+  let counterFinal ← counter.get
+  let _stillBound ← Runtime.Listener.sockName (← keep.get)
+  let cancelledStr :=
+    match ← workRes.get with
+    | some (.error _) => "canceled"
+    | some (.ok _)    => "ok"
+    | none            => "none"
+  let _echoed ← IO.mkRef echoed
+  match outcome with
+  | .error err        => IO.println s!"cancel|failed={err}"; return 1
+  | .ok (.error err)  => IO.println s!"cancel|failed={err}"; return 1
+  | .ok (.ok ()) =>
+    IO.println s!"cancel|disconnect={← disconnectRef.get}|second={← secondRef.get}|counterAtCancel={← atCancelRef.get}|counterFinal={counterFinal}|pendingAtCancel={← pendingAtRef.get}|pendingAfterCancel={← pendingAfterRef.get}|cancelled={cancelledStr}|doubleCancel={← doubleRef.get}|runUs={(returnedAt - (← runAt.get)) / 1000}"
+    return 0
+
+/- **The drain: does a stop, with a connection in flight, return the loop's own value?**
+
+It began as the first rung of a ladder — the loop with no connections at all, so that `tryAccept` returns `none`,
+the poll sleeps, and the stop flag is the only thing that can end it. That rung found a real bug: the run came
+back as `error: Runtime.run: the driver stopped before the computation finished`, because `blockOn` ended the
+driver as soon as the pool was empty and the executor was stopping, and a stopped executor still holds work as
+continuations registered on leaves — those are not in the pool by construction, because an awaited leaf yields
+and queues nothing. Fixed in `blockOn`, it now reads the server-shaped half too: the served connection stops the
+executor from *inside* the body, so a connection is in flight when the stop arrives by construction rather than by
+a race with the accept, and the record reads `served=1 echoed=yes inFlightAfter=0 pendingHooks=0` — the
+connection's own echo coming back after the stop, an empty pool, and no leaf registration left outstanding.
+
+`drainUs` is recorded and never asserted on: the poll interval bounds the drain, and that interval is W7's
+absence showing through rather than a property of this mode. A diagnostic, not a scenario — SC10 is the scenario,
+and this mode is the reading its control is built on. -/
 def runtimeDrain : IO UInt32 := do
   let hooks ← Runtime.Hooks.new
   let l ← Runtime.Listener.bind (Runtime.loopback 0)
@@ -1170,6 +1356,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-time" :: _ => return ← runtimeTime
   | "--runtime-connect" :: _ => return ← runtimeConnect
   | "--runtime-drain" :: _ => return ← runtimeDrain
+  | "--runtime-cancel" :: _ => return ← runtimeCancel
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

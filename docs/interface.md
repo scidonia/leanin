@@ -139,8 +139,8 @@ Ours (D3), because `Std.Async` cannot be reused — it is `BaseIO (MaybeTask α)
 delegates to `Task` (`Basic.lean:327,389,432,456,463,474`).
 
 ```lean
-structure Task (α : Type) where       -- a handle: state, continuation, join cell
-structure Async (α : Type) where ...  -- a scheduleable computation
+structure Task (α : Type) where       -- a handle: its join cell and its cancellation token
+structure Async (α : Type) where ...  -- a scheduleable computation, given its own token and its scheduling function
 ```
 
 with instances so that generic code works over either implementation:
@@ -149,6 +149,20 @@ with instances so that generic code works over either implementation:
 instance : MonadAsync Task Async
 instance : MonadAwait Task Async
 ```
+
+**Cancellation is part of the layer.** A handle carries a token, and cancelling it states and delivers two things:
+**no step of a cancelled computation runs after the cancellation is requested**, and **an awaiter of a cancelled
+handle is woken with the cancellation exactly once, immediately**. The first is enforced where a step is run — the
+executor's item — rather than polled by the computation, because a leaf cannot be cancelled (the runtime runs a
+`bindTask`-created task even when its last reference is dropped) and a computation that never checks must stop
+anyway. The second is `resolveFirst`: a computation that has already produced its value keeps it, so a cancellation
+never replaces a value that exists, and one that arrives first is delivered once. Registration entries carry the
+token of the computation that left them, so a cancellation retires its own work's entries rather than only stopping
+new steps from being scheduled.
+
+**A cancellation does not reach a child.** Each spawned computation has its own token, and an item a child schedules
+carries the child's token, so cancelling a parent leaves it running — `abort` rather than structured cancellation. A
+computation that wants its children to stop with it has to cancel them.
 
 `concurrently` and `background` are then written **once, generically**, against
 `MonadAsync`/`MonadAwait` — which is the point of the classes existing, and they are the two combinators this
@@ -163,8 +177,8 @@ decision, and until it is made `race` is in [§5](#5-deliberately-absent) rather
 **Leaf operations are not ours.** Timers, sockets, DNS, signals and processes stay in `Std.Async` and
 are reached across one bridge: an external event attaches a continuation that pushes into `inject`
 and notifies — Tokio's `wake()` → `inject.push` + `unpark`
-(`scheduler/current_thread/mod.rs:734`). Our task bodies are never `Task`s. *This bridge is D3/O3:
-proposed, must be spiked.*
+(`scheduler/current_thread/mod.rs:734`). Our task bodies are never `Task`s. *This bridge is D3/O3, and it is built:
+`Runtime/Leaf.lean` is the whole of it, and SC7, SC9 and SC10 drive it at the public executable.*
 
 ______________________________________________________________________
 
@@ -174,7 +188,10 @@ Each of these is a decision, not an oversight:
 
 - **No `race`.** Awaiting the first of several handles needs a `select`-shaped operation, because `await`
   names one handle; the surface has no such operation, so §4's combinators are `concurrently` and
-  `background`. The loser's cancellation is a separate absence and not the reason for this one.
+  `background`. The loser's cancellation is no longer a separate absence — `Runtime.cancel` drops a
+  computation's scheduled work and wakes its awaiter (`tokio-workplan.md`, W5) — and `race` is still absent
+  for the reason it always was: awaiting *any* of several needs the operation itself, not only a way to
+  abandon the others. The timer's own handle is the other half still missing (W7).
 - **No bare `wait`.** Only `awaitUntil`-shaped operations, because A4 permits spurious wakeups. A
   `Condvar.wait` without a predicate should be unrepresentable in `leanin`'s API.
 - **No fairness or priority guarantee.** A1 gives none and A6 gives none. Nothing in the interface may

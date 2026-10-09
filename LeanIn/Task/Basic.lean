@@ -10,7 +10,7 @@ import LeanIn.Sched.Executor
 Three pieces:
 
 * `Item` is what the executor holds: one step of some computation, ready to run.
-* `Async α` is a **scheduleable computation**, in continuation-passing style: `step k resume` runs it until it
+* `Async α` is a **scheduleable computation**, in continuation-passing style: `step k ctx` runs it until it
   either finishes — calling `k` — or reaches something it must wait for, in which case it registers a
   continuation and returns. It never blocks the thread, which is what makes a single carrier enough.
 * `Task α` is the **handle**: the cell its value lands in, and where an awaiter leaves its continuation.
@@ -32,13 +32,72 @@ the interface rather than from the layout.
 
 namespace LeanIn.Task
 
+/-- **A computation's cancellation token.** One flag, with the two operations a cancellation needs: `set`, which
+is what requesting one does, and `isSet`, which is what a step asks before running.
+
+The id is here so that a question can be asked *about one computation* — how many registrations it still holds —
+rather than about the runtime, whose total includes every other computation's and is not stable at the moment of a
+read. `BaseIO` and not `IO` for the flag, because the read happens on a step's path and scheduling is `BaseIO`;
+idempotent, because a cancellation is a request rather than a state transition, so a second one is not a defect. -/
+structure Cancel where
+  flag : IO.Ref Bool
+  id : Nat
+
+namespace Cancel
+
+/-- The token allocator, module-level because a token is made wherever a computation is spawned, by code that owns
+no runtime. The read and the write are not atomic: with one carrier every spawn runs on that carrier, so nothing
+interleaves them, and a second carrier is where this becomes a race to fix rather than a comment to keep. An id
+only has to distinguish the tokens alive at one moment. -/
+initialize counter : IO.Ref Nat ← IO.mkRef 0
+
+def new : IO Cancel := do
+  let n ← counter.get
+  counter.set (n + 1)
+  return ⟨← IO.mkRef false, n⟩
+
+def set (c : Cancel) : BaseIO Unit := c.flag.set true
+
+def isSet (c : Cancel) : BaseIO Bool := c.flag.get
+
+end Cancel
+
 /-- **One unit of scheduled work**: a step of some computation, ready to run. Named rather than a bare
 `IO Unit` so that the executor's item type has an `Inhabited` instance, which the pool's ghost view needs. -/
 structure Item where
-  /-- Run this step. -/
-  run : IO Unit
+  /-- The token of the computation this step belongs to, or `none` for a step no cancellation reaches — the
+  driver's, or one submitted straight to an executor. -/
+  cancel : Option Cancel
+  /-- The action this step runs, when it is not cancelled. -/
+  act : IO Unit
 
-instance : Inhabited Item := ⟨⟨pure ()⟩⟩
+instance : Inhabited Item := ⟨⟨none, pure ()⟩⟩
+
+/-- **This step, stamped with a token if it does not have one.**
+
+A step built inside a computation is bare, so the first stamping function it meets is its own computation's, and
+the ones it meets afterwards leave it alone. That ordering is what gives the identities: an item a computation
+enqueues belongs to that computation, and an item it hands to its parent's function keeps the inner token. -/
+def Item.stamp (it : Item) (c : Cancel) : Item :=
+  match it.cancel with
+  | some _ => it
+  | none   => { it with cancel := some c }
+
+/-- **A step before its computation stamps it.** -/
+def Item.ofAction (act : IO Unit) : Item := ⟨none, act⟩
+
+/-- **Whether this step is cancelled.** -/
+def Item.cancelled (it : Item) : IO Bool :=
+  match it.cancel with
+  | some c => c.isSet
+  | none   => return false
+
+/-- **Run a step.** The check is here, at the one place every carrier runs a step through, so a cancelled
+computation's steps are skipped whether they were enqueued before the cancellation or after it — the difference
+between this and a flag the computation itself has to poll. Skipping is not running a no-op: nothing of the
+computation executes. -/
+def Item.fire (it : Item) : IO Unit := do
+  unless ← it.cancelled do it.act
 
 /-- **The join cell**: what a handle is. The value once there is one, and the continuations left by whoever
 awaited it before then.
@@ -95,25 +154,37 @@ def Join.onReady (j : Join α) (k : α → IO Unit) : IO Unit := do
   | some v => k v
   | none   => pure ()
 
+/-- **What a step is given**: its own cancellation token, and how to schedule an item.
+
+Both travel together and mean the same thing — the computation is what a cancellation stops and what a
+registration belongs to — so they are one parameter rather than two. The token being a *field* here is what lets a
+leaf await attribute its registration to the computation that is waiting, which is the difference between a
+registry that can be retired and one that can only grow. -/
+structure Ctx where
+  /-- The token of the computation this step belongs to. -/
+  cancel : Cancel
+  /-- Schedule an item — the local route, so a chain stays on the core its parent ran on. -/
+  resume : Item → BaseIO Unit
+
 /-- **A scheduleable computation.**
 
-`step k resume` runs the computation until it finishes, calling `k` with the value, or until it must wait, in
+`step k ctx` runs the computation until it finishes, calling `k` with the value, or until it must wait, in
 which case it registers a continuation and returns. `bind` composes the continuations, so a resumed
 computation continues from where it yielded rather than from its beginning — the difference between this and a
 bare `Job`, which is a value that must be re-run.
 
-`resume` is `BaseIO` rather than `IO`, and that is the O3 seam showing through: the one place a schedule call
-has to happen is *inside a waker* — a continuation registered on a stock `Task`, running on a pool worker —
-and a waker cannot call `IO`. Enqueuing takes a lock and notifies a condvar, so `BaseIO` is all it needs, and
-the runtime's `resumeOf` is that function. -/
+The scheduling half of `ctx` is `BaseIO` rather than `IO`, and that is the O3 seam showing through: the one place a
+schedule call has to happen is *inside a waker* — a continuation registered on a stock `Task`, running on a pool
+worker — and a waker cannot call `IO`. Enqueuing takes a lock and notifies a condvar, so `BaseIO` is all it needs,
+and the runtime's `resumeOf` is that function. -/
 structure Async (α : Type) where
-  step : (α → IO Unit) → (Item → BaseIO Unit) → IO Unit
+  step : (α → IO Unit) → Ctx → IO Unit
 
 instance : Inhabited (Async α) := ⟨⟨fun _ _ => pure ()⟩⟩
 
 instance : Monad Async where
   pure v   := ⟨fun k _ => k v⟩
-  bind a f := ⟨fun k resume => a.step (fun v => (f v).step k resume) resume⟩
+  bind a f := ⟨fun k ctx => a.step (fun v => (f v).step k ctx) ctx⟩
 
 /-- Run an `IO` action as a step of a computation. This is the inside of `interface.md` §4's one bridge: a leaf
 operation — a timer, a socket, a stock `Task` — arrives as an action, and what keeps it non-blocking is that
@@ -122,16 +193,44 @@ def Async.ofIO (act : IO α) : Async α := ⟨fun k _ => do k (← act)⟩
 
 instance : MonadLift IO Async where monadLift act := Async.ofIO act
 
-/-- **A handle** on a spawned computation: the cell its value lands in. -/
+/-- **A handle** on a spawned computation: the cell its value lands in, and its cancellation token. -/
 structure Task (α : Type) where
   cell : Join α
+  /-- Set by `Task.cancel`. Every step of this computation reads it before running, and every registration the
+  computation leaves behind is attributed to it. -/
+  token : Cancel
+
+/-- **Cancel a handle's computation**: its token is set, so `Item.fire` skips its steps from now on, and its cell
+is resolved with `v` through `resolveFirst`.
+
+`resolveFirst` is the law for this race rather than `resolve`: `resolve` states that a handle has one writer and is
+loud when that is broken, while here a computation finishing and a cancellation arriving genuinely race, and the
+first of them is the result. So a computation that has already produced its value keeps it — a cancellation never
+replaces a value that exists — and a cancellation that arrives first is delivered exactly once and immediately,
+rather than leaving an awaiter parked forever on a value that will never come.
+
+`v` is the caller's because this layer has no error of its own to give: `EAsync`'s handles are `Task (Except ε α)`,
+so a server passes `.error (.userError "…")`.
+
+Retiring the computation's registrations is not here but in the runtime, which is where the registry is. -/
+def Task.cancel (t : Task α) (v : α) : IO Unit := do
+  t.token.set
+  Join.resolveFirst t.cell v
 
 /-- **Start a computation on the current worker.** The child's first step is enqueued through `resume`, which
-is the local route, so a chain of spawns stays on the core its parent ran on. -/
-def Async.spawn (a : Async α) : Async (Task α) := ⟨fun k resume => do
+is the local route, so a chain of spawns stays on the core its parent ran on.
+
+The child's items are stamped by its own scheduling function before its parent's sees them, and `Item.stamp` only
+fills an empty field — so the child's first step already carries the *child's* token by the time the parent's
+function sees it. Cancelling the parent therefore does not stop the child, whether it has started or not: every
+spawned computation is cancellable on its own, which is `abort` rather than structured cancellation. A computation
+that wants its children to stop with it has to cancel them. -/
+def Async.spawn (a : Async α) : Async (Task α) := ⟨fun k ctx => do
   let cell ← Join.new
-  resume ⟨a.step (fun v => Join.resolve cell v) resume⟩
-  k ⟨cell⟩⟩
+  let cancel ← Cancel.new
+  let child : Ctx := { cancel := cancel, resume := fun it => ctx.resume (it.stamp cancel) }
+  child.resume (Item.ofAction (a.step (fun v => Join.resolve cell v) child))
+  k ⟨cell, cancel⟩⟩
 
 /-- **The value, if it is already there.** -/
 def Join.value? (j : Join α) : IO (Option α) := j.lock.atomically do return (← get).1
@@ -143,10 +242,10 @@ calling `k`.
 
 Reading then registering is not a race: if the value arrives between the two, `onReady` runs the continuation
 immediately, which is the case it exists for. -/
-def Async.await (t : Task α) : Async α := ⟨fun k resume => do
+def Async.await (t : Task α) : Async α := ⟨fun k ctx => do
   match ← t.cell.value? with
   | some v => k v
-  | none   => Join.onReady t.cell (fun v => resume ⟨k v⟩)⟩
+  | none   => Join.onReady t.cell (fun v => ctx.resume (Item.ofAction (k v)))⟩
 
 /-- **What generic code is written against**: joining and starting, with the handle type alongside. -/
 class MonadAwait (m : Type → Type) where

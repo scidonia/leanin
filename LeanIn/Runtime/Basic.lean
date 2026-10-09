@@ -29,8 +29,10 @@ def resumeOf (e : Executor cap) : Task.Item → BaseIO Unit := fun it => e.spawn
 "or inject if called from outside". -/
 def spawn (e : Executor cap) (a : Task.Async α) : IO (Task.Task α) := do
   let cell ← Task.Join.new
-  e.submit ⟨a.step (fun v => Task.Join.resolve cell v) (resumeOf e)⟩
-  return ⟨cell⟩
+  let cancel ← Task.Cancel.new
+  let ctx : Task.Ctx := { cancel := cancel, resume := fun it => resumeOf e (it.stamp cancel) }
+  e.submit (Task.Item.stamp (Task.Item.ofAction (a.step (fun v => Task.Join.resolve cell v) ctx)) cancel)
+  return ⟨cell, cancel⟩
 
 /-- **Drive the executor on the caller's thread** until `finished` holds.
 
@@ -44,7 +46,7 @@ def blockOn (e : Executor cap) (finished : IO Bool) : IO Unit := do
     if ← finished then go := false
     else
       match ← e.work with
-      | some it => it.run
+      | some it => it.fire
       | none    =>
         -- The pool is empty *and* the executor is stopping, which for a worker is the end of its shift and for
         -- the driver is not the end of anything. A stopped executor can still hold work in the form of
@@ -80,7 +82,10 @@ arriving rather than a clock or a count. If the driver stops for another reason 
 missing value is reported rather than filled in with a default. -/
 def run (e : Executor cap) (a : Task.Async α) : IO α := do
   let done ← IO.mkRef (none : Option α)
-  e.submit ⟨a.step (fun v => done.set (some v)) (resumeOf e)⟩
+  -- The driver's own computation carries a token nothing hands out, and its first item is left unstamped: `run`
+  -- is a caller's thread waiting, and the computation it drives is not one another task holds a handle to.
+  let ctx : Task.Ctx := { cancel := ← Task.Cancel.new, resume := resumeOf e }
+  e.submit (Task.Item.ofAction (a.step (fun v => done.set (some v)) ctx))
   blockOn e (do return (← done.get).isSome)
   match ← done.get with
   | some v => return v

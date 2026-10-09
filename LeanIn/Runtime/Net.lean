@@ -115,10 +115,11 @@ return only *after* awaiting them — so a driver returns with nothing held rath
 run. It takes the executor because the decision it makes is the executor's own flag; `Executor.isStopping` is the
 reading, and there is no second copy of it here.
 
-**It is not exercised yet, and that is worth saying plainly.** A diagnostic for it — connect, send, stop, read —
-hangs, so nothing has run this loop to completion. It stays because it is the piece a driver's shutdown needs and
-because it is written against `Executor.isStopping` rather than a private copy of the flag; it does not stay as
-evidence. Making its scenario return is the next diagnostic, not a later one.
+**It is exercised, and by a scenario rather than a diagnostic.** The first version of the diagnostic for this loop
+— connect, send, stop, read — hung, and the hang was the driver's rather than the loop's: `blockOn` ended as soon
+as the pool was empty and the executor was stopping, which abandons a continuation registered on a leaf. Fixed
+there, `tests/executor-contract.sh SC10` runs this loop to completion and reads `served=1 echoed=yes
+inFlightAfter=0 pendingHooks=0`.
 
 **Polling is the cost, and it is W7's absence showing through.** `tryAccept` is a non-blocking leaf, so the loop
 sleeps `interval` between attempts instead of parking on a selector. The accept-versus-shutdown choice is

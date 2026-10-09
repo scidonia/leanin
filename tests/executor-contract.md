@@ -288,6 +288,65 @@ trace.
 
 ______________________________________________________________________
 
+### SC11 — a disconnect cancels the work, and no step of it runs afterwards
+
+**Actor.** A Lean executable server, one process, three actors on one executor: a **work** computation that counts
+once and then parks on a leaf it does not own; the **watcher**, which is the run's own computation — it accepts the
+first connection, waits for the peer to leave, and in that same step reads the counter and cancels the work; and a
+**second connection**, which the client opens after the cancellation and which is echoed.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC11`, which invokes
+`lake exe controls --runtime-cancel`. The cancellation is a public operation on a handle, and the check reads the
+one `cancel|` record and nothing else.
+
+**Given.** A fresh executor, a listener bound to `127.0.0.1:0`, a work computation spawned before the watcher's
+first step, a leaf the work parks on that the watcher resolves *after* it cancels, and a second leaf that is never
+resolved.
+
+**When.** The client connects and closes. The watcher's read on that connection reports end of stream — the
+disconnect — and in the same step it reads the counter into `counterAtCancel` and requests the cancellation, then
+resolves the first leaf. That leaf's completion resumes the work's step, which is exactly the step the cancellation
+is meant to stop. A second client then connects, sends, and reads its echo. The run returns, and the counter is read
+again into `counterFinal`.
+
+**Then.** There is exactly one `cancel|` record, and its fields are exactly `disconnect`, `second`,
+`counterAtCancel`, `counterFinal`, `pendingAtCancel`, `pendingAfterCancel`, `cancelled`, `doubleCancel` and
+`runUs`, in that order with nonempty values.
+
+`counterAtCancel = counterFinal` is the assertion: **no step of a cancelled computation runs after the cancellation
+was requested.** It is the abort law rather than a timing claim — the counter is read inside the cancelling step and
+again after the run returns, so no clock enters it, and because the leaf is resolved after the cancellation, the
+resumed step is one that would otherwise have run. `counterAtCancel ≥ 1` forbids the vacuous reading: a run in which
+the work had not started would satisfy the equality with `0 = 0` and prove nothing. `pendingAtCancel = 1` says a
+registration of the work really was outstanding when the cancellation arrived; `pendingAfterCancel = 0` says it is no
+longer counted as work in flight. `cancelled = canceled` is the handle's awaiter waking with the cancellation rather
+than parking for a value that will never come, and `doubleCancel = ok` is the first-writer law holding when a second
+cancellation arrives. `second = yes` folds in W5's second clause: a connection served *after* a cancellation is
+unaffected by it. `runUs` is printed and never asserted on.
+
+The detector is exercised inside the same invocation: it accepts a well-formed record and rejects nine near-miss
+records, among them `counterFinal` one past `counterAtCancel` — the shape production prints while nothing consults
+the token — and `pendingAfterCancel=1`. Every near miss is built from the record syntax and the expectation, never
+from the mode's output, and a control that does not hold is a fixture defect rather than this `Then`.
+
+**Why, and what it rests on.** Cancellation here is *ours*, because Lean offers no other stopping power. The
+runtime's own documentation is explicit that a task created by `IO.bindTask` "will run even if the last reference to
+the task is dropped" (`Init/System/IO.lean:266-269`), and a search of the whole `Std` tree finds `IO.cancel` and
+`IO.checkCanceled` in one test helper and nowhere a socket or timer would observe them. A leaf therefore cannot be
+cancelled, and the gate is placed where a step is run: a step whose token is set does not execute, whether it was
+enqueued before the cancellation or after it.
+
+The two counted operands are read about *this* computation's registrations rather than about the runtime's, because
+the runtime's total includes the cancelling computation's own and is not stable at the moment of a read — a
+cancelling step is itself a resumed continuation, and whether its registration is already marked finished is another
+thread's business. `pendingAtCancel` is the work's own registration, outstanding because the work is parked on the
+leaf the watcher has not resolved yet. `pendingAfterCancel` is the same count read *in the cancelling step,
+immediately after the cancellation*: it is `0` because the cancellation retired the entry, which is what makes that
+reading the one that discriminates the retirement half. The gate's half is what the counter is for — with the gate
+missing, the resumed step runs and the counter advances.
+
+______
+
 ### SC10 — a stop drains: the connection in flight completes, and nothing is left outstanding
 
 **Actor.** A Lean executable server that accepts one connection and echoes it, with the connection itself stopping

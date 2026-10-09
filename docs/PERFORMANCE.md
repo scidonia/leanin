@@ -44,6 +44,19 @@ the repository's *checks* are scenarios with controls and these are measurements
 | `--runtime-async` | 1 worker vs 2–8 workers | — | ⚪ 1.35× from the second carrier, then flat |
 | `--runtime-async` | no body: 8 269 / 8 436 µs | the same rows with the mutex body | ⚪ the body is free; this is all machinery |
 
+Re-measured after the cancellation milestone, which added a token to the task handle and a read to every step:
+`--runtime-bench` read **10 158 / 10 819 / 11 407 / 11 728 µs** across runs, and `--runtime-async` **12 313 µs at one
+worker** (12 337 / 12 909 / 12 999 at two, four and eight), against 25 655–26 624 µs for the stock pool and
+96 409–147 154 µs for `Std.Async` in those same runs.
+
+**This row reads above its recorded 7 713 µs**, by +31.7% at the lowest of those readings and +52.1% at the
+highest — all four outside this document's stated ±30% band, and the two highest also above the 10.2–11.3 ms range
+the workplan quotes for it. The two revisions were not interleaved the way §1 requires of a comparison, so the
+movement is **not attributed**: this is neither evidence that the milestone moved the row nor evidence that it did
+not. What the same-run pairs do establish is that our row stayed ahead of the stock pool and `Std.Async` measured
+beside it, and that a gap of this size for *this* workload is within what §1's own example shows between two
+diagnostics (7 713 µs against 10 795 µs). Re-measuring with the revisions interleaved is what would settle it.
+
 The first two rows and the third are the *same* workload measured twice, which is the drift above: 7 713 µs
 against 10 795 µs. That is why the headline reads 17.0× in one pairing and 13.5× in the other, and why the
 number I would defend is the equal-thread one: **2.2×**.
@@ -71,9 +84,16 @@ Each multiplier is same-run, as in §2.
 | the same 16 sleeps against the shipped *timer* path | 51–52 ms | 64 × 100 ms in 102 ms | ⚪ parity, and a citation rather than a same-run pair (`docs/evidence.md`) | `spike` |
 | 16 concurrent echo connections on one carrier | 4.8–11 ms of wall time across runs (≈ 1.5–3.3 k connections/s) | — | ⚪ no baseline yet: the shipped server on this workload is W16 | `--runtime-net` |
 | a stop with a connection in flight, draining it | 0.6–1.9 ms to return the loop's value | — | ⚪ not a comparison: the poll interval bounds it, because accept-versus-shutdown is a `select` and we have none yet (W7); an earlier shape whose stop arrived with an empty pool read 95 µs – 1.0 ms | `--runtime-drain` |
+| a cancellation, decomposed | spawn and await 1.40–1.56 µs without one; spawn and cancel 1.16–1.21 µs; the parts measured alone over one computation and one cell: token set 0.11–0.33 µs, `resolveFirst` 0.14–0.58 µs, **retire 7.9–8.7 µs** (200 iterations each) | — | ⚪ no baseline: the operation did not exist before this milestone. The two whole-operation loops differ in shape as well as in the cancellation they do or do not make, so the parts are the decomposition and the retire is its finding — a linear scan of the registry, measured over the 201 entries the parkers leave, while the cancel loop's own retire scans a registry its own cycles keep empty | `--runtime-cancel` |
+| the registration registry, with 200 awaits in flight on a leaf | 200 live registrations, and 0 after those are cancelled (201 entries by list length, one of them the cancelling computation's own) | — | ⚪ no baseline; a same-run pair, and the live count is a count of registrations whose leaf has not completed | `--runtime-cancel` |
 | critical section, notification with nobody parked | 27 ns / 1 ns | — | ⚪ no baseline | `--runtime-ops` |
 
-The last three are the interesting ones. The tail row says an idle worker does not have to be a slow one: a task
+Re-measured after the cancellation milestone, the round-trip row above reads **1 369–1 394 ns** across three runs
+against its recorded 1 042 ns: a 31% delta, at the edge of this document's ±30% band, marked as a cross-revision
+pair rather than read as a regression — it compares against the recorded value, and while `--runtime-ops` does print
+a stock row in the same invocation, no re-measured stock figure is quoted beside it here.
+
+Three of these rows are the interesting ones. The tail row says an idle worker does not have to be a slow one: a task
 pushed while others run is picked up promptly. The shared row compares each design under the discipline it
 actually needs — ours is single-carrier, so a plain reference is correct and wins; the stock pool cannot drop
 its lock, and the same diagnostic shows why (`253 115 of 800 000` increments survive without it). And the timer
@@ -185,6 +205,7 @@ thread, which is one thread per task rather than a bounded blocking pool.
 | `nix develop -c lake exe controls --runtime-net` | 16 concurrent echo connections on one carrier: the connection count, the server's thread count, whether the client shares it, the byte-identical replies, and the pool alongside |
 | `nix develop -c lake exe controls --runtime-time` | 16 × 50 ms sleeps and their event order, two timeout outcomes, the task layer's first-writer law, and the blocking path for the same sleeps |
 | `nix develop -c lake exe controls --runtime-drain` | a stop with a connection in flight: whether the connection completes after the stop, whether the pool is empty and whether a leaf registration is outstanding when the run returns, and how long the drain takes |
+| `nix develop -c lake exe controls --runtime-cancel` | a disconnect cancelling the work: the counter as it stood in the cancelling step and after the run returns, the work's own registrations before and after, the cancelled handle's outcome, and a second cancellation; plus the cost of the new operation — spawn-and-await against cancelling a parked task — and the registry's size before and after cancelling 200 parked awaits |
 
 ## 7. What these numbers are not
 

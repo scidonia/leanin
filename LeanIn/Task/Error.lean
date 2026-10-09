@@ -3,9 +3,9 @@ import LeanIn.Task.Basic
 /-!
 # Failures as values
 
-`interface.md` §5 records the absence this file fills: our `Async` has no error channel, so a leaf that fails
-cannot tell its awaiter. `Leaf.lean` says so loudly and panics, which is right for a client that has decided a
-failure is a defect — and wrong for a server, where a client going away mid-request is an ordinary event.
+The absence this file fills: our `Async` had no error channel, so a leaf that failed could not tell its awaiter —
+`Leaf.lean`'s panicking conversions were what stood in its place, which is right for a client that has decided a
+failure is a defect and wrong for a server, where a client going away mid-request is an ordinary event.
 
 The shape is the shipped one (`Std.Async`'s `EAsync`, and `EIO` before it): the error rides in the *value*, so
 `EAsync ε α` is `Async (Except ε α)`, `bind` short-circuits on `error`, and the handle an awaiter receives is a
@@ -22,7 +22,7 @@ namespace EAsync
 
 /-- A computation that cannot fail, lifted. -/
 def ofAsync (a : Async α) : EAsync ε α :=
-  ⟨fun k resume => a.step (fun v => k (.ok v)) resume⟩
+  ⟨fun k ctx => a.step (fun v => k (.ok v)) ctx⟩
 
 /-- Fail now. -/
 def fail (e : ε) : EAsync ε α :=
@@ -31,16 +31,16 @@ def fail (e : ε) : EAsync ε α :=
 /-- Sequencing short-circuits on `error`; nothing runs after a failure. -/
 instance : Monad (EAsync ε) where
   pure v := ⟨fun k _ => k (.ok v)⟩
-  bind a f := ⟨fun k resume => a.step (fun r => match r with
-    | .ok v    => (f v).step k resume
-    | .error e => k (.error e)) resume⟩
+  bind a f := ⟨fun k ctx => a.step (fun r => match r with
+    | .ok v    => (f v).step k ctx
+    | .error e => k (.error e)) ctx⟩
 
 /-- The channel itself: `throw` fails a computation, `tryCatch` handles one. -/
 instance : MonadExcept ε (EAsync ε) where
   throw e := fail e
-  tryCatch a h := ⟨fun k resume => a.step (fun r => match r with
+  tryCatch a h := ⟨fun k ctx => a.step (fun r => match r with
     | .ok v    => k (.ok v)
-    | .error e => (h e).step k resume) resume⟩
+    | .error e => (h e).step k ctx) ctx⟩
 
 /-- An `IO` action in this layer: its error is the failure. -/
 instance : MonadLift IO (EAsync IO.Error) where
@@ -58,7 +58,7 @@ instance : MonadAwait (EAsync ε) where
 
 /-- Starting a computation cannot itself fail, so the handle arrives as `ok`. -/
 instance : MonadAsync (EAsync ε) where
-  spawn a := ⟨fun k resume => (Async.spawn a).step (fun h => k (.ok h)) resume⟩
+  spawn a := ⟨fun k ctx => (Async.spawn a).step (fun h => k (.ok h)) ctx⟩
 
 end EAsync
 

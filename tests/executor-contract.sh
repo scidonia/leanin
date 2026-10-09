@@ -1560,6 +1560,94 @@ check_sc9() {
   printf 'SC9 ok: refused=%s accepted=%s listener=%s\n' "$refused" "$accepted" "$listener"
 }
 
+# cancel_ok <record> — SC11's observations as a detector, so its own control can reuse it: a disconnect was
+# observed; a second connection was served after the cancellation; the work had started and was parked, so the run
+# is not vacuous; no step of it ran after the cancellation; its registration is no longer counted as in flight; the
+# cancelled handle's awaiter woke with the cancellation; and a second cancellation was ignored rather than being a
+# defect. Every operand is read from its own named field, so a value is never bound from a neighbour.
+cancel_ok() {
+  local rec="$1" d s at fin pat paf can dbl ru
+  d="$(field disconnect "$rec")" || return 1
+  s="$(field second "$rec")" || return 1
+  at="$(field counterAtCancel "$rec")" || return 1
+  fin="$(field counterFinal "$rec")" || return 1
+  pat="$(field pendingAtCancel "$rec")" || return 1
+  paf="$(field pendingAfterCancel "$rec")" || return 1
+  can="$(field cancelled "$rec")" || return 1
+  dbl="$(field doubleCancel "$rec")" || return 1
+  ru="$(field runUs "$rec")" || return 1
+  [ "$d" = "yes" ] || return 1
+  [ "$s" = "yes" ] || return 1
+  [ "$at" -ge 1 ] || return 1
+  [ "$at" = "$fin" ] || return 1
+  [ "$pat" = "1" ] || return 1
+  [ "$paf" = "0" ] || return 1
+  [ "$can" = "canceled" ] || return 1
+  [ "$dbl" = "ok" ] || return 1
+}
+
+# --- SC11 — a disconnect cancels the work, and no step of it runs afterwards ————————————————————————————————————
+check_sc11() {
+  local out status line
+  local near
+  local -a records=()
+
+  out="$(bounded lake exe controls --runtime-cancel)"
+  status=$?
+  check_status SC11 "$status" "lake exe controls --runtime-cancel"
+  require_header "$out"
+
+  mapfile -t records < <(grep '^cancel|' <<<"$out" || true)
+  [ "${#records[@]}" -eq 1 ] ||
+    fail "SC11 Then: the cancellation not observed exactly once" \
+      "expected exactly one cancel| record, saw ${#records[@]}"
+  line="${records[0]}"
+
+  record_is "${line#cancel|}" disconnect second counterAtCancel counterFinal pendingAtCancel pendingAfterCancel \
+    cancelled doubleCancel runUs ||
+    fail "SC11 Then: the cancellation not observed exactly once" \
+      "the record is not exactly disconnect/second/counterAtCancel/counterFinal/pendingAtCancel/pendingAfterCancel/cancelled/doubleCancel/runUs with nonempty values: [$line]"
+
+  cancel_ok 'disconnect=yes|second=yes|counterAtCancel=1|counterFinal=1|pendingAtCancel=1|pendingAfterCancel=0|cancelled=canceled|doubleCancel=ok|runUs=1' ||
+    setup_error "SC11: the cancellation detector rejected a well-formed record" \
+      "the detectors' own control, not the SC11 Then"
+  # Nine near misses, each built from the record syntax and the expectation rather than from the mode's output.
+  # Among them the red's shape — `counterFinal` alone changed, to what production prints when the resumed step runs
+  # — and, later in the list, the retired-registration count alone changed.
+  for near in \
+    'disconnect=no|second=yes|counterAtCancel=1|counterFinal=1|pendingAtCancel=1|pendingAfterCancel=0|cancelled=canceled|doubleCancel=ok|runUs=1' \
+    'disconnect=yes|second=no|counterAtCancel=1|counterFinal=1|pendingAtCancel=1|pendingAfterCancel=0|cancelled=canceled|doubleCancel=ok|runUs=1' \
+    'disconnect=yes|second=yes|counterAtCancel=0|counterFinal=0|pendingAtCancel=1|pendingAfterCancel=0|cancelled=canceled|doubleCancel=ok|runUs=1' \
+    'disconnect=yes|second=yes|counterAtCancel=1|counterFinal=1|pendingAtCancel=0|pendingAfterCancel=0|cancelled=canceled|doubleCancel=ok|runUs=1' \
+    'disconnect=yes|second=yes|counterAtCancel=1|counterFinal=2|pendingAtCancel=1|pendingAfterCancel=0|cancelled=canceled|doubleCancel=ok|runUs=1' \
+    'disconnect=yes|second=yes|counterAtCancel=1|counterFinal=1|pendingAtCancel=1|pendingAfterCancel=1|cancelled=canceled|doubleCancel=ok|runUs=1' \
+    'disconnect=yes|second=yes|counterAtCancel=1|counterFinal=1|pendingAtCancel=1|pendingAfterCancel=0|cancelled=ok|doubleCancel=ok|runUs=1' \
+    'disconnect=yes|second=yes|counterAtCancel=1|counterFinal=1|pendingAtCancel=1|pendingAfterCancel=0|cancelled=|doubleCancel=ok|runUs=1' \
+    'disconnect=yes|second=yes|counterAtCancel=1|counterFinal=1|pendingAtCancel=1|pendingAfterCancel=0|cancelled=canceled|doubleCancel=raised|runUs=1'; do
+    if cancel_ok "$near"; then
+      setup_error "SC11: the cancellation detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC11 Then"
+    fi
+  done
+  printf 'SC11 control: rejected no disconnect, no second connection, work that never started, a registration not outstanding before the cancellation, a step that ran after it, a registration still counted as in flight, a cancellation that was not delivered, an empty cancellation outcome and a second cancellation that raised\n'
+
+  cancel_ok "${line#cancel|}" ||
+    fail "SC11 Then: a disconnect did not cancel the work" \
+      "record=[$line]"
+
+  bound_field d disconnect "$line" "SC11 Then"
+  bound_field s second "$line" "SC11 Then"
+  bound_field at counterAtCancel "$line" "SC11 Then"
+  bound_field fin counterFinal "$line" "SC11 Then"
+  bound_field pat pendingAtCancel "$line" "SC11 Then"
+  bound_field paf pendingAfterCancel "$line" "SC11 Then"
+  bound_field can cancelled "$line" "SC11 Then"
+  bound_field dbl doubleCancel "$line" "SC11 Then"
+  printf 'SC11 ok: counterAtCancel=%s counterFinal=%s pendingAtCancel=%s pendingAfterCancel=%s cancelled=%s doubleCancel=%s second=%s\n' \
+    "$at" "$fin" "$pat" "$paf" "$can" "$dbl" "$s"
+}
+
 # drain_ok <record> — the drain's observations as a detector, so its own control can reuse it: one connection was
 # served, it *completed* after the stop arrived (its echo came back), the executor holds nothing once the run
 # returns, and no leaf registration is left outstanding. That last one is the part a model of pool items cannot
@@ -1635,8 +1723,9 @@ SC7) check_sc7 ;;
 SC8) check_sc8 ;;
 SC9) check_sc9 ;;
 SC10) check_sc10 ;;
+SC11) check_sc11 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11\n' >&2
   exit 2
   ;;
 esac
