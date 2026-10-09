@@ -214,10 +214,10 @@ behaviour contracts with their controls.
 **P2 — the burst path, and it comes first.** Enqueuing into a saturated ring costs **1533 ns** against **169 ns**
 steady, and the benchmark's batch shape spawns 10 000 units into a 256-slot ring — so its **1657 ns per task is
 the overflow path almost exactly**. The batch shape is the ring, not the task machinery, which is what the
-earlier attribution got wrong. The fix is a `Ring` primitive that moves the back half without draining the whole
-thing, which the container cannot do today because it can only pop its front. Acceptance: `--runtime-ops` with
-the burst row within about 2× of the steady one, and a benchmark row that *streams* rather than batches, since
-the current one conflates the two and so cannot see this.
+earlier attribution got wrong. It is fixed: `Ring.keepFirst` moves the live count so the newer half leaves
+without the ring being read out and refilled, and `Pool.toRing` uses it. Measured on this machine, same
+command, 10 000 tasks spawn+join: 24 656 µs → 16 550 µs; `Executor.submit` 2 014 ns → 1 321 ns. What is
+left in the batch row is the ring's own push, not the overflow.
 
 **P1 — allocation and CPS, and it is the chain-shape item.** The round trip is **588 ns**, of which ~169 ns is
 the enqueue, so ~420 ns is cell handling, resumption and the bind chain — the part with no counterpart in a

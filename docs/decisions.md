@@ -263,9 +263,9 @@ proves its operations against a **`List` model**. Array container, list ghost vi
 file — the pattern is the house one, not an invention.
 
 **The check that the spec is faithful, not accidentally quadratic.** The model's operations are
-push-back, pop-front, and "drain the front half into `inject`". All three are what a ring does
-natively — the drain is `O(cap/2)`, bounded, and is exactly what `push_overflow` does (`queue.rs:253`).
-**Nothing in the model requires arbitrary list surgery**, so the list model is a faithful
+push-back, pop-front, and "move the newer half into `inject`". All three are what a ring does natively —
+moving the newer half is `Ring.keepFirst`, `O(1)` and slot-local, which is `push_overflow`'s own move
+(`queue.rs:253`). **Nothing in the model requires arbitrary list surgery**, so the list model is a faithful
 specification of a ring, and the `O(n)` list operations are spec-level convenience, not a performance
 claim about the implementation.
 
