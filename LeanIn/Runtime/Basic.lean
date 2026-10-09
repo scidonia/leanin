@@ -45,7 +45,20 @@ def blockOn (e : Executor cap) (finished : IO Bool) : IO Unit := do
     else
       match ← e.work with
       | some it => it.run
-      | none    => go := false
+      | none    =>
+        -- The pool is empty *and* the executor is stopping, which for a worker is the end of its shift and for
+        -- the driver is not the end of anything. A stopped executor can still hold work in the form of
+        -- continuations registered on leaves — those are not in the pool by construction, because an awaited
+        -- leaf yields and queues nothing — so ending the driver here abandons them, and every task waiting on
+        -- one hangs forever.
+        --
+        -- Waiting instead is the drain the model's shutdown states ("set `stopping`, notify all, drain"): a
+        -- completion arrives through `resume`, which enqueues and notifies, so the wait wakes with work to take
+        -- or with the value the caller is waiting for. The bound on a drain that cannot finish is a deadline,
+        -- which is the caller's to impose and W7's to make cheap.
+        e.state.atomicallyOnce e.cv
+          (pred := do return (← get).pool.inFlight ≠ 0)
+          (k := do return ())
 
 /-- Run one computation to completion on the caller's thread and return its value.
 

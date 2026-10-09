@@ -333,6 +333,19 @@ Holding it in a reference whose own last use falls *after* the connect keeps bot
 consecutive runs then read `refused=…111`, `accepted=ok` and a bound listener. The driver obeys this for its
 listener and for every connection it serves, which is why it is recorded here rather than discovered there.
 
+**The drain works, and the hang that hid it is worth recording.** `stop` used to *abandon*: `Runtime.blockOn` ended
+the driver as soon as the pool was empty and the executor was stopping, and a stopped executor still holds work as
+continuations registered on leaves — those are not in the pool by construction, since an awaited leaf yields and
+queues nothing. So `Runtime.run` threw "the driver stopped before the computation finished", the connection's
+continuation was never resumed, and a client waiting on it hung in `recv` for as long as a watchdog allowed. The
+model's shutdown says *drain*; the driver aborted, and running the thing is what showed the difference. `blockOn`
+now waits for work to appear rather than ending: `--runtime-drain` reads `stopping-before=false`,
+`stopping-after=true`, `returned=true` with the loop's own value, and returns in 95 µs to 1.0 ms — the poll
+interval bounding it, which is W7's absence showing through.
+
+What is still unwritten is the server-shaped half: a connection in flight when the stop arrives, completing rather
+than being dropped. That should now be a scenario with this diagnostic as its control.
+
 **Acceptance.** Three scenarios with their controls: a disconnect stops the work (a body's counter stops
 advancing); one connection erroring leaves the others served; and after `stop`, in-flight work completes before
 `run` returns, with `remaining = 0`.
@@ -524,7 +537,7 @@ CPS indirection, which is P1.
 | 3 | **W2** sockets | met (SC7) | any service at all |
 | 4 | **W3** timers | met (SC8) | timeouts, deadlines, keep-alive |
 | 5 | **W11** buffered I/O helpers | collapsed into W9 — the codec frames and buffers its own bytes | — |
-| 6 | **W5** safety trio, and cancellation safety | the error channel is in and SC9 covers it; the drain loop is written but its scenario hangs, so it is unexercised; cancellation on drop to go | operability: disconnect, failure, signal |
+| 6 | **W5** safety trio, and cancellation safety | the error channel is in (SC9) and the drain works (`--runtime-drain`); a connection-in-flight drain scenario is next, cancellation on drop to go | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | | the product |

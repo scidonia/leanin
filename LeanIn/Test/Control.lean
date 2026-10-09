@@ -1074,16 +1074,45 @@ def runtimeConnect : IO UInt32 := do
   IO.println s!"connect|refused={refusedStr}|accepted={acceptedStr}|listener={stillBound}"
   return 0
 
-/- A shutdown probe lived here: connect, send, stop the executor from the client thread *before* reading, then
-read the echo and let the drain finish. It hangs, and the hang is not diagnosed — the run never reaches its
-record, so there is nothing to narrow it down with, and the likely suspects all need evidence rather than a guess:
-the poll loop's view of the stop flag, the drain's wait for the connection to end, and the client's half-close
-reaching the server's `recv`.
+/- The shutdown probe that lived here is now `--runtime-drain` below, and the reason it hung was a real bug rather
+than a puzzle: `Runtime.blockOn` ended the driver as soon as the pool was empty and the executor was stopping, and
+a stopped executor still holds work as continuations registered on leaves — those are not in the pool by
+construction, because an awaited leaf yields and queues nothing. `Runtime.run` then threw "the driver stopped
+before the computation finished", the connection's continuation was never resumed, and the client hung in `recv`.
+The model's shutdown says *drain*; the driver aborted. That is fixed in `blockOn`, and this mode is the reading
+that shows it. -/
 
-It is removed rather than left in place because a mode that never returns is a trap for the next reader, and
-because `--runtime-connect`'s lesson was that the smallest reproduction is what turns this kind of thing into a
-finding. What stays is the library it was written against — `Executor.isStopping` and `Runtime.serveUntilStopped`
-— so the diagnostic can be rebuilt on it rather than around it. -/
+/- **The drain: does the loop return its own value after a stop, with nothing to serve?**
+
+This started as the first rung of a ladder — the loop with no connections at all, so that `tryAccept` returns
+`none`, the poll sleeps, and the stop flag is the only thing that can end it — and it is what found the bug: the
+run came back as `error: Runtime.run: the driver stopped before the computation finished`, because `blockOn` ended
+the driver when the pool was empty and the executor was stopping, abandoning work held as continuations on
+leaves. Fixed there, this reads `stopping-before=false`, `stopping-after=true`, `returned=true` with the loop's
+own value, and returns in 95 µs to 1.0 ms — the poll interval bounding it, which is W7's absence showing through.
+
+What it does not cover is the server-shaped half: a connection in flight when the stop arrives, completing rather
+than being dropped. That wants a scenario, and this is its control.
+
+A diagnostic, not a scenario: the sleep of 20 ms that gives the loop time to reach its first poll is a clock, and
+a scenario may not use one. -/
+def runtimeDrain : IO UInt32 := do
+  let hooks ← Runtime.Hooks.new
+  let l ← Runtime.Listener.bind (Runtime.loopback 0)
+  let keep ← IO.mkRef l
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  IO.println s!"drain|stopping-before={← e.isStopping}"
+  let srv ← IO.asTask (Runtime.run e (do
+    Runtime.serveUntilStopped hooks e (← keep.get) 1 (fun _ => pure ()) []))
+    _root_.Task.Priority.dedicated
+  IO.sleep 20
+  let stopAt ← IO.monoNanosNow
+  e.stop
+  IO.println s!"drain|stopping-after={← e.isStopping}"
+  let out ← IO.wait srv
+  let returnedAt ← IO.monoNanosNow
+  IO.println s!"drain|returned={out.isOk}|detail={out}|drainUs={(returnedAt - stopAt) / 1000}"
+  return 0
 
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
@@ -1106,6 +1135,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-net" :: _ => return ← runtimeNet
   | "--runtime-time" :: _ => return ← runtimeTime
   | "--runtime-connect" :: _ => return ← runtimeConnect
+  | "--runtime-drain" :: _ => return ← runtimeDrain
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"
