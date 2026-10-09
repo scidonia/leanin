@@ -321,21 +321,17 @@ a client closing a connection mid-request is the normal case for a server, and `
 dying. The reachable defect is exact: the previous version took the process down when a client disconnected.
 What this does *not* fix is a `panic!`, which aborts and stays fatal, so the totality obligation below stands.
 
-**What its test is not yet.** A scenario for the channel was written and then removed: a refused connect, with an
-accepted connect to the run's own listener as its affirmative control. It does not survive contact — the process
-dies with SIGSEGV — and neither half of what it found is a finding yet:
+**Its test.** SC9: a refused connect — error code 111 — arrives as a value, an accepted connect to the run's own
+listener is `ok` as the affirmative control, and the listener is still bound when the record prints, with three
+near misses held against the detector including an accepted connect that also failed.
 
-- A socket's descriptor closes with the Lean object that owns it. The first version read the listener's address
-  early and probed later, and was refused by a socket it had just served sixteen connections on; reading the
-  address in the same step as the probe fixed that, which is why the second version reached the accepted
-  connect at all.
-- With the listener kept alive across the probe, the process segfaults *during* the run, before the record is
-  printed. The likely shape is a libuv handle finalised at a point the loop is not prepared for, but that is a
-  hypothesis rather than a finding: it wants isolating in its own mode, with no listener in the picture, before
-  anything is built on it.
-
-`Runtime.connect` stays, because the driver's own tests will want it. So the channel is implemented and its
-scenario is outstanding, which is the honest state of this third of W5.
+Writing it turned the SIGSEGV that killed the first attempt into a rule. A socket's descriptor dies with the
+*last use* of the Lean object that owns it, not at the end of its scope: the first version read the listener's
+address immediately before connecting, and the listener was collected in between — so the connect was reset by a
+socket that had served sixteen connections a moment earlier, and two of four runs died instead of printing.
+Holding it in a reference whose own last use falls *after* the connect keeps both alive through it, and six
+consecutive runs then read `refused=…111`, `accepted=ok` and a bound listener. The driver obeys this for its
+listener and for every connection it serves, which is why it is recorded here rather than discovered there.
 
 **Acceptance.** Three scenarios with their controls: a disconnect stops the work (a body's counter stops
 advancing); one connection erroring leaves the others served; and after `stop`, in-flight work completes before
@@ -528,7 +524,7 @@ CPS indirection, which is P1.
 | 3 | **W2** sockets | met (SC7) | any service at all |
 | 4 | **W3** timers | met (SC8) | timeouts, deadlines, keep-alive |
 | 5 | **W11** buffered I/O helpers | collapsed into W9 — the codec frames and buffers its own bytes | — |
-| 6 | **W5** safety trio, and cancellation safety | errors done (`EAsync`, and the socket layer switched to it); cancellation and shutdown to go | operability: disconnect, failure, signal |
+| 6 | **W5** safety trio, and cancellation safety | the error channel is in and SC9 covers it; cancellation on drop and the shutdown drain to go | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | | the product |
