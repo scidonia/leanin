@@ -69,7 +69,7 @@ Each multiplier is same-run, as in §2.
 | 16 concurrent 50 ms sleeps, one carrier | 51–52 ms | the same 16 sleeps as stock tasks on the pool: 100 ms — two rounds on eight workers, because a blocking sleep occupies the worker it runs on | 🟢 **1.9× better, one thread against eight** | `--runtime-time` |
 | those 16 waits issued one after another on one thread | — | 801 ms | ⚪ **not a baseline**: this is what *not* overlapping them costs, which is the reason the row above exists | `--runtime-time` |
 | the same 16 sleeps against the shipped *timer* path | 51–52 ms | 64 × 100 ms in 102 ms | ⚪ parity, and a citation rather than a same-run pair (`docs/evidence.md`) | `spike` |
-| 16 concurrent echo connections on one carrier | 4.8–6.9 ms wall (≈ 2.3–3.3 k connections/s) | — | ⚪ no baseline yet: the shipped server on this workload is W16 | `--runtime-net` |
+| 16 concurrent echo connections on one carrier | 4.8–11 ms of wall time across runs (≈ 1.5–3.3 k connections/s) | — | ⚪ no baseline yet: the shipped server on this workload is W16 | `--runtime-net` |
 | critical section, notification with nobody parked | 27 ns / 1 ns | — | ⚪ no baseline | `--runtime-ops` |
 
 The last three are the interesting ones. The tail row says an idle worker does not have to be a slow one: a task

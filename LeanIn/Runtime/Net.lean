@@ -1,7 +1,7 @@
 import Std
 import Std.Async.TCP
 import LeanIn.Runtime.Leaf
-import LeanIn.Task.Basic
+import LeanIn.Task.Error
 
 /-!
 # Sockets on our carriers
@@ -11,7 +11,7 @@ socket half of that seam — and the accept loop, which `Std.Http.Server` cannot
 stock `Task` (`Server.lean:193`), so a server that has to run on our carriers owns the loop, not only the
 leaves; that is W10's finding and W9's deliverable.
 
-Every operation below is `Std.Async`'s, awaited through `awaitAsync`, so a completion enqueues our resume and
+Every operation below is `Std.Async`'s, awaited through W1's seam, so a completion enqueues our resume and
 nothing of ours runs on the thread that completed the socket operation.
 
 **Nothing here is opened from `Std.Async`, and that is deliberate.** Two of its names collide with ours — it has
@@ -19,14 +19,10 @@ its own `MonadAsync`, with `async` where ours has `spawn`, and its own `backgrou
 every name on the far side of the seam and leaves ours unqualified. The file is the boundary, and it reads like
 one.
 
-**What is deliberately not here.** A transport class. `Std.Http.Transport` is `Std.Async.Async`-typed, so an
-instance over these wrappers would hand a driver a stock-typed value and put the work back on the pool; the
-class belongs with the layer that drives it, and that layer is the copy W15 describes.
-
-**Errors.** A socket failure panics, because `interface.md` §5 has no error channel on a task and `Leaf.lean`
-says so loudly rather than leaving an awaiter parked. End of stream is `none` from `recv` and not an error,
-which is the case a server meets every time a client goes away; giving failures somewhere to go is W5.
--/
+**Every operation returns a failure rather than raising it.** This is the first place `EAsync` is the right
+answer rather than a convenience: a client that closes a connection mid-request, or a socket that reports ECONNRESET,
+is the *normal* case for a server, so these wrappers convert through `awaitAsyncE` and the error travels with
+the value. A panic here would take the process down for an event a server meets every day. -/
 
 namespace LeanIn.Runtime
 
@@ -47,37 +43,44 @@ def Listener.bind (addr : Std.Net.SocketAddress) (backlog : UInt32 := 1024) : IO
 def Listener.sockName (l : Listener) : IO Std.Net.SocketAddress :=
   l.srv.getSockName
 
-/-- **Accept, awaited as one of ours.** -/
-def Listener.accept (l : Listener) (hooks : Hooks) : Task.Async (Std.Async.TCP.Socket.Client) :=
-  awaitAsync hooks l.srv.accept
+/-- **Accept, awaited as one of ours.** A failing accept is a value: a listener that has been closed is not an
+abort. -/
+def Listener.accept (l : Listener) (hooks : Hooks) : Task.EAsync IO.Error (Std.Async.TCP.Socket.Client) :=
+  awaitAsyncE hooks l.srv.accept
 
 /-- A connected socket: the four operations a connection loop needs. -/
 abbrev Conn := Std.Async.TCP.Socket.Client
 
-/-- Receive up to `size` bytes. `none` is end of stream. -/
-def Conn.recv (c : Conn) (hooks : Hooks) (size : UInt64 := 65536) : Task.Async (Option ByteArray) :=
-  awaitAsync hooks (Std.Async.TCP.Socket.Client.recv? c size)
+/-- Receive up to `size` bytes. `none` is end of stream, which is not a failure. -/
+def Conn.recv (c : Conn) (hooks : Hooks) (size : UInt64 := 65536) : Task.EAsync IO.Error (Option ByteArray) :=
+  awaitAsyncE hooks (Std.Async.TCP.Socket.Client.recv? c size)
 
 /-- Send one buffer. -/
-def Conn.send (c : Conn) (hooks : Hooks) (data : ByteArray) : Task.Async Unit :=
-  awaitAsync hooks (Std.Async.TCP.Socket.Client.send c data)
+def Conn.send (c : Conn) (hooks : Hooks) (data : ByteArray) : Task.EAsync IO.Error Unit :=
+  awaitAsyncE hooks (Std.Async.TCP.Socket.Client.send c data)
 
 /-- Send several buffers as one operation. -/
-def Conn.sendAll (c : Conn) (hooks : Hooks) (data : Array ByteArray) : Task.Async Unit :=
-  awaitAsync hooks (Std.Async.TCP.Socket.Client.sendAll c data)
+def Conn.sendAll (c : Conn) (hooks : Hooks) (data : Array ByteArray) : Task.EAsync IO.Error Unit :=
+  awaitAsyncE hooks (Std.Async.TCP.Socket.Client.sendAll c data)
 
 /-- Shut down the write side: how a server says it is done with a connection. -/
-def Conn.shutdown (c : Conn) (hooks : Hooks) : Task.Async Unit :=
-  awaitAsync hooks (Std.Async.TCP.Socket.Client.shutdown c)
+def Conn.shutdown (c : Conn) (hooks : Hooks) : Task.EAsync IO.Error Unit :=
+  awaitAsyncE hooks (Std.Async.TCP.Socket.Client.shutdown c)
 
 /-- **Echo a connection until the peer stops, then shut it down.**
 
-`partial` because a connection has no bound, and `Async` is `Inhabited` — which is what lets this be recursion
+A socket failure ends the connection rather than the loop: the peer going away mid-stream is the case this
+signature exists for, and the alternative — what the first version of this file did — is a process that dies
+because a client closed a socket.
+
+`partial` because a connection has no bound, and `Async` is `Inhabited`, which is what lets this be recursion
 rather than a `while` in a monad with no way to say it terminates. -/
-partial def echoConn (hooks : Hooks) (c : Conn) : Task.Async Unit := do
-  match ← c.recv hooks with
-  | none       => c.shutdown hooks
-  | some chunk => c.send hooks chunk; echoConn hooks c
+partial def echoConn (hooks : Hooks) (c : Conn) : Task.EAsync IO.Error Unit := do
+  try
+    match ← Conn.recv c hooks with
+    | none      => Conn.shutdown c hooks
+    | some ch   => Conn.send c hooks ch; echoConn hooks c
+  catch _ => pure ()
 
 /-- **An accept loop of our own.** It accepts `n` connections — one task each, through `background`, which
 against `MonadAsync` is the local route, so a connection stays on the carrier its accept ran on — and then
@@ -87,9 +90,10 @@ Awaiting is what makes "the executor holds nothing afterwards" an observation ra
 the loop the scenario uses. A fire-and-forget variant existed here and was deleted rather than kept: nothing
 called it, and an untested export is worse than a missing one, since the driver that will want it can add it
 back where it is used. -/
-def serveNJoin (hooks : Hooks) (l : Listener) (n : Nat) (body : Conn → Task.Async Unit) : Task.Async Unit := do
+def serveNJoin (hooks : Hooks) (l : Listener) (n : Nat) (body : Conn → Task.EAsync IO.Error Unit) :
+    Task.EAsync IO.Error Unit := do
   let hs ← (List.range n).mapM (fun _ => do
-    let client ← l.accept hooks
+    let client ← Listener.accept l hooks
     Task.MonadAsync.spawn (body client))
   hs.forM (fun h => Task.MonadAwait.await h)
 

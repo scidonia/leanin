@@ -256,6 +256,13 @@ The limits, timeouts and drain that W5, W6 and W14 were partly for remain policy
 
 ### W11 — Buffered I/O helpers
 
+**Collapsed into W9.** This item was written before W10's survey, and that survey removed its reason: the H1
+codec buffers and frames its own bytes — it takes them through `feed` and reports events — so a driver feeds it
+what `recv` returns and writes what `take` produced. The shapes a *router* or a *body helper* wants (`lines`, a
+buffered writer, `split`) are application-level, and the two an HTTP *parser* would have needed are inside the
+codec. Nothing is left to build here, and the item stays in the record rather than being deleted so the next
+reader can see what replaced it.
+
 **Deliverable.** The reading and writing shapes an HTTP parser assumes, over W1's leaves: `readUntil` against a
 delimiter (the request line and the headers), `readExact`, `lines`, a buffered writer with `flush`, `copy`, and
 `split` for half-close. `Std.Async.IO` today is three classes — `AsyncRead.read`, `AsyncWrite.write`/`writeAll`/
@@ -304,6 +311,15 @@ the parsing code, checked by the model rather than caught at the boundary.
 
 **Why Tokio.** A server cannot be written without any of the three: clients disconnect, handlers fail, and
 processes get signals.
+
+**The error half is in.** `LeanIn/Task/Error.lean` is the channel `interface.md` §5 records as absent: `EAsync ε α`
+is `Async (Except ε α)`, `bind` short-circuits on `error`, `throw`/`tryCatch` are the operators, and the handle
+an awaiter receives is a handle on the failing computation. It is a layer *over* the task layer, so it needed no
+new scheduling and no new resolution law. `Leaf.lean` gained `awaitTaskE`/`awaitPromiseE`/`awaitAsyncE` beside
+the panicking conversions, and `Runtime/Net.lean` now uses them throughout — a socket failure is a value, because
+a client closing a connection mid-request is the normal case for a server, and `echoConn` catches rather than
+dying. The reachable defect is exact: the previous version took the process down when a client disconnected.
+What this does *not* fix is a `panic!`, which aborts and stays fatal, so the totality obligation below stands.
 
 **Acceptance.** Three scenarios with their controls: a disconnect stops the work (a body's counter stops
 advancing); one connection erroring leaves the others served; and after `stop`, in-flight work completes before
@@ -495,8 +511,8 @@ CPS indirection, which is P1.
 | 2 | **W10** the `Std.Http.Server` survey | met | whether W9 is an integration or an implementation |
 | 3 | **W2** sockets | met (SC7) | any service at all |
 | 4 | **W3** timers | met (SC8) | timeouts, deadlines, keep-alive |
-| 5 | **W11** buffered I/O helpers | | framing, and any parser |
-| 6 | **W5** safety trio, and cancellation safety | | operability: disconnect, failure, signal |
+| 5 | **W11** buffered I/O helpers | collapsed into W9 — the codec frames and buffers its own bytes | — |
+| 6 | **W5** safety trio, and cancellation safety | errors done (`EAsync`, and the socket layer switched to it); cancellation and shutdown to go | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | | the product |

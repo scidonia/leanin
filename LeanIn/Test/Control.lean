@@ -727,8 +727,9 @@ def runtimeNet : IO UInt32 := do
   let addr ← Runtime.Listener.sockName l
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1
   let srvTids ← IO.mkRef ([] : List UInt64)
-  let body : Runtime.Conn → LeanIn.Task.Async Unit := fun c => do
-    srvTids.modify (· ++ [← IO.getTID])
+  let body : Runtime.Conn → LeanIn.Task.EAsync IO.Error Unit := fun c => do
+    let tid ← monadLift (IO.getTID : IO UInt64)
+    srvTids.modify (· ++ [tid])
     Runtime.echoConn hooks c
   -- the control: the pool holds work only until a carrier takes it, so the reader is shown a queue nothing is
   -- draining. These three no-op items are taken first when the driver starts, and they change nothing else.
@@ -761,7 +762,8 @@ def runtimeNet : IO UInt32 := do
   -- variable by design rather than a second copy of the loop living in a diagnostic.
   match outcome with
   | .error err => IO.println s!"net|failed={err}"; return 1
-  | .ok () =>
+  | .ok (.error err) => IO.println s!"net|failed={err}"; return 1
+  | .ok (.ok ()) =>
     IO.println s!"net|connections={n}|serverThreads={distinct.length}|clientAmongServer={distinct.contains clientTid}|echoes={exact}|heldBefore={heldBefore}|inFlightAfter={inFlightAfter}|wallUs={(t1 - t0) / 1000}"
     IO.println s!"netctl|threadsOnTwo={(distinctOf [0, 1]).length}|threadsOnRepeat={(distinctOf [7, 7]).length}|perturbed={perturbed}"
     return 0

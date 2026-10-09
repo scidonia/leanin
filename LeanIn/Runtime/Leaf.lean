@@ -1,5 +1,6 @@
 import Std
 import LeanIn.Runtime.Basic
+import LeanIn.Task.Error
 
 /-!
 # The leaf seam
@@ -67,5 +68,27 @@ def awaitAsync {α : Type} (hooks : Hooks) (a : Std.Async.Async α) : LeanIn.Tas
     | .pure (.ok v)    => k v
     | .pure (.error e) => panic! s!"awaitAsync: the computation failed: {e}"
     | .ofTask t        => awaitTaskStep hooks t k resume⟩
+
+/-- **Wait for a stock `Task`, carrying its failure.** The sibling of `awaitTask`, and the difference is the whole
+point of `EAsync`: where that one says a failure has nowhere to go and panics, this returns it — which is what a
+socket needs, because a client that goes away mid-request is an ordinary event rather than a defect.
+
+The registry and the one-continuation shape are the same; only the reading of the result differs. -/
+def awaitTaskE {α : Type} (hooks : Hooks) (t : _root_.Task (Except IO.Error α)) : Task.EAsync IO.Error α :=
+  ⟨fun k resume => do
+    let hooked ← BaseIO.bindTask t (fun r => do resume ⟨k r⟩; return _root_.Task.pure ())
+    hooks.modify (· ++ [hooked])⟩
+
+/-- **Wait for a promise's result, carrying its failure.** -/
+def awaitPromiseE {α : Type} (hooks : Hooks) (p : IO.Promise (Except IO.Error α)) : Task.EAsync IO.Error α :=
+  awaitTaskE hooks (Std.Async.AsyncTask.ofPromise p)
+
+/-- **Any `Std.Async` computation, carrying its failure.** -/
+def awaitAsyncE {α : Type} (hooks : Hooks) (a : Std.Async.Async α) : Task.EAsync IO.Error α :=
+  ⟨fun k resume => do
+    let mt ← Std.Async.BaseAsync.toRawBaseIO a
+    match mt with
+    | .pure r   => k r
+    | .ofTask t => (awaitTaskE hooks t).step k resume⟩
 
 end LeanIn.Runtime
