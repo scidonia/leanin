@@ -300,6 +300,13 @@ def Executor.work (e : Executor α cap) : IO (Option α) := do
           -- take, so the state never shows a worker both parked and holding work.
           | (some x, p') => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some x))
 
+/-- Is the executor stopping? A stop is a flag every transaction already reads — `tryTake` refuses and reports it
+— and a loop that has to *decide* whether to keep accepting needs the same reading from outside rather than a
+second copy of the flag. -/
+def Executor.isStopping (e : Executor α cap) : IO Bool :=
+  e.state.atomically do
+    return (← get).sched.stopping
+
 /-- **The whole state as the specification sees it**, for a client that needs more than the two counts:
 `inFlight`, `taken` and `parked` all come from here. Using the projection rather than a bespoke accessor is
 deliberate -- it is the same function the refinement is stated over, so a record read through it cannot

@@ -524,7 +524,7 @@ CPS indirection, which is P1.
 | 3 | **W2** sockets | met (SC7) | any service at all |
 | 4 | **W3** timers | met (SC8) | timeouts, deadlines, keep-alive |
 | 5 | **W11** buffered I/O helpers | collapsed into W9 — the codec frames and buffers its own bytes | — |
-| 6 | **W5** safety trio, and cancellation safety | the error channel is in and SC9 covers it; cancellation on drop and the shutdown drain to go | operability: disconnect, failure, signal |
+| 6 | **W5** safety trio, and cancellation safety | the error channel is in and SC9 covers it; the drain loop is written but its scenario hangs, so it is unexercised; cancellation on drop to go | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | | the product |

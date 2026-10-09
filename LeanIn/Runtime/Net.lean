@@ -1,6 +1,7 @@
 import Std
 import Std.Async.TCP
 import LeanIn.Runtime.Leaf
+import LeanIn.Runtime.Time
 import LeanIn.Task.Error
 
 /-!
@@ -106,6 +107,36 @@ def serveNJoin (hooks : Hooks) (l : Listener) (n : Nat) (body : Conn → Task.EA
     let client ← Listener.accept l hooks
     Task.MonadAsync.spawn (body client))
   hs.forM (fun h => Task.MonadAwait.await h)
+
+/-- **Accept until the executor is stopping, then finish what is in flight and return.**
+
+A drain in the shape W5 asks for: stop accepting, let the connections already accepted run to completion, and
+return only *after* awaiting them — so a driver returns with nothing held rather than with work it will never
+run. It takes the executor because the decision it makes is the executor's own flag; `Executor.isStopping` is the
+reading, and there is no second copy of it here.
+
+**It is not exercised yet, and that is worth saying plainly.** A diagnostic for it — connect, send, stop, read —
+hangs, so nothing has run this loop to completion. It stays because it is the piece a driver's shutdown needs and
+because it is written against `Executor.isStopping` rather than a private copy of the flag; it does not stay as
+evidence. Making its scenario return is the next diagnostic, not a later one.
+
+**Polling is the cost, and it is W7's absence showing through.** `tryAccept` is a non-blocking leaf, so the loop
+sleeps `interval` between attempts instead of parking on a selector. The accept-versus-shutdown choice is
+exactly a `select`, the interface has none yet, and the price of not having it is a drain whose latency is one
+poll interval rather than immediate. -/
+partial def serveUntilStopped (hooks : Hooks) (e : Sched.Executor Task.Item cap) (l : Listener)
+    (interval : Std.Time.Millisecond.Offset) (body : Conn → Task.EAsync IO.Error Unit)
+    (hs : List (Task.Task (Except IO.Error Unit))) : Task.EAsync IO.Error Unit := do
+  if ← monadLift (e.isStopping : IO Bool) then
+    hs.forM (fun h => Task.MonadAwait.await h)
+  else
+    match ← monadLift (Std.Async.TCP.Socket.Server.tryAccept l.srv : IO (Option Conn)) with
+    | some client =>
+      let h ← Task.MonadAsync.spawn (body client)
+      serveUntilStopped hooks e l interval body (h :: hs)
+    | none =>
+      Task.EAsync.ofAsync (sleep hooks interval)
+      serveUntilStopped hooks e l interval body hs
 
 /-- **The loopback address a scenario binds**: `127.0.0.1` and a port. -/
 def loopback (port : UInt16 := 0) : Std.Net.SocketAddress :=

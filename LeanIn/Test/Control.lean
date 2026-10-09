@@ -1074,6 +1074,17 @@ def runtimeConnect : IO UInt32 := do
   IO.println s!"connect|refused={refusedStr}|accepted={acceptedStr}|listener={stillBound}"
   return 0
 
+/-- A shutdown probe lived here: connect, send, stop the executor from the client thread *before* reading, then
+read the echo and let the drain finish. It hangs, and the hang is not diagnosed — the run never reaches its
+record, so there is nothing to narrow it down with, and the likely suspects all need evidence rather than a guess:
+the poll loop's view of the stop flag, the drain's wait for the connection to end, and the client's half-close
+reaching the server's `recv`.
+
+It is removed rather than left in place because a mode that never returns is a trap for the next reader, and
+because `--runtime-connect`'s lesson was that the smallest reproduction is what turns this kind of thing into a
+finding. What stays is the library it was written against — `Executor.isStopping` and `Runtime.serveUntilStopped`
+— so the diagnostic can be rebuilt on it rather than around it. -/
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
