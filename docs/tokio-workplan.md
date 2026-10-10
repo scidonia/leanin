@@ -720,10 +720,11 @@ CPS indirection, which is P1.
 | 11 | **W7** selection, racing, priority | met (SC16) | racing a request against its deadline |
 | 12 | **W13** handle, metrics, deterministic time | met (SC17) | operating it, capacity, timeout tests |
 | 13 | **W8** multi-carrier and stealing (O2 first) | | more than one core |
-| 14 | **W15** parameterise the async surface upstream (parallel, gates nothing) | | W9's shape |
-| 15 | **W9** the HTTP surface | | a web server |
-| 16 | **W16** the HTTP workload on both backends (needs W9 and the copy) | | the server row |
-| 17 | **P1** allocation and CPS (P2 landed) | | the benchmark rows |
+| 14 | **W17** a bound on work admitted from outside the runtime | | operability: a caller can be refused rather than queueing without bound |
+| 15 | **W15** parameterise the async surface upstream (parallel, gates nothing) | | W9's shape |
+| 16 | **W9** the HTTP surface | | a web server |
+| 17 | **W16** the HTTP workload on both backends (needs W9 and the copy) | | the server row |
+| 18 | **P1** allocation and CPS (P2 landed) | | the benchmark rows |
 
 W1 is met, so the order starts at W10 and W2. W10 is read-only and can run beside W2; W2 and W3 give a service
 that answers a request; W11 gives it framing; W5 makes it operable (disconnect, failure, signal); W4 unblocks any
