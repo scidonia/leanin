@@ -685,7 +685,7 @@ CPS indirection, which is P1.
 | 5 | **W11** buffered I/O helpers | collapsed into W9 — the codec frames and buffers its own bytes | — |
 | 6 | **W5** safety trio, and cancellation safety | the error channel is in (SC9), a stop drains a connection in flight (SC10), and a disconnect cancels the work (SC11) — by an explicit operation rather than by dropping; `panic!` totality to go | operability: disconnect, failure, signal |
 | 7 | **W4** blocking pool | met (SC12) | file I/O, sync APIs, CPU in a handler |
-| 8 | **W6** async sync and backpressure | | shared state, connection limits |
+| 8 | **W6** async sync and backpressure | met (SC13) | shared state, connection limits |
 | 9 | **W14** the service's own refinement | met (SC14) | the product |
 | 10 | **W12** task-locals, connection registry | met (SC15) | log context, drainable shutdown |
 | 11 | **W7** selection, racing, priority | met (SC16) | racing a request against its deadline |
