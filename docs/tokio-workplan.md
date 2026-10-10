@@ -537,6 +537,35 @@ what this repository accepts nowhere else.
 a registered signal, observed to stop accepting and then drain; and a timeout test whose elapsed time is read
 from the harness clock, with the control that the same test at a shorter deadline trips.
 
+**Met, and what its record reads.** All three deliverables are in. `LeanIn/Runtime/Basic.lean` has the
+`Handle` — `spawn` (routed through `Executor.spawnBase`/`submitBase` by `Priority`), `stop` and `metrics` — and
+`Metrics`/`CarrierCounters`, with `ready`/`parked` read through `Executor.observe`; `LeanIn/Runtime/Clock.lean`
+has `Clock`, `Clock.live` (production's exact composition), `HarnessClock` and the harness-driven entry
+`runVirtual`; `Time.lean`'s `sleep`/`withTimeout` take a clock; `Leaf.lean` has `awaitSignal`; and
+`Task/Basic.lean`'s `Cancel.new` allocates its id under a `Std.Mutex`. The scenario is SC17, green on every run —
+`nix develop -c bash tests/executor-contract.sh SC17`, which backgrounds `lake exe controls --runtime-handle
+--ready-file PATH`, sends `SIGTERM` to the pid it publishes, and asserts three clauses. One invocation's records
+read `handle|spawnTid=…|ranTid=…|carrierTid=…|readyBefore=0|parkedBefore=1|readyAfter=0|parkedAfter=0` with
+`ranTid = carrierTid ≠ spawnTid` (the work a non-carrier thread spawned ran on the carrier, with the carrier
+parked when the spawn arrived); `signal|signal=15|signalSeen=yes|stopSeen=yes|handlerCarrier=yes|acceptedAtStop=1|
+acceptedFinal=1|offered=2|bodyDone=yes|inFlightAfter=0|pendingHooks=0` with
+`log=[accept:1,stop-observed,body-echoed,drain-returned,offer:2]` (the registered signal stopped accepting —
+`acceptedFinal = 1` against `offered = 2`, controlled by `acceptedAtStop = 1` — and then drained the connection
+in flight); and `clock|completesAt=30|longDeadline=100|longOutcome=some:7|longElapsed=30|shortDeadline=20|
+shortOutcome=none|shortElapsed=20|pendingAfter=1|deadlineAt=30|deadlineWinner=timer` (both elapsed readings are
+the stated instants, read from the harness clock, with `shortDeadline < completesAt` making the pair a relation
+rather than two numbers). The milestone's measurement rows are `--runtime-handle`'s `handlebench|`/`metricscost|`/
+`signaldrain|` lines, recorded with their command in `docs/PERFORMANCE.md` §3.4; the design, the `Cancel.new`
+finding and its `tokens|` control, and the register's non-change are in `docs/decisions.md` D18 and the module
+prose.
+
+**One limit carried, not hidden.** The `tokens|` control that caught the allocator defect is a control, not a
+fourth clause: its sequential reading (`64/64`) is deterministic and fails on any duplicate id, while its
+contended reading (`128/128`) holds on every run once the read-modify-write is in a critical section and can pass
+on an unfixed allocator when the interleaving goes luckily. And the deadline arm is *expressible* but its policy
+half — a `Registry` that cancels what outlives a deadline — is not discharged, so this is D18's open item rather
+than a closed one.
+
 ### W8 — Multi-carrier and stealing (PLAN.md M5), with O2
 
 **Deliverable.** P carriers, per-worker rings behind their own locks plus the shared inject, park/unpark across
@@ -689,7 +718,7 @@ CPS indirection, which is P1.
 | 9 | **W14** the service's own refinement | met (SC14) | the product |
 | 10 | **W12** task-locals, connection registry | met (SC15) | log context, drainable shutdown |
 | 11 | **W7** selection, racing, priority | met (SC16) | racing a request against its deadline |
-| 12 | **W13** handle, metrics, deterministic time | | operating it, capacity, timeout tests |
+| 12 | **W13** handle, metrics, deterministic time | met (SC17) | operating it, capacity, timeout tests |
 | 13 | **W8** multi-carrier and stealing (O2 first) | | more than one core |
 | 14 | **W15** parameterise the async surface upstream (parallel, gates nothing) | | W9's shape |
 | 15 | **W9** the HTTP surface | | a web server |

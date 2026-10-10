@@ -1,4 +1,5 @@
 import Std
+import Std.Async.Signal
 import LeanIn.Runtime.Basic
 import LeanIn.Task.Error
 
@@ -168,6 +169,18 @@ def awaitAsyncE {α : Type} (hooks : Hooks) (a : Std.Async.Async α) : Task.EAsy
     match mt with
     | .pure r   => k r
     | .ofTask t => (awaitTaskE hooks t).step k ctx⟩
+
+/-- **Wait for a process signal**, registered for `signum` and awaited through the seam.
+
+The watcher is the leaf's own — created with `uv_signal_start`, whose handler resolves the promise on the libuv
+loop thread — and what this adds is the seam's shape: the delivering thread only *enqueues* the resumed step, so
+the handler's step runs on a carrier, which is what a scenario can read as tids. `repeating` is the watcher's
+one-shot-or-continue choice; the awaited value is the delivered signal number. -/
+def awaitSignal (hooks : Hooks) (signum : Std.Async.Signal) (repeating : Bool) : Task.Async Int :=
+  ⟨fun k ctx => do
+    let s ← Std.Async.Signal.Waiter.mk signum repeating
+    let t ← s.wait
+    awaitTaskStep hooks t k ctx⟩
 
 /-- **Cancel a computation**: its steps stop being run, its registrations are retired, and an awaiter of its
 handle is woken with `v`.

@@ -1,5 +1,6 @@
 import Std
 import Std.Async.Timer
+import LeanIn.Runtime.Clock
 import LeanIn.Runtime.Leaf
 import LeanIn.Task.Basic
 
@@ -25,10 +26,12 @@ waiting, rather than a cancellation.
 
 namespace LeanIn.Runtime
 
-/-- **Sleep, awaited as one of ours.** The wait costs no carrier: the timer belongs to libuv's loop and its
-completion enqueues our resume, so a carrier that is sleeping is a carrier that is parked. -/
-def sleep (hooks : Hooks) (d : Std.Time.Millisecond.Offset) : Task.Async Unit :=
-  awaitAsync hooks (Std.Async.sleep d)
+/-- **Sleep, awaited as one of ours.** The wait costs no carrier: the timer belongs to the installed clock and
+its completion enqueues our resume, so a carrier that is sleeping is a carrier that is parked. Under `Clock.live`
+that timer is libuv's; under a harness clock the wait is a list insertion and the fire is a virtual instant
+rather than a libuv timeout. -/
+def sleep (c : Clock) (d : Std.Time.Millisecond.Offset) : Task.Async Unit :=
+  c.sleep d
 
 /-- **A computation that never finishes.** A step that registers no continuation and calls none is exactly
 that: nothing will ever schedule it again. It is what a timeout needs in order to actually time out, and it
@@ -38,14 +41,14 @@ def never {α : Type} : Task.Async α :=
 
 /-- **`a`, or `none` if `d` elapses first.** The first writer wins — the computation's own value, or the
 timer's `none` — and the loser's write is ignored rather than being a defect. -/
-def withTimeout (hooks : Hooks) (d : Std.Time.Millisecond.Offset) (a : Task.Async α) :
+def withTimeout (c : Clock) (d : Std.Time.Millisecond.Offset) (a : Task.Async α) :
     Task.Async (Option α) := do
   let cell ← Task.Join.new
   Task.background (do
     let v ← a
     Task.Join.resolveFirst cell (some v))
   Task.background (do
-    sleep hooks d
+    sleep c d
     Task.Join.resolveFirst cell none)
   let token ← (Task.Cancel.new : IO Task.Cancel)
   Task.Async.await (show Task.Task (Option α) from ⟨cell, token⟩)

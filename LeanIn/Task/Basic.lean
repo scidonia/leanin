@@ -46,14 +46,18 @@ structure Cancel where
 namespace Cancel
 
 /-- The token allocator, module-level because a token is made wherever a computation is spawned, by code that owns
-no runtime. The read and the write are not atomic: with one carrier every spawn runs on that carrier, so nothing
-interleaves them, and a second carrier is where this becomes a race to fix rather than a comment to keep. An id
-only has to distinguish the tokens alive at one moment. -/
-initialize counter : IO.Ref Nat ← IO.mkRef 0
+no runtime. The read and the write are one critical section under the counter's own lock, so two spawns running
+concurrently — one on a carrier, one off it, as a `Runtime.Handle` lets a plain thread do — cannot both read the
+same `n` and hand out the same id. That matters because an id is how a question is asked *about one computation*
+(`Hooks.pendingFor` attributes a registration by it, and a retire reads it): two live tokens sharing an id would
+make that answer wrong. An id only has to distinguish the tokens alive at one moment. -/
+initialize counter : Std.Mutex Nat ← Std.Mutex.new 0
 
 def new : IO Cancel := do
-  let n ← counter.get
-  counter.set (n + 1)
+  let n ← counter.atomically do
+    let n ← get
+    set (n + 1)
+    return n
   return ⟨← IO.mkRef false, n⟩
 
 def set (c : Cancel) : BaseIO Unit := c.flag.set true

@@ -741,6 +741,117 @@ milestone does not have. `interface.md` §5 records both as the residual absence
 
 ______________________________________________________________________
 
+### D18 — A handle is a narrowed capability, the counters are read through the model projection, and time is injected.
+
+**What it is, and where it lives.** `LeanIn/Runtime/Basic.lean` gains `Handle` (`handle`, `spawn`, `stop`,
+`metrics`), `Metrics`/`CarrierCounters`, `Executor.newMetered`, `Executor.counters`/`accrue`, and the general
+driver `blockOnWith`/`runWith` (`blockOn`/`run` become that driver with a hook that reports nothing).
+`LeanIn/Runtime/Clock.lean` is new: `Clock`, `Clock.live`, `HarnessClock` (`new`, `now`, `pending`, `schedule`,
+`advance`, `clock`) and `runVirtual`. `LeanIn/Runtime/Time.lean`'s `sleep`/`withTimeout` take a `Clock`.
+`LeanIn/Runtime/Leaf.lean` gains `awaitSignal`. `LeanIn/Task/Basic.lean`'s `Cancel.counter` moves under a
+`Std.Mutex`. The scenario is SC17, one mode `--runtime-handle` with the records `handle|`, `clock|`, `signal|`,
+`tokens|` and the checker record `handlectl|`.
+
+**The handle is a narrowing, not a `Send` stand-in.** `Handle α cap` holds the executor and exposes exactly
+`spawn` (build the child's item and route it through `Executor.spawnBase` for `.high` or `Executor.submitBase`
+for `.normal`, D17's two placements), `stop` (`Executor.stop`) and `metrics`. The executor is a **private field
+and the constructor is private too**, so the narrowing is enforced by the type rather than documented: from
+outside the module a caller can neither project the executor out, build a `Handle`, nor match one apart, so the
+three operations are the whole of the surface. The interesting content is what it
+**withholds**: `Executor.work`, `Executor.park`, `Executor.tryTake`, `Executor.snapshot`, `serveUntilStopped`'s
+executor argument and every `Hooks` operation are carrier-side and are not reachable from a `Handle`, so a thread
+that is not a carrier can originate work and ask the runtime to stop without being handed the executor. The claim
+that makes it usable off-carrier is `Handle.CriticalSections`: every field of shared state an operation reachable
+from a `Handle` reads or writes is read or written inside a critical section of the one lock that guards it, and
+every lock on the path is one of A1's. Audited cell by cell — `state` (itself), `cv` (only inside a `state`
+section), `Cancel.counter` (after the fix), `Join`'s own lock, and the counters — so a handle operation's critical
+sections are serializable against a carrier's, and `State.Aligned`/`Scheduler.Live` survive a foreign-thread
+spawn. `Executor.submitBase`'s `notifyOne` is issued inside the same `state` critical section that writes the pool,
+which is the lock the parking predicate is re-checked under, so a spawn from a parked-against thread cannot be
+lost. **Argued, not proved**, exactly as D14/D15/D16's propositions are: the refinement needs the serializability
+lemma [`primitive-theory.md`](primitive-theory.md) §4 states as unproved, so the audit is the whole of what is
+claimed. **This is not O2**: a `Handle` is not a `Send` marker, it neither checks nor restricts what a caller
+shares with a thread, and it fixes one object on one carrier (D2). Sharing an `IO.Ref`, a `Hooks`, a registry or a
+`Join` cell across threads remains exactly as unsafe as it was.
+
+**The allocator fix is D8's rule applied to a cell that was outside it, and it is a control with a reading.**
+`Cancel.new` (`LeanIn/Task/Basic.lean`) read `counter.get`, then `counter.set (n + 1)`, under no lock — a direct
+`IO.Ref` read-modify-write, which D8 ("`IO.Ref` is touched only under a lock") forbids. It went unnoticed because
+with one carrier every spawn ran on that carrier and nothing interleaved it; the handle makes a spawn from a
+foreign thread reachable, and the read-modify-write is then a race to two tokens sharing one id — which `Hooks`
+attribution and a retire both read by id. The fix is `counter : Std.Mutex Nat` with the read-modify-write in one
+`atomically`; it is a correction, not a new primitive, and A1 already covers it. **The finding is observed, not
+read**: the mode's `tokens|` control, taken before the fix, printed `contended=128|contendedDistinct=126` — two
+duplicate ids in 128 contended allocations by two foreign threads — while `sequential=64|sequentialDistinct=64`.
+The **sequential** reading (`n` `Handle.spawn`s on the non-carrier thread give `n` distinct ids) is deterministic
+and fails if a duplicate is ever handed out; the **contended** reading is sound because the lock is the guarantee,
+and it can pass on an unfixed allocator when the interleaving goes luckily, which is why it is a control and the
+fourth `handlectl|` variant rather than one of the clause assertions. `check_sc17` evaluates the three clauses
+before this control for that reason.
+
+**The counters are read through the model projection, so a counter cannot disagree with the model.** `Metrics` is
+`ready`, `parked` and `carriers : Option (List CarrierCounters)`; `ready` is `pool.inFlight`, which `State.Aligned`
+proves equals `sched.work`, `parked` is `sched.parked`, and `Executor.observe` reports the model projection's
+own two fields — `work` and `parked` out of `Scheduler.toModel`, the scheduler half of `State.toModel` — read in
+one critical section that mutates nothing, enqueues nothing and notifies nobody, so a read cannot perturb what
+it measures. `carriers[i]` is `fired` and
+`busyNanos` per carrier, index 0 while there is one carrier (D2), and is `some` only for an executor built metered
+(`Executor.newMetered`): metering is **opt-in**, so `Executor.new` keeps its signature and the default item path
+pays one `Bool` test and neither a lock nor a clock read. Busy time is measured in nanoseconds of whichever clock
+the driver was given — under `Clock.live` that is `IO.monoNanosNow` (A7), under a harness clock it is virtual
+nanoseconds that do not advance while work runs, so a harness run's busy time is zero by construction — so it is
+printed and never asserted, the `runUs` precedent. No field is added to `Sched.State`, so `State.Aligned`'s four
+preservation theorems are untouched. **Rejected: an `IO.Ref`/model field for the counters** — an `IO.Ref` read
+outside a lock is D8's forbidden shape, and a model field would make the counters a second accounting the
+refinement would then have to relate; the projection makes them a *consequence* of the refinement instead.
+
+**The clock is injected and the harness drives time; the timer is not simulated away.** `Clock` is
+`{ now : IO Nat, sleep : Offset → Task.Async Unit }`, and `Clock.live hooks` is the composition that existed
+before it — `IO.monoNanosNow` for the reading and `awaitAsync hooks (Std.Async.sleep d)` for the wait — so the
+production path is the same code, reached through a record instead of directly. `HarnessClock` is a second
+implementation of the same interface, not a mock: virtual `now`, a sorted timer list under its own mutex, and
+`advance : IO Bool` that sets `now` to the earliest deadline and runs that timer's fire outside the lock;
+`sleep d` schedules at `now + d` and registers nothing with libuv, so no live clock is read on a harness run.
+`runVirtual (hc) (e) (a)` is `runWith (e) (now := hc.now) (idle := fun _ => hc.advance)`, so the harness decides
+one instant at a time and the driver parks exactly as `blockOn` does when nothing can be advanced to — which keeps
+it composable with a live leaf or another thread's delivery. **Rejected: a global `IO.Ref Clock`** — unguarded
+mutable configuration that makes "which clock does this run use" invisible at every call site. **Rejected:
+simulating time in the model** (a `Model.Service.deadline`-style pure step) — the requirement is that the *live*
+path stay the production path and the elapsed time be read from the harness, which is a runtime replacement, not a
+model. **Rejected: a `sleep` that consults a flag** — it would put a branch and a shared read on the production
+timer path for a test-only mode. The harness clock does not close W3's stated limit: a `withTimeout` that wins
+still leaves its timer pending, unchanged.
+
+**The signal path is W1's seam seen from the signal side.** `awaitSignal (hooks) (signum) (repeating)` wraps
+`Std.Async.Signal.Waiter`: the watcher is the leaf's own (`uv_signal_start`, `runtime/uv/signal.cpp`), whose handler
+resolves the promise on the libuv loop thread, and what the seam adds is that the continuation only *enqueues* —
+`ctx.resume (Item.ofAction (k v))` — so the handler's step runs on the carrier, which SC17 reads as tids
+(`handlerCarrier`). The boundary is the process: the fixture sends `kill -TERM` to the pid the executable publishes
+in its ready marker, which is the one externally-delivered event in SC17 and the thing a fake cannot produce. The
+observation is a log relation (`accept:1 < stop-observed < body-echoed < drain-returned`, `stop-observed <
+offer:2`) with the affirmative control `acceptedAtStop = 1` alongside `acceptedFinal = 1` and `offered = 2`.
+
+**The deadline arm is expressible; the policy arm is still open.** A deadline is now expressible — the clock plus
+`Runtime.spawn` and `select`, exercised by SC17-O3, whose readings are `longElapsed = completesAt`,
+`shortElapsed = shortDeadline` with `shortDeadline < completesAt`, `pendingAfter = 1` and `deadlineAt =
+completesAt` — but `Registry`'s cancel-what-outlives-a-deadline arm and the drain-liveness argument D16 deferred
+remain absent, and D18 records the trigger as met with the item open. W12's trigger ("before a server's liveness
+is argued from a drain deadline") therefore stands for the *policy*, not for the instrument.
+
+**The register and the TCB are unchanged.** New code reaches `Std.Mutex` (A1), `Std.Condvar` (A4/A5) and
+`IO.monoNanosNow` (A7) — all on D7's list — plus the leaf layer's `Std.Async.Signal` externs
+(`lean_uv_signal_mk`/`_next`/`_stop`, `Std/Internal/UV/Signal.lean` → `runtime/uv/signal.cpp`), which is exactly
+the wholesale leaf reuse D3 names ("timers, TCP/UDP/DNS, signals, processes") and which the sockets and timers
+already rely on; the one new import edge into `Std.Async` is `Std.Async.Signal` in `Leaf.lean`.
+`IO.asTask … Task.Priority.dedicated` (A6) is called by the test mode, not by library code, and A6 is already
+controlled by `controlDedicated`. No `IO.Promise` construction is added in the library (the test executable
+constructs promises in every mode, as it always has). `#print axioms` is unchanged
+because D18 adds no theorem. D7's register, the trusted-base table and its rows are untouched, and
+[`proof-strategy.md`](proof-strategy.md) §2 and [`primitive-theory.md`](primitive-theory.md) §6 record the
+non-change.
+
+______________________________________________________________________
+
 ## Open
 
 None. All decisions are closed; D9 should be revisited once the interface has seen use.

@@ -116,7 +116,7 @@ def serveNJoin (hooks : Hooks) (l : Listener) (n : Nat) (body : Conn → Task.EA
 handle registered in a `Registry`, until `Executor.isStopping` — then `Registry.drain` awaits everything still
 registered, so the stop is a drain *operation* rather than a `List.forM` in the loop. -/
 private partial def serveUntilStoppedLoop (hooks : Hooks) (e : Sched.Executor Task.Item cap) (l : Listener)
-    (interval : Std.Time.Millisecond.Offset) (body : Conn → Task.EAsync IO.Error Unit)
+    (clock : Clock) (interval : Std.Time.Millisecond.Offset) (body : Conn → Task.EAsync IO.Error Unit)
     (reg : Task.Registry (Except IO.Error Unit)) : Task.EAsync IO.Error Unit := do
   if ← monadLift (e.isStopping : IO Bool) then
     Task.EAsync.ofAsync (Task.Registry.drain reg)
@@ -125,10 +125,10 @@ private partial def serveUntilStoppedLoop (hooks : Hooks) (e : Sched.Executor Ta
     | some client =>
       let h ← Task.MonadAsync.spawn (body client)
       monadLift (Task.Registry.add reg h)
-      serveUntilStoppedLoop hooks e l interval body reg
+      serveUntilStoppedLoop hooks e l clock interval body reg
     | none =>
-      Task.EAsync.ofAsync (sleep hooks interval)
-      serveUntilStoppedLoop hooks e l interval body reg
+      Task.EAsync.ofAsync (sleep clock interval)
+      serveUntilStoppedLoop hooks e l clock interval body reg
 
 /-- **Accept until the executor is stopping, then finish what is in flight and return.**
 
@@ -150,13 +150,15 @@ inFlightAfter=0 pendingHooks=0`.
 **Polling is the cost, and it is W7's absence showing through.** `tryAccept` is a non-blocking leaf, so the loop
 sleeps `interval` between attempts instead of parking on a selector. The accept-versus-shutdown choice is
 exactly a `select`, the interface has none yet, and the price of not having it is a drain whose latency is one
-poll interval rather than immediate. -/
+poll interval rather than immediate. That interval is awaited on `Clock.live hooks`, built once here, so the
+loop's timing stays the production clock's: this signature offers no harness-driven drain. -/
 def serveUntilStopped (hooks : Hooks) (e : Sched.Executor Task.Item cap) (l : Listener)
     (interval : Std.Time.Millisecond.Offset) (body : Conn → Task.EAsync IO.Error Unit)
     (hs : List (Task.Task (Except IO.Error Unit))) : Task.EAsync IO.Error Unit := do
   let reg : Task.Registry (Except IO.Error Unit) ← monadLift (Task.Registry.new (α := Except IO.Error Unit))
   monadLift (hs.forM (fun h => Task.Registry.add reg h))
-  serveUntilStoppedLoop hooks e l interval body reg
+  let clock := Clock.live hooks
+  serveUntilStoppedLoop hooks e l clock interval body reg
 
 /-- The admission loop of `serveBounded`: one admission per iteration, with the handles accepted so
 far accumulated, until exactly `n` connections have been served — then every handle is awaited.

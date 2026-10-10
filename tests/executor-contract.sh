@@ -2673,6 +2673,339 @@ check_sc16() {
   done
 }
 
+# --- SC17 — a handle off-carrier, a signal-driven drain, and a harness clock ————————————————————————
+
+# signal_log_ok <bracketed-log> — the event log's relation: exactly one of each named event,
+# `accept:1 < stop-observed < body-echoed < drain-returned` and `stop-observed < offer:2`, and no
+# `accept:2`. A missing, doubled, malformed or misordered event is rejected before any position is
+# compared, so a log that lost an event cannot satisfy the relation by accident.
+signal_log_ok() {
+  local v="$1" body e i
+  case "$v" in
+  '['*']') : ;;
+  *) return 1 ;;
+  esac
+  body="${v#[}"
+  body="${body%]}"
+  local -a evs=()
+  if [ -n "$body" ]; then IFS=',' read -r -a evs <<<"$body"; fi
+  local a=0 o=0 s=0 b=0 d=0 x=0 ia=-1 io=-1 is=-1 ib=-1 id=-1
+  for i in "${!evs[@]}"; do
+    e="${evs[$i]}"
+    case "$e" in
+    'accept:1') a=$((a + 1)); [ "$ia" -lt 0 ] && ia=$i ;;
+    'offer:2') o=$((o + 1)); [ "$io" -lt 0 ] && io=$i ;;
+    'stop-observed') s=$((s + 1)); [ "$is" -lt 0 ] && is=$i ;;
+    'body-echoed') b=$((b + 1)); [ "$ib" -lt 0 ] && ib=$i ;;
+    'drain-returned') d=$((d + 1)); [ "$id" -lt 0 ] && id=$i ;;
+    'accept:2') x=$((x + 1)) ;;
+    esac
+  done
+  [ "$a" -eq 1 ] && [ "$o" -eq 1 ] && [ "$s" -eq 1 ] && [ "$b" -eq 1 ] && [ "$d" -eq 1 ] || return 1
+  [ "$x" -eq 0 ] || return 1
+  [ "$ia" -lt "$is" ] && [ "$is" -lt "$ib" ] && [ "$ib" -lt "$id" ] && [ "$is" -lt "$io" ]
+}
+
+# handle_ok <record> — SC17-O1 as a detector: the spawned work ran on a carrier (`ranTid = carrierTid`)
+# and not on the thread that spawned it (`ranTid ≠ spawnTid`, `carrierTid ≠ spawnTid`), with the carrier
+# parked when the foreign spawn arrived and the run returning with nothing held and nobody parked.
+handle_ok() {
+  local rec="$1" spawnTid ranTid carrierTid readyBefore parkedBefore readyAfter parkedAfter
+  record_is "$rec" spawnTid ranTid carrierTid readyBefore parkedBefore readyAfter parkedAfter runUs || return 1
+  spawnTid="$(field spawnTid "$rec")" || return 1
+  ranTid="$(field ranTid "$rec")" || return 1
+  carrierTid="$(field carrierTid "$rec")" || return 1
+  readyBefore="$(field readyBefore "$rec")" || return 1
+  parkedBefore="$(field parkedBefore "$rec")" || return 1
+  readyAfter="$(field readyAfter "$rec")" || return 1
+  parkedAfter="$(field parkedAfter "$rec")" || return 1
+  case "$readyBefore$parkedBefore$readyAfter$parkedAfter" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$ranTid" = "$carrierTid" ] || return 1
+  [ "$ranTid" != "$spawnTid" ] || return 1
+  [ "$carrierTid" != "$spawnTid" ] || return 1
+  [ "$parkedBefore" -eq 1 ] || return 1
+  [ "$readyBefore" -eq 0 ] || return 1
+  [ "$readyAfter" -eq 0 ] || return 1
+  [ "$parkedAfter" -eq 0 ] || return 1
+}
+
+# signal_ok <record> — SC17-O2 as a detector: the delivered signal drove the shutdown (`signal = 15`,
+# `signalSeen = yes`); the stop was observed before the second offer and no later connection was
+# accepted (`acceptedFinal = 1` while `offered = 2`, no `accept:2`); it had accepted the one offered
+# before the stop (`acceptedAtStop = 1`, the affirmative control); the connection in flight completed
+# (`bodyDone = yes`, `drain-returned` last); the drain returned with nothing held or outstanding; the
+# handler step ran on a carrier; and the socket outlived its last use.
+signal_ok() {
+  local rec="$1" signal signalSeen stopSeen handlerCarrier acceptedAtStop acceptedFinal offered bodyDone
+  local inFlightAfter pendingHooks listener log
+  record_is "$rec" signal signalSeen stopSeen handlerCarrier acceptedAtStop acceptedFinal offered \
+    bodyDone inFlightAfter pendingHooks listener log runUs || return 1
+  signal="$(field signal "$rec")" || return 1
+  signalSeen="$(field signalSeen "$rec")" || return 1
+  stopSeen="$(field stopSeen "$rec")" || return 1
+  handlerCarrier="$(field handlerCarrier "$rec")" || return 1
+  acceptedAtStop="$(field acceptedAtStop "$rec")" || return 1
+  acceptedFinal="$(field acceptedFinal "$rec")" || return 1
+  offered="$(field offered "$rec")" || return 1
+  bodyDone="$(field bodyDone "$rec")" || return 1
+  inFlightAfter="$(field inFlightAfter "$rec")" || return 1
+  pendingHooks="$(field pendingHooks "$rec")" || return 1
+  listener="$(field listener "$rec")" || return 1
+  log="$(field log "$rec")" || return 1
+  case "$signal" in '' | *[!0-9]*) return 1 ;; esac
+  case "$acceptedAtStop$acceptedFinal$offered$inFlightAfter$pendingHooks" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$signal" -eq 15 ] || return 1
+  [ "$signalSeen" = yes ] || return 1
+  [ "$stopSeen" = yes ] || return 1
+  [ "$handlerCarrier" = yes ] || return 1
+  [ "$acceptedAtStop" -eq 1 ] || return 1
+  [ "$acceptedFinal" -eq 1 ] || return 1
+  [ "$offered" -eq 2 ] || return 1
+  [ "$bodyDone" = yes ] || return 1
+  [ "$inFlightAfter" -eq 0 ] || return 1
+  [ "$pendingHooks" -eq 0 ] || return 1
+  [ -n "$listener" ] || return 1
+  signal_log_ok "$log"
+}
+
+# clock_ok <record> — SC17-O3 as a detector: the longer deadline did not trip and the harness clock
+# says so (`longOutcome = some:7`, `longElapsed = completesAt`); the shorter deadline — proved shorter
+# — tripped (`shortDeadline < completesAt`, `shortOutcome = none`, `shortElapsed = shortDeadline`); the
+# run ended without advancing to the loser (`pendingAfter = 1`); and a deadline raced against a timer
+# handle is decided at the stated instant (`deadlineWinner = timer`, `deadlineAt = completesAt`).
+clock_ok() {
+  local rec="$1" completesAt longOutcome longElapsed shortDeadline shortOutcome shortElapsed
+  local pendingAfter deadlineAt deadlineWinner
+  record_is "$rec" completesAt longDeadline longOutcome longElapsed shortDeadline shortOutcome \
+    shortElapsed pendingAfter deadlineAt deadlineWinner runUs || return 1
+  completesAt="$(field completesAt "$rec")" || return 1
+  longOutcome="$(field longOutcome "$rec")" || return 1
+  longElapsed="$(field longElapsed "$rec")" || return 1
+  shortDeadline="$(field shortDeadline "$rec")" || return 1
+  shortOutcome="$(field shortOutcome "$rec")" || return 1
+  shortElapsed="$(field shortElapsed "$rec")" || return 1
+  pendingAfter="$(field pendingAfter "$rec")" || return 1
+  deadlineAt="$(field deadlineAt "$rec")" || return 1
+  deadlineWinner="$(field deadlineWinner "$rec")" || return 1
+  case "$completesAt$longElapsed$shortDeadline$shortElapsed$pendingAfter$deadlineAt" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$longOutcome" = "some:7" ] || return 1
+  [ "$longElapsed" -eq "$completesAt" ] || return 1
+  [ "$shortDeadline" -lt "$completesAt" ] || return 1
+  [ "$shortOutcome" = none ] || return 1
+  [ "$shortElapsed" -eq "$shortDeadline" ] || return 1
+  [ "$pendingAfter" -eq 1 ] || return 1
+  [ "$deadlineWinner" = timer ] || return 1
+  [ "$deadlineAt" -eq "$completesAt" ] || return 1
+}
+
+# tokens_ok <record> — the token-id control as a detector: the sequential reading is `n` distinct ids
+# out of `n` on any correct allocator, and the contended reading is all ids distinct. `n` at least one
+# keeps both readings from being a comparison of two zeroes.
+tokens_ok() {
+  local rec="$1" sequential sequentialDistinct contended contendedDistinct
+  record_is "$rec" sequential sequentialDistinct contended contendedDistinct || return 1
+  sequential="$(field sequential "$rec")" || return 1
+  sequentialDistinct="$(field sequentialDistinct "$rec")" || return 1
+  contended="$(field contended "$rec")" || return 1
+  contendedDistinct="$(field contendedDistinct "$rec")" || return 1
+  case "$sequential$sequentialDistinct$contended$contendedDistinct" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$sequential" -ge 1 ] || return 1
+  [ "$contended" -ge 1 ] || return 1
+  [ "$sequential" -eq "$sequentialDistinct" ] || return 1
+  [ "$contended" -eq "$contendedDistinct" ] || return 1
+}
+
+# --- SC17 — a handle spawns off-carrier, a signal stops and drains, a harness clock states an instant.
+check_sc17() {
+  local out status round v ctl handle clock signal tokens
+  local spawnTid ranTid carrierTid parkedBefore readyBefore readyAfter parkedAfter
+  local signalVal signalSeen stopSeen handlerCarrier acceptedAtStop acceptedFinal offered bodyDone
+  local inFlightAfter pendingHooks listener log
+  local completesAt longOutcome longElapsed shortDeadline shortOutcome shortElapsed pendingAfter
+  local deadlineAt deadlineWinner sequential sequentialDistinct contended contendedDistinct
+  local o1bad o2bad o3bad tokenbad
+  local outfile readyfile bgpid markerpid waited
+  local -a records=()
+  local variant_count=4
+
+  # The detectors' own control: each must accept the well-formed record written from the record syntax
+  # and the expectation, and reject the near miss its clause would produce on the staged tree.
+  handle_ok 'spawnTid=100|ranTid=200|carrierTid=200|readyBefore=0|parkedBefore=1|readyAfter=0|parkedAfter=0|runUs=1' ||
+    setup_error "SC17: the handle detector rejected a well-formed record" \
+      "the detectors' own control, not the SC17 Then"
+  signal_ok 'signal=15|signalSeen=yes|stopSeen=yes|handlerCarrier=yes|acceptedAtStop=1|acceptedFinal=1|offered=2|bodyDone=yes|inFlightAfter=0|pendingHooks=0|listener=127.0.0.1:1|log=[accept:1,stop-observed,body-echoed,drain-returned,offer:2]|runUs=1' ||
+    setup_error "SC17: the signal detector rejected a well-formed record" \
+      "the detectors' own control, not the SC17 Then"
+  clock_ok 'completesAt=30|longDeadline=100|longOutcome=some:7|longElapsed=30|shortDeadline=20|shortOutcome=none|shortElapsed=20|pendingAfter=1|deadlineAt=30|deadlineWinner=timer|runUs=1' ||
+    setup_error "SC17: the clock detector rejected a well-formed record" \
+      "the detectors' own control, not the SC17 Then"
+  tokens_ok 'sequential=8|sequentialDistinct=8|contended=8|contendedDistinct=8' ||
+    setup_error "SC17: the token detector rejected a well-formed record" \
+      "the detectors' own control, not the SC17 Then"
+  if handle_ok 'spawnTid=100|ranTid=100|carrierTid=200|readyBefore=0|parkedBefore=1|readyAfter=0|parkedAfter=0|runUs=1'; then
+    setup_error "SC17: the handle detector accepted a near miss" \
+      "record: [the work ran on the calling thread]" \
+      "the detectors' own control, not the SC17 Then"
+  fi
+  if signal_ok 'signal=15|signalSeen=yes|stopSeen=yes|handlerCarrier=yes|acceptedAtStop=1|acceptedFinal=2|offered=2|bodyDone=yes|inFlightAfter=0|pendingHooks=0|listener=127.0.0.1:1|log=[accept:1,stop-observed,body-echoed,drain-returned,offer:2]|runUs=1'; then
+    setup_error "SC17: the signal detector accepted a near miss" \
+      "record: [a connection accepted after the stop]" \
+      "the detectors' own control, not the SC17 Then"
+  fi
+  if clock_ok 'completesAt=30|longDeadline=100|longOutcome=some:7|longElapsed=0|shortDeadline=20|shortOutcome=none|shortElapsed=20|pendingAfter=1|deadlineAt=30|deadlineWinner=timer|runUs=1'; then
+    setup_error "SC17: the clock detector accepted a near miss" \
+      "record: [the harness clock never advanced]" \
+      "the detectors' own control, not the SC17 Then"
+  fi
+  if tokens_ok 'sequential=8|sequentialDistinct=7|contended=8|contendedDistinct=8'; then
+    setup_error "SC17: the token detector accepted a near miss — the fourth handlectl variant" \
+      "record: [a duplicate token id]" \
+      "the detectors' own control, not the SC17 Then"
+  fi
+  printf 'SC17 control: rejected the work running on the calling thread, a connection accepted after the stop, a harness clock that never advanced, and a duplicate token id\n'
+
+  # Three invocations, each of which must satisfy the Then. Each is a background executable, signalled
+  # by the fixture after it publishes its ready marker, so the clause's one external event is delivered
+  # from outside the process rather than simulated inside it.
+  for round in 1 2 3; do
+    outfile="$(mktemp)"
+    readyfile="$(mktemp)"
+    rm -f "$readyfile"
+    timeout "$watchdog_seconds" lake exe controls --runtime-handle --ready-file "$readyfile" >"$outfile" 2>&1 &
+    bgpid=$!
+    waited=0
+    while [ ! -f "$readyfile" ] && [ "$waited" -lt 600 ]; do sleep 0.05; waited=$((waited + 1)); done
+    if [ ! -f "$readyfile" ]; then
+      kill "$bgpid" 2>/dev/null || true
+      wait "$bgpid" 2>/dev/null || true
+      rm -f "$outfile" "$readyfile"
+      setup_error "SC17: the executable did not publish its ready marker" \
+        "invocation: lake exe controls --runtime-handle --ready-file (round $round)"
+    fi
+    markerpid="$(cat "$readyfile")"
+    # The signal's delivery is asserted by the scenario, not by the fixture: a pid that has already
+    # exited (the staged tree stops the executor before the first connection is accepted) is tolerated.
+    kill -TERM "$markerpid" 2>/dev/null || true
+    wait "$bgpid"
+    status=$?
+    out="$(cat "$outfile")"
+    rm -f "$outfile" "$readyfile"
+    check_status SC17 "$status" "lake exe controls --runtime-handle --ready-file"
+    require_header "$out"
+
+    mapfile -t records < <(grep '^handle|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC17 Then: the handle behaviour not observed exactly once" \
+        "expected exactly one handle| record, saw ${#records[@]} in invocation $round"
+    handle="${records[0]}"
+    mapfile -t records < <(grep '^clock|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC17 Then: the clock behaviour not observed exactly once" \
+        "expected exactly one clock| record, saw ${#records[@]} in invocation $round"
+    clock="${records[0]}"
+    mapfile -t records < <(grep '^signal|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC17 Then: the signal behaviour not observed exactly once" \
+        "expected exactly one signal| record, saw ${#records[@]} in invocation $round"
+    signal="${records[0]}"
+    mapfile -t records < <(grep '^tokens|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC17 Then: the token control not observed exactly once" \
+        "expected exactly one tokens| record, saw ${#records[@]} in invocation $round"
+    tokens="${records[0]}"
+
+    record_is "${handle#handle|}" spawnTid ranTid carrierTid readyBefore parkedBefore readyAfter parkedAfter runUs ||
+      fail "SC17 Then: the handle behaviour not observed exactly once" \
+        "the record is not exactly spawnTid/ranTid/carrierTid/readyBefore/parkedBefore/readyAfter/parkedAfter/runUs with nonempty values: [$handle]"
+    record_is "${clock#clock|}" completesAt longDeadline longOutcome longElapsed shortDeadline shortOutcome \
+      shortElapsed pendingAfter deadlineAt deadlineWinner runUs ||
+      fail "SC17 Then: the clock behaviour not observed exactly once" \
+        "the record is not exactly completesAt/longDeadline/longOutcome/longElapsed/shortDeadline/shortOutcome/shortElapsed/pendingAfter/deadlineAt/deadlineWinner/runUs with nonempty values: [$clock]"
+    record_is "${signal#signal|}" signal signalSeen stopSeen handlerCarrier acceptedAtStop acceptedFinal \
+      offered bodyDone inFlightAfter pendingHooks listener log runUs ||
+      fail "SC17 Then: the signal behaviour not observed exactly once" \
+        "the record is not exactly signal/signalSeen/stopSeen/handlerCarrier/acceptedAtStop/acceptedFinal/offered/bodyDone/inFlightAfter/pendingHooks/listener/log/runUs with nonempty values: [$signal]"
+    record_is "${tokens#tokens|}" sequential sequentialDistinct contended contendedDistinct ||
+      fail "SC17 Then: the token control not observed exactly once" \
+        "the record is not exactly sequential/sequentialDistinct/contended/contendedDistinct with nonempty values: [$tokens]"
+
+    # The mode's own checker readings: a fixture defect if they do not hold, strictly separately from the
+    # Then. The fourth variant is the token-id control, the one whose failure is interleaving-dependent.
+    ctl="$(grep '^handlectl|' <<<"$out" | head -1)"
+    [ -n "$ctl" ] ||
+      setup_error "SC17: the checker controls are missing" "no handlectl record in the invocation"
+    record_is "${ctl#handlectl|}" accepted rejected variants ||
+      setup_error "SC17: the checker-control record is not the expected shape" "control: [$ctl]"
+    bound_field v accepted "$ctl" "SC17 control"
+    [ "$v" = yes ] ||
+      setup_error "SC17: the checker did not accept the well-formed set" "accepted=$v"
+    bound_field v rejected "$ctl" "SC17 control"
+    [ "$v" = yes ] ||
+      setup_error "SC17: the checker did not reject a near miss" "rejected=$v"
+    bound_field v variants "$ctl" "SC17 control"
+    [ "$v" -eq "$variant_count" ] ||
+      setup_error "SC17: the checker did not test every variant" "variants=$v expected=$variant_count"
+
+    bound_field spawnTid spawnTid "$handle" "SC17 Then"
+    bound_field ranTid ranTid "$handle" "SC17 Then"
+    bound_field carrierTid carrierTid "$handle" "SC17 Then"
+    bound_field parkedBefore parkedBefore "$handle" "SC17 Then"
+    bound_field readyBefore readyBefore "$handle" "SC17 Then"
+    bound_field readyAfter readyAfter "$handle" "SC17 Then"
+    bound_field parkedAfter parkedAfter "$handle" "SC17 Then"
+    bound_field signalVal signal "$signal" "SC17 Then"
+    bound_field signalSeen signalSeen "$signal" "SC17 Then"
+    bound_field stopSeen stopSeen "$signal" "SC17 Then"
+    bound_field handlerCarrier handlerCarrier "$signal" "SC17 Then"
+    bound_field acceptedAtStop acceptedAtStop "$signal" "SC17 Then"
+    bound_field acceptedFinal acceptedFinal "$signal" "SC17 Then"
+    bound_field offered offered "$signal" "SC17 Then"
+    bound_field bodyDone bodyDone "$signal" "SC17 Then"
+    bound_field inFlightAfter inFlightAfter "$signal" "SC17 Then"
+    bound_field pendingHooks pendingHooks "$signal" "SC17 Then"
+    bound_field listener listener "$signal" "SC17 Then"
+    bound_field log log "$signal" "SC17 Then"
+    bound_field completesAt completesAt "$clock" "SC17 Then"
+    bound_field longOutcome longOutcome "$clock" "SC17 Then"
+    bound_field longElapsed longElapsed "$clock" "SC17 Then"
+    bound_field shortDeadline shortDeadline "$clock" "SC17 Then"
+    bound_field shortOutcome shortOutcome "$clock" "SC17 Then"
+    bound_field shortElapsed shortElapsed "$clock" "SC17 Then"
+    bound_field pendingAfter pendingAfter "$clock" "SC17 Then"
+    bound_field deadlineAt deadlineAt "$clock" "SC17 Then"
+    bound_field deadlineWinner deadlineWinner "$clock" "SC17 Then"
+    bound_field sequential sequential "$tokens" "SC17 Then"
+    bound_field sequentialDistinct sequentialDistinct "$tokens" "SC17 Then"
+    bound_field contended contended "$tokens" "SC17 Then"
+    bound_field contendedDistinct contendedDistinct "$tokens" "SC17 Then"
+
+    # The three clauses are evaluated first, in order O1, O2, O3, and the token control after them, so
+    # the first assertion a run reports is never the one whose failure is interleaving-dependent. All are
+    # evaluated so the ones that hold are observed to hold.
+    o1bad=0 o2bad=0 o3bad=0 tokenbad=0
+    handle_ok "${handle#handle|}" || o1bad=1
+    signal_ok "${signal#signal|}" || o2bad=1
+    clock_ok "${clock#clock|}" || o3bad=1
+    tokens_ok "${tokens#tokens|}" || tokenbad=1
+    [ "$o1bad" -eq 0 ] ||
+      fail "SC17 Then: the spawned work did not run on a carrier" \
+        "observed: spawnTid=$spawnTid ranTid=$ranTid carrierTid=$carrierTid parkedBefore=$parkedBefore"
+    [ "$o2bad" -eq 0 ] ||
+      fail "SC17 Then: the loop did not stop accepting" \
+        "observed: acceptedAtStop=$acceptedAtStop acceptedFinal=$acceptedFinal offered=$offered signalSeen=$signalSeen stopSeen=$stopSeen bodyDone=$bodyDone log=[$log]"
+    [ "$o3bad" -eq 0 ] ||
+      fail "SC17 Then: the elapsed time read from the harness clock is not the stated instant" \
+        "observed: longElapsed=$longElapsed completesAt=$completesAt longOutcome=$longOutcome"
+    [ "$tokenbad" -eq 0 ] ||
+      fail "SC17 Then: the token allocator handed out a duplicate id" \
+        "observed: sequential=$sequential sequentialDistinct=$sequentialDistinct contended=$contended contendedDistinct=$contendedDistinct"
+
+    printf 'SC17 ok (invocation %s): ranTid=%s carrierTid=%s parkedBefore=%s | acceptedAtStop=%s acceptedFinal=%s offered=%s bodyDone=%s | longElapsed=%s shortElapsed=%s pendingAfter=%s deadlineAt=%s\n' \
+      "$round" "$ranTid" "$carrierTid" "$parkedBefore" "$acceptedAtStop" "$acceptedFinal" "$offered" \
+      "$bodyDone" "$longElapsed" "$shortElapsed" "$pendingAfter" "$deadlineAt"
+  done
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -2690,8 +3023,9 @@ SC13) check_sc13 ;;
 SC14) check_sc14 ;;
 SC15) check_sc15 ;;
 SC16) check_sc16 ;;
+SC17) check_sc17 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13|SC14|SC15|SC16\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13|SC14|SC15|SC16|SC17\n' >&2
   exit 2
   ;;
 esac

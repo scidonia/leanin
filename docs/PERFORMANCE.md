@@ -235,6 +235,44 @@ handles in the race's shape — is deliberately not offered.
 
 No row is asserted, and none gates anything (§1).
 
+### 3.4 The runtime handle, metering and a signal-driven drain (W13)
+
+`nix develop -c lake exe controls --runtime-handle` prints three `…bench|`/`…cost|`/`…drain|` lines beside
+SC17's records. Each is ⚪ — the handle, the counters and the signal-driven stop did not exist before this
+milestone, so there is no earlier mechanism to divide by.
+
+| shape | readings | source |
+|---|---|---|
+| `handlebench\|n=200\|spawnUs=…\|wakeUs=…` — 200 `Handle.spawn`s from a non-carrier thread against a carrier parked, against 200 carrier-side `Runtime.spawn`s in the same run: the cross-thread wake against the same-thread enqueue | spawnUs **7 / 8 / 9 / 9 / 13 µs**, wakeUs **2 / 2 / 2 / 2 / 3 µs** across several runs (both are the row's own `spawnNs`/`enqNs` divided by `n`, in microseconds) | `--runtime-handle` |
+| `metricscost\|n=10000\|rounds=5\|meteredUs=…\|plainUs=…\|meteredMaxUs=…\|plainMaxUs=…` — the same program, item count and executor construction in both arms, one arm `Executor.newMetered`, over 5 rounds in one invocation with the order alternated (M,P,P,M,…), reporting each arm's **minimum** with its band beside it: what the counters cost the item path | minima (µs), metered / plain, over six runs: **61 237 / 57 700**, **49 648 / 32 980**, **71 687 / 53 918**, **62 257 / 36 196**, **71 113 / 51 208**, **66 893 / 36 188**; per-arm maxima **89–142 ms** | `--runtime-handle` |
+| `signaldrain\|pollMs=1\|stopToDrainUs=…\|accepted=1\|offered=2` — from the handler's step recording the stop to the serving loop's drain returning, live and printed for the reason SC10's `drainUs` is: the poll interval bounds it | stopToDrainUs **317 / 387 / 409 / 537 / 626 / 984 µs** across six runs, with `accepted=1` and `offered=2` in every run | `--runtime-handle` |
+
+**`handlebench` is ⚪ and same-run.** Both figures come from one invocation: the `spawnUs` half is the
+non-carrier→carrier wake with the carrier parked, the `wakeUs` half is the carrier-side enqueue, and the pair is
+the cross-thread against the same-thread route. The two are not equal by design — one crosses a thread and takes a
+lock the other does not — and neither is asserted.
+
+**`metricscost` has a stated direction, and it is the design's.** Metering *adds* work — two `now` reads and one
+critical section per item — and removes none, so the expected reading is `meteredUs ≥ plainUs`. Taking the row as a
+single non-interleaved pair of 53–70 ms totals on a box whose own §4.7 puts run-to-run drift at ±30% produced a
+24% reversal at `n = 10000` that the instrument could not attribute, so the row is taken interleaved instead: the
+same program and item count in both arms, the order alternated, and each arm's minimum reported with its band
+beside it. At the minima `meteredUs ≥ plainUs` in **every** run, which is the design's direction and the reason
+the earlier single-pair reading was withdrawn; but each delta (≈3.5–31 ms over a 33–72 ms baseline) lies inside
+the per-arm band (max − min ≈ 50–110 ms), so the row claims the **sign** and no magnitude, exactly as §1 requires.
+A reversal surviving the interleaved minima would have been a fixture defect — the arms differing in work — and it
+did not survive.
+
+**`signaldrain`'s band is part of the reading.** 317 µs to 984 µs for the same event on the same box, because the
+serving loop polls at 1 ms and the stop is noticed on whichever poll follows it; so the figure is a poll-interval
+bound and not a latency claim, and the row says so rather than quoting one number.
+
+**There is deliberately no row for the harness clock.** A virtual instant is not a duration: the harness clock's
+claim is SC17-O3's assertion (an elapsed reading equal to a stated instant), which is a property, not a
+measurement, and `--runtime-handle` prints no timing for it. The busiest of the three rows is `metricscost`,
+whose arm difference the band nearly swallows — which is the honest statement of what this instrument can resolve
+here.
+
 ## 4. 🔴 Where we are worse
 
 Stated before anything above it, because it is the honest part of this document. Three rows carry no factor: the
@@ -368,6 +406,7 @@ record is not updated for it.
 | `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-registry` | the same `registrybench\|`/`registryhand\|`/`registryheld\|` rows at one pool thread — the invocation §3.2's one-thread figures come from, since the registry is single-carrier code and the figure is not a scaling claim |
 | `nix develop -c lake exe controls --runtime-select` | selection, racing and priority (§3.3): 2 000 rounds of `select` against a plain await, 2 000 rounds of `race` (each round spawning, awaiting and cancelling a parked loser) against a plain await, the served label order for a `.normal`-then-`.high` issue and the reverse with the preloaded-ring counts, and enqueue-to-first-step for both lanes; plus SC16's `select\|`, `race\|` and `priority\|` records and its checker's `selectctl\|` readings |
 | `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-select` | the same `selectbench\|`/`racebench\|`/`priorityorder\|`/`prioritybench\|` rows at one pool thread — the invocation §3.3's one-thread figures come from, since the runtime is single-carrier code and the figures are not scaling claims |
+| `nix develop -c lake exe controls --runtime-handle --ready-file PATH` | the runtime handle, the counters and a signal-driven drain (§3.4): 200 non-carrier `Handle.spawn`s against a parked carrier beside 200 carrier-side spawns; the metered and unmetered accumulators over 5 alternated rounds (minima and band) on the same program; and the signal-to-drain return. Started as a background executable and sent `SIGTERM` at the pid it writes to `PATH`, like `tests/executor-contract.sh SC17`; it also prints SC17's `handle\|`, `clock\|`, `signal\|`, `tokens\|` records and its checker's `handlectl\|` readings, and no timing for the harness clock (a virtual instant is not a duration) |
 
 ## 7. What these numbers are not
 

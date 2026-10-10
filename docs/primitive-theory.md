@@ -212,3 +212,17 @@ no `IO.Promise` reach, so `Blocking.lean`'s direct promise reach stays the only 
 `#print axioms` is unchanged too, because W12 adds no theorem — the registry's and the local's invariants are stated
 and argued in D16, not proved here. The finding is again D13's: a new mechanism over already-registered primitives
 adds a design, not a primitive.
+
+**No change from the runtime handle, the counters and the clock (W13, D18).** `LeanIn/Runtime/Basic.lean`,
+`Clock.lean` and `Time.lean` add no direct external operation beyond those already listed: their whole mechanism
+is `Std.Mutex`/`Std.Condvar` (`BaseMutex`/`Condvar`, **A1/A4/A5**), pure list and natural-number code, and
+`IO.monoNanosNow` (**A7**) for the clock's reading — all on D7's list — and `HarnessClock` calls no clock at all.
+The one import edge into `Std.Async` that is new is `Std.Async.Signal` in `LeanIn/Runtime/Leaf.lean`, whose
+externs (`lean_uv_signal_mk`/`_next`/`_stop` → `runtime/uv/signal.cpp`) are D3's wholesale leaf reuse — the
+sockets and timers already stand on the same layer — so it is a leaf the register already names ("external
+events"; timers, sockets, signals, processes) rather than a new primitive. No atomics (the absence above still
+holds), no new syscall, and no `IO.Promise` construction in the library, so `Blocking.lean`'s direct promise
+reach stays the only one and D7's register is unchanged. `#print axioms` is unchanged too, because W13 adds no
+theorem — the
+handle's critical-section claim and the counters' consistency are stated and argued in D18, not proved here. The
+finding is again D13's: a new mechanism over already-registered primitives adds a design, not a primitive.

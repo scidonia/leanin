@@ -407,6 +407,12 @@ def argValue (args : List String) (key : String) : Option String :=
   args.findSome? fun a =>
     if a.startsWith (key ++ "=") then some ((a.drop (key.length + 1)).toString) else none
 
+/-- The value of a space-separated `--key value` argument, the form a mode driven by a shell fixture
+takes. -/
+def argAfter : List String → String → Option String
+  | k :: v :: rest, key => if k == key then some v else argAfter (v :: rest) key
+  | _, _ => none
+
 
 /-- The best of `k` runs of `x`, in microseconds. Best rather than mean: the thing being measured is the
 runtime's own cost, and a mean would mostly report what the rest of the machine was doing. -/
@@ -1111,6 +1117,7 @@ def runtimeTime : IO UInt32 := do
   let n := 16
   let d : Std.Time.Millisecond.Offset := 50
   let hooks ← Runtime.Hooks.new
+  let clock := Runtime.Clock.live hooks
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1
   let ev ← IO.mkRef ([] : List String)
   let firstWakeOf (xs : List String) : Nat :=
@@ -1123,7 +1130,7 @@ def runtimeTime : IO UInt32 := do
     (xs.filter (fun s => s.startsWith "wake:")).length
   let sleeper : Nat → LeanIn.Task.Async Unit := fun i => do
     ev.modify (· ++ [s!"start:{i}"])
-    Runtime.sleep hooks d
+    Runtime.sleep clock d
     ev.modify (· ++ [s!"wake:{i}"])
   let t0 ← IO.monoNanosNow
   let _ ← Runtime.run e (do
@@ -1142,8 +1149,8 @@ def runtimeTime : IO UInt32 := do
   let blockingOrderOverlaps := overlaps blockingOrder
   let missingWakeWakes := wakeCount (events.filter (fun s => s != "wake:0"))
   let (hit, miss) ← Runtime.run e (do
-    let hit ← Runtime.withTimeout hooks 50 (Runtime.never : LeanIn.Task.Async Unit)
-    let miss ← Runtime.withTimeout hooks 200 (pure 7)
+    let hit ← Runtime.withTimeout clock 50 (Runtime.never : LeanIn.Task.Async Unit)
+    let miss ← Runtime.withTimeout clock 200 (pure 7)
     return (hit, miss))
   -- The task layer's first-writer-wins law, and the timeout's own loser actually happening. The two writes are
   -- issued in order rather than raced, because which of two racing writers wins is a scheduling fact and this
@@ -1157,8 +1164,8 @@ def runtimeTime : IO UInt32 := do
     LeanIn.Task.Join.resolveFirst cell (some 2)
     let token ← (LeanIn.Task.Cancel.new : IO LeanIn.Task.Cancel)
     let first ← LeanIn.Task.Async.await (show LeanIn.Task.Task (Option Nat) from ⟨cell, token⟩)
-    let late ← Runtime.withTimeout hooks 5 (pure 7)
-    Runtime.sleep hooks 40
+    let late ← Runtime.withTimeout clock 5 (pure 7)
+    Runtime.sleep clock 40
     return (first, late))
   -- Two baselines, and they are not the same kind of thing. The first is like-for-like: the same sixteen sleeps,
   -- *concurrently*, on the stock pool, one `IO.asTask` each — the shipped way to run something off the calling
@@ -1298,7 +1305,7 @@ def runtimeCancel : IO UInt32 := do
       LeanIn.Task.MonadAsync.spawn (do
         monadLift (ran.modify (· + 1) : BaseIO Unit)
         Runtime.awaitPromiseE benchHooks never))
-    let _ ← LeanIn.Task.EAsync.ofAsync (Runtime.sleep benchHooks 20)
+    let _ ← LeanIn.Task.EAsync.ofAsync (Runtime.sleep (Runtime.Clock.live benchHooks) 20)
     let awaits ← monadLift (Runtime.pending benchHooks : IO Nat)
     let size ← monadLift (Runtime.Hooks.size benchHooks : IO Nat)
     let ranN ← monadLift (ran.get : IO Nat)
@@ -2112,6 +2119,7 @@ def runtimeService (bound : Nat) : IO UInt32 := do
   let timeout : Std.Time.Millisecond.Offset := 100
   let sendOrder : List Nat := [0, 2, 4, 1, 3]
   let hooks ← Runtime.Hooks.new
+  let clock := Runtime.Clock.live hooks
   let l ← Runtime.Listener.bind (Runtime.loopback 0)
   let keep ← IO.mkRef l
   let addrRef ← IO.mkRef (none : Option Std.Net.SocketAddress)
@@ -2138,7 +2146,7 @@ def runtimeService (bound : Nat) : IO UInt32 := do
             { s with events := s.events ++ [(false, id)], live := s.live - 1, parked := s.parked - 1 })
           if ok then pure () else throw (.userError "connection did not complete")
         if id == 1 then
-          let fired ← LeanIn.Task.EAsync.ofAsync (Runtime.withTimeout hooks timeout
+          let fired ← LeanIn.Task.EAsync.ofAsync (Runtime.withTimeout clock timeout
             (Runtime.never : LeanIn.Task.Async Unit))
           monadLift (svcWrite fun s =>
             { s with errored := s.errored ++ [id], closed := s.closed ++ [id],
@@ -2905,6 +2913,480 @@ def runtimeSelect : IO UInt32 := do
   IO.println s!"prioritybench|n={benchRounds}|k={benchK}|highUs={highNs / 1000}|normalUs={normalNs / 1000}"
   return 0
 
+-- --- SC17 — the handle, a signal-driven drain, and a harness clock ————————————————————————————————
+
+/-- The `handle|` record's fields, in the order the mode prints them. -/
+def handleFields : List String :=
+  ["spawnTid", "ranTid", "carrierTid", "readyBefore", "parkedBefore", "readyAfter", "parkedAfter",
+   "runUs"]
+
+/-- The `clock|` record's fields, in the order the mode prints them. -/
+def clockFields : List String :=
+  ["completesAt", "longDeadline", "longOutcome", "longElapsed", "shortDeadline", "shortOutcome",
+   "shortElapsed", "pendingAfter", "deadlineAt", "deadlineWinner", "runUs"]
+
+/-- The `signal|` record's fields, in the order the mode prints them. -/
+def signalFields : List String :=
+  ["signal", "signalSeen", "stopSeen", "handlerCarrier", "acceptedAtStop", "acceptedFinal",
+   "offered", "bodyDone", "inFlightAfter", "pendingHooks", "listener", "log", "runUs"]
+
+/-- The `tokens|` record's fields, in the order the mode prints them. -/
+def tokensFields : List String :=
+  ["sequential", "sequentialDistinct", "contended", "contendedDistinct"]
+
+/-- The `handlectl|` record's fields, in the order the mode prints them. -/
+def handleCtlFields : List String := ["accepted", "rejected", "variants"]
+
+/-- The bracketed event log's relation: exactly one of each named event, `accept:1 < stop-observed <
+body-echoed < drain-returned` and `stop-observed < offer:2`, and no `accept:2`. A missing, doubled or
+misordered event is rejected before any position is compared. -/
+def signalLogOk (v : String) : Bool :=
+  if !(v.startsWith "[" && v.endsWith "]") then false
+  else
+    let body := ((v.drop 1).dropEnd 1).toString
+    let evs := body.splitOn ","
+    let idx (e : String) : Option Nat := evs.findIdx? (· == e)
+    let once (e : String) : Bool := (evs.filter (· == e)).length == 1
+    once "accept:1" && once "offer:2" && once "stop-observed" && once "body-echoed" &&
+      once "drain-returned" && !(evs.contains "accept:2") &&
+      (match idx "accept:1", idx "stop-observed", idx "body-echoed", idx "drain-returned",
+             idx "offer:2" with
+       | some a, some s, some b, some d, some o => a < s && s < b && b < d && s < o
+       | _, _, _, _, _ => false)
+
+/-- SC17-O1 as a detector: the spawned work ran on a carrier (`ranTid = carrierTid`) and not on the
+thread that spawned it (`ranTid ≠ spawnTid`, `carrierTid ≠ spawnTid`), with the carrier parked when the
+foreign spawn arrived (`parkedBefore = 1`, `readyBefore = 0`) and the run returning with nothing held
+and nobody parked (`readyAfter = 0`, `parkedAfter = 0`). -/
+def handleOk (rec : String) : Bool :=
+  registryShaped rec handleFields &&
+  match serviceNat rec "spawnTid", serviceNat rec "ranTid", serviceNat rec "carrierTid",
+        serviceNat rec "readyBefore", serviceNat rec "parkedBefore", serviceNat rec "readyAfter",
+        serviceNat rec "parkedAfter" with
+  | some spawnTid, some ranTid, some carrierTid, some rb, some pb, some ra, some pa =>
+      ranTid == carrierTid && ranTid != spawnTid && carrierTid != spawnTid &&
+        pb == 1 && rb == 0 && ra == 0 && pa == 0
+  | _, _, _, _, _, _, _ => false
+
+/-- SC17-O2 as a detector: the delivered signal drove the shutdown (`signal = 15`, `signalSeen = yes`);
+the stop was observed before the second offer; the loop stopped accepting (`acceptedFinal = 1` while
+`offered = 2`, no `accept:2`); it had accepted the one offered before the stop (`acceptedAtStop = 1`,
+the affirmative control); the connection in flight completed (`bodyDone = yes`, `drain-returned` last);
+the drain returned with nothing held or outstanding (`inFlightAfter = 0`, `pendingHooks = 0`); the
+handler step ran on a carrier (`handlerCarrier = yes`); and the socket outlived its last use
+(`listener` nonempty). -/
+def signalOk (rec : String) : Bool :=
+  registryShaped rec signalFields &&
+  match serviceNat rec "signal", serviceField rec "signalSeen", serviceField rec "stopSeen",
+        serviceField rec "handlerCarrier", serviceNat rec "acceptedAtStop",
+        serviceNat rec "acceptedFinal", serviceNat rec "offered", serviceField rec "bodyDone",
+        serviceNat rec "inFlightAfter", serviceNat rec "pendingHooks", serviceField rec "listener",
+        serviceField rec "log" with
+  | some signal, some signalSeen, some stopSeen, some handlerCarrier, some acceptedAtStop,
+    some acceptedFinal, some offered, some bodyDone, some inFlightAfter, some pendingHooks,
+    some listener, some log =>
+      signal == 15 && signalSeen == "yes" && stopSeen == "yes" && handlerCarrier == "yes" &&
+        acceptedAtStop == 1 && acceptedFinal == 1 && offered == 2 && bodyDone == "yes" &&
+        inFlightAfter == 0 && pendingHooks == 0 && listener != "" && signalLogOk log
+  | _, _, _, _, _, _, _, _, _, _, _, _ => false
+
+/-- SC17-O3 as a detector: the longer deadline did not trip and the harness clock says so
+(`longOutcome = some:7`, `longElapsed = completesAt`); the shorter deadline — proved shorter — tripped
+(`shortDeadline < completesAt`, `shortOutcome = none`, `shortElapsed = shortDeadline`); the run ended
+without advancing to the loser (`pendingAfter = 1`); and a deadline raced against a timer handle is
+decided at the stated instant (`deadlineWinner = timer`, `deadlineAt = completesAt`). -/
+def clockOk (rec : String) : Bool :=
+  registryShaped rec clockFields &&
+  match serviceNat rec "completesAt", serviceField rec "longOutcome", serviceNat rec "longElapsed",
+        serviceNat rec "shortDeadline", serviceField rec "shortOutcome", serviceNat rec "shortElapsed",
+        serviceNat rec "pendingAfter", serviceNat rec "deadlineAt", serviceField rec "deadlineWinner" with
+  | some completesAt, some longOutcome, some longElapsed, some shortDeadline, some shortOutcome,
+    some shortElapsed, some pendingAfter, some deadlineAt, some deadlineWinner =>
+      longOutcome == "some:7" && longElapsed == completesAt &&
+        shortDeadline < completesAt && shortOutcome == "none" && shortElapsed == shortDeadline &&
+        pendingAfter == 1 && deadlineWinner == "timer" && deadlineAt == completesAt
+  | _, _, _, _, _, _, _, _, _ => false
+
+/-- The token-id control as a detector: the sequential reading (`n` distinct ids out of `n`, sound on
+any correct allocator) and the contended reading (all ids distinct, sound because the allocator's
+read-modify-write is inside a critical section). -/
+def tokensOk (rec : String) : Bool :=
+  registryShaped rec tokensFields &&
+  match serviceNat rec "sequential", serviceNat rec "sequentialDistinct", serviceNat rec "contended",
+        serviceNat rec "contendedDistinct" with
+  | some seq, some seqD, some con, some conD => seq == seqD && con == conD
+  | _, _, _, _ => false
+
+/-- A well-formed `handle|` record, built from the record syntax and the expectation rather than from
+the mode's output, so the checker's controls cannot agree with the mode by construction. -/
+def handleGoodRec : String :=
+  "spawnTid=100|ranTid=200|carrierTid=200|readyBefore=0|parkedBefore=1|readyAfter=0|parkedAfter=0|runUs=1"
+
+/-- The work ran on the calling thread: a `Handle.spawn` that fires its item where it stands. -/
+def handleNearCaller : String := handleGoodRec.replace "ranTid=200" "ranTid=100"
+
+/-- A well-formed `clock|` record, likewise. -/
+def clockGoodRec : String :=
+  "completesAt=30|longDeadline=100|longOutcome=some:7|longElapsed=30|shortDeadline=20|shortOutcome=none|shortElapsed=20|pendingAfter=1|deadlineAt=30|deadlineWinner=timer|runUs=1"
+
+/-- The harness clock never advanced: every timer fired at instant zero. -/
+def clockNearElapsed : String := clockGoodRec.replace "longElapsed=30" "longElapsed=0"
+
+/-- A well-formed `signal|` record, likewise. -/
+def signalGoodRec : String :=
+  "signal=15|signalSeen=yes|stopSeen=yes|handlerCarrier=yes|acceptedAtStop=1|acceptedFinal=1|offered=2|bodyDone=yes|inFlightAfter=0|pendingHooks=0|listener=127.0.0.1:1|log=[accept:1,stop-observed,body-echoed,drain-returned,offer:2]|runUs=1"
+
+/-- A connection offered after the stop was accepted. -/
+def signalNearAccepted : String := signalGoodRec.replace "acceptedFinal=1" "acceptedFinal=2"
+
+/-- A well-formed `tokens|` record, likewise. -/
+def tokensGoodRec : String := "sequential=8|sequentialDistinct=8|contended=8|contendedDistinct=8"
+
+/-- A duplicate token id was handed out. -/
+def tokensNearDuplicate : String := tokensGoodRec.replace "sequentialDistinct=8" "sequentialDistinct=7"
+
+/-- The calling OS thread's id, as a natural, for the records that compare tids. -/
+def currentTid : IO Nat := do return (← IO.getTID).toNat
+
+/-- The mode's own checker readings: `accepted=yes` when the well-formed record set is accepted,
+`rejected=yes` when every near miss is rejected, and `variants=4`, the number of near-miss variants
+tested — one per clause plus the token-id control. -/
+def handleCtlLine : String :=
+  "handlectl|accepted=" ++
+    (if handleOk handleGoodRec && signalOk signalGoodRec && clockOk clockGoodRec &&
+        tokensOk tokensGoodRec then "yes" else "no") ++
+  "|rejected=" ++
+    (if !(handleOk handleNearCaller) && !(signalOk signalNearAccepted) &&
+        !(clockOk clockNearElapsed) && !(tokensOk tokensNearDuplicate) then "yes" else "no") ++
+  "|variants=4"
+
+/-- **SC17 — a handle spawns onto a running executor, a signal stops then drains, and timeouts are read
+from a harness clock.**
+
+One invocation prints the `handle|`, `clock|`, `signal|` and `tokens|` records, the mode's own
+`handlectl|` checker readings, and three measurement rows printed and never asserted.
+
+Diagnostic: `lake exe controls --runtime-handle [--ready-file PATH]`. -/
+def runtimeHandle (readyFile : String) : IO UInt32 := do
+  let completesAtMs : Std.Time.Millisecond.Offset := 30
+  let longDeadlineMs : Std.Time.Millisecond.Offset := 100
+  let shortDeadlineMs : Std.Time.Millisecond.Offset := 20
+  let completesAt : Nat := completesAtMs.val.toNat
+  let longDeadline : Nat := longDeadlineMs.val.toNat
+  let shortDeadline : Nat := shortDeadlineMs.val.toNat
+  -- ================= clause one: a handle spawns from a thread that is not a carrier =================
+  let hStart ← IO.monoNanosNow
+  let e1 ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let h1 := Runtime.handle e1
+  let gate1 ← (LeanIn.Task.Join.new : IO (LeanIn.Task.Join Unit))
+  let gate1Tok ← LeanIn.Task.Cancel.new
+  let carrierTidRef ← IO.mkRef (0 : Nat)
+  let prog1 : LeanIn.Task.Async Unit := do
+    let tid0 ← monadLift currentTid
+    monadLift (carrierTidRef.set tid0 : IO Unit)
+    let _ ← LeanIn.Task.Async.await (show LeanIn.Task.Task Unit from ⟨gate1, gate1Tok⟩)
+    pure ()
+  let carrier1 ← IO.asTask (Runtime.run e1 prog1) _root_.Task.Priority.dedicated
+  let mut parkedBefore := 0
+  let mut readyBefore := 0
+  let mut sawParked := false
+  let mut pSpins := 0
+  while !sawParked && pSpins < 200000 do
+    let m ← Runtime.Handle.metrics h1
+    if m.parked == 1 && m.ready == 0 then
+      parkedBefore := m.parked
+      readyBefore := m.ready
+      sawParked := true
+    else
+      IO.sleep 1
+      pSpins := pSpins + 1
+  let spawnTid ← currentTid
+  let carrierTid ← carrierTidRef.get
+  let ranTidRef ← IO.mkRef (0 : Nat)
+  let spawned1 : LeanIn.Task.Async Unit := do
+    let tid0 ← monadLift currentTid
+    monadLift (ranTidRef.set tid0 : IO Unit)
+    monadLift (LeanIn.Task.Join.resolve gate1 () : IO Unit)
+  let _ ← Runtime.Handle.spawn h1 Runtime.Priority.normal spawned1
+  let _ ← IO.wait carrier1
+  let ranTid ← ranTidRef.get
+  let m1 ← Runtime.Handle.metrics h1
+  let hUs := (← IO.monoNanosNow) - hStart
+  IO.println s!"handle|spawnTid={spawnTid}|ranTid={ranTid}|carrierTid={carrierTid}|readyBefore={readyBefore}|parkedBefore={parkedBefore}|readyAfter={m1.ready}|parkedAfter={m1.parked}|runUs={hUs / 1000}"
+  -- ================= clause three: a timeout at a stated instant, read from the harness clock =================
+  let cStart ← IO.monoNanosNow
+  let e3 ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let hcA ← Runtime.HarnessClock.new
+  let cA := Runtime.HarnessClock.clock hcA
+  let beforeA ← Runtime.HarnessClock.now hcA
+  let longOutcome ← Runtime.runVirtual hcA e3
+    (Runtime.withTimeout cA longDeadlineMs (do Runtime.sleep cA completesAtMs; pure (7 : Nat)))
+  let afterA ← Runtime.HarnessClock.now hcA
+  let longElapsed := afterA - beforeA
+  let hcB ← Runtime.HarnessClock.new
+  let cB := Runtime.HarnessClock.clock hcB
+  let beforeB ← Runtime.HarnessClock.now hcB
+  let shortOutcome ← Runtime.runVirtual hcB e3
+    (Runtime.withTimeout cB shortDeadlineMs (do Runtime.sleep cB completesAtMs; pure (7 : Nat)))
+  let afterB ← Runtime.HarnessClock.now hcB
+  let shortElapsed := afterB - beforeB
+  let pendingAfter ← Runtime.HarnessClock.pending hcB
+  let hcC ← Runtime.HarnessClock.new
+  let cC := Runtime.HarnessClock.clock hcC
+  let hooks3 ← Runtime.Hooks.new
+  let gate3 ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let deadlineAtRef ← IO.mkRef (0 : Nat)
+  let deadlineWinnerRef ← IO.mkRef "timer"
+  let arm3 : LeanIn.Task.EAsync IO.Error Unit := do
+    let timerH ← monadLift (Runtime.spawn e3 Runtime.Priority.normal (Runtime.sleep cC completesAtMs))
+    let reqBody : LeanIn.Task.Async Unit := do
+      let _ ← Runtime.awaitPromiseE hooks3 gate3
+      pure ()
+    let reqH ← monadLift (Runtime.spawn e3 Runtime.Priority.normal reqBody)
+    let (i, _v) ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.select timerH [reqH])
+    let dt ← monadLift (Runtime.HarnessClock.now hcC)
+    monadLift (deadlineAtRef.set dt : IO Unit)
+    monadLift (deadlineWinnerRef.set (if i == 0 then "timer" else "request") : IO Unit)
+    pure ()
+  let _ ← Runtime.runVirtual hcC e3 arm3
+  let deadlineAt ← deadlineAtRef.get
+  let deadlineWinner ← deadlineWinnerRef.get
+  let cUs := (← IO.monoNanosNow) - cStart
+  let longStr := match longOutcome with | some v => s!"some:{v}" | none => "none"
+  let shortStr := match shortOutcome with | some v => s!"some:{v}" | none => "none"
+  IO.println s!"clock|completesAt={completesAt}|longDeadline={longDeadline}|longOutcome={longStr}|longElapsed={longElapsed}|shortDeadline={shortDeadline}|shortOutcome={shortStr}|shortElapsed={shortElapsed}|pendingAfter={pendingAfter}|deadlineAt={deadlineAt}|deadlineWinner={deadlineWinner}|runUs={cUs / 1000}"
+  -- ================= clause two: a registered signal stops accepting, then drains =================
+  let sStart ← IO.monoNanosNow
+  let hooks2 ← Runtime.Hooks.new
+  let e2 ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let h2 := Runtime.handle e2
+  let l ← Runtime.Listener.bind (Runtime.loopback 0)
+  let acceptedMu ← Std.Mutex.new (0 : Nat)
+  let logMu ← Std.Mutex.new ([] : List String)
+  let bodyDoneMu ← Std.Mutex.new false
+  let acceptedAtStopRef ← IO.mkRef (0 : Nat)
+  let stopSeenRef ← IO.mkRef false
+  let signalValRef ← IO.mkRef (0 : Int)
+  let carrierTid2Ref ← IO.mkRef (0 : Nat)
+  let handlerTidRef ← IO.mkRef (0 : Nat)
+  let stopAtRef ← IO.mkRef (0 : Nat)
+  let drainAtRef ← IO.mkRef (0 : Nat)
+  let gate ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let stopP ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let addrRef ← IO.mkRef (none : Option Std.Net.SocketAddress)
+  let payload : ByteArray := "sc17-signal".toUTF8
+  let logMod (f : List String → List String) : IO Unit := logMu.atomically do set (f (← get))
+  let bump : IO Unit := acceptedMu.atomically do set ((← get) + 1)
+  let readAccepted : IO Nat := acceptedMu.atomically get
+  let body (c : Runtime.Conn) : LeanIn.Task.EAsync IO.Error Unit := do
+    monadLift (bump : IO Unit)
+    monadLift (logMod (fun s => s ++ ["accept:1"]) : IO Unit)
+    let _ ← Runtime.awaitPromiseE hooks2 gate
+    let _ ← Runtime.Conn.send c hooks2 payload
+    let _ ← Runtime.Conn.shutdown c hooks2
+    monadLift (logMod (fun s => s ++ ["body-echoed"]) : IO Unit)
+    monadLift (bodyDoneMu.atomically do set true : IO Unit)
+  let prog2 : LeanIn.Task.EAsync IO.Error Unit := do
+    let cTid ← monadLift currentTid
+    monadLift (carrierTid2Ref.set cTid : IO Unit)
+    let sa ← monadLift (Runtime.Listener.sockName l)
+    monadLift (addrRef.set (some sa) : IO Unit)
+    let loopH ← LeanIn.Task.EAsync.ofAsync
+      (LeanIn.Task.Async.spawn (Runtime.serveUntilStopped hooks2 e2 l 1 body []))
+    let sig ← LeanIn.Task.EAsync.ofAsync (Runtime.awaitSignal hooks2 .sigterm false)
+    let hTid ← monadLift currentTid
+    monadLift (handlerTidRef.set hTid : IO Unit)
+    monadLift (signalValRef.set sig : IO Unit)
+    monadLift (logMod (fun s => s ++ ["stop-observed"]) : IO Unit)
+    monadLift (stopSeenRef.set true : IO Unit)
+    monadLift (h2.stop : IO Unit)
+    let now0 ← monadLift (IO.monoNanosNow : IO Nat)
+    monadLift (stopAtRef.set now0 : IO Unit)
+    let acc0 ← monadLift readAccepted
+    monadLift (acceptedAtStopRef.set acc0 : IO Unit)
+    monadLift (IO.Promise.resolve (.ok ()) gate : BaseIO Unit)
+    monadLift (IO.Promise.resolve (.ok ()) stopP : BaseIO Unit)
+    let _ ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await loopH)
+    let now1 ← monadLift (IO.monoNanosNow : IO Nat)
+    monadLift (drainAtRef.set now1 : IO Unit)
+    monadLift (logMod (fun s => s ++ ["drain-returned"]) : IO Unit)
+  let server2 ← IO.asTask (Runtime.run e2 prog2) _root_.Task.Priority.dedicated
+  let addr ← do
+    let mut a : Option Std.Net.SocketAddress := none
+    let mut aSpins := 0
+    while a.isNone && aSpins < 200000 do
+      a ← addrRef.get
+      if a.isNone then IO.sleep 1; aSpins := aSpins + 1
+    pure (a.getD (Runtime.loopback 0))
+  let socks ← IO.mkRef ([] : List Std.Async.TCP.Socket.Client)
+  let offeredRef ← IO.mkRef (0 : Nat)
+  let first ← Std.Async.Async.block do
+    let c ← Std.Async.TCP.Socket.Client.mk
+    c.connect addr
+    c.send payload
+    return c
+  socks.set [first]
+  offeredRef.modify (· + 1)
+  let mut firstSeen := false
+  let mut fSpins := 0
+  while !firstSeen && fSpins < 200000 do
+    let acc ← acceptedMu.atomically get
+    let st ← IO.getTaskState server2
+    if acc >= 1 || st == .finished then firstSeen := true
+    else IO.sleep 1; fSpins := fSpins + 1
+  if readyFile != "" then
+    IO.FS.writeFile readyFile (toString (← IO.Process.getPID))
+  let mut stopObserved := false
+  let mut bSpins := 0
+  while !stopObserved && bSpins < 600000 do
+    if ← IO.Promise.isResolved stopP then stopObserved := true
+    else IO.sleep 1; bSpins := bSpins + 1
+  let second ← Std.Async.Async.block do
+    let c ← Std.Async.TCP.Socket.Client.mk
+    c.connect addr
+    c.send payload
+    c.shutdown
+    return c
+  socks.modify (· ++ [second])
+  offeredRef.modify (· + 1)
+  logMod (fun s => s ++ ["offer:2"])
+  let outcome2 ← IO.wait server2
+  let acceptedFinal ← acceptedMu.atomically get
+  let offered ← offeredRef.get
+  let bodyDone ← bodyDoneMu.atomically get
+  let (inFlightAfter, _) ← e2.observe
+  let pendingHooks ← Runtime.pending hooks2
+  let stillBound ← Runtime.Listener.sockName l
+  let log ← logMu.atomically get
+  let signalVal ← signalValRef.get
+  let carrierTid2 ← carrierTid2Ref.get
+  let handlerTid ← handlerTidRef.get
+  let acceptedAtStop ← acceptedAtStopRef.get
+  let stopSeen ← stopSeenRef.get
+  let sUs := (← IO.monoNanosNow) - sStart
+  let stopToDrain := (← drainAtRef.get) - (← stopAtRef.get)
+  let _keep := (← socks.get)
+  let signalSeen := if signalVal == (15 : Int) then "yes" else "no"
+  let stopSeenStr := if stopSeen then "yes" else "no"
+  let handlerCarrier := if handlerTid == carrierTid2 then "yes" else "no"
+  let bodyDoneStr := if bodyDone then "yes" else "no"
+  IO.println s!"signal|signal={signalVal}|signalSeen={signalSeen}|stopSeen={stopSeenStr}|handlerCarrier={handlerCarrier}|acceptedAtStop={acceptedAtStop}|acceptedFinal={acceptedFinal}|offered={offered}|bodyDone={bodyDoneStr}|inFlightAfter={inFlightAfter}|pendingHooks={pendingHooks}|listener={stillBound}|log=[{String.intercalate "," log}]|runUs={sUs / 1000}"
+  IO.println s!"signaldrain|pollMs=1|stopToDrainUs={stopToDrain / 1000}|accepted={acceptedFinal}|offered={offered}"
+  match outcome2 with
+  | .error err => IO.println s!"signalerr|run={err}"
+  | .ok (.error err) => IO.println s!"signalerr|program={err}"
+  | .ok (.ok ()) => pure ()
+  -- ================= the token-id control =================
+  let tokensE ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let tokensH := Runtime.handle tokensE
+  let seqN := 64
+  let mut seqIds : List Nat := []
+  for _ in List.range seqN do
+    let t ← Runtime.Handle.spawn tokensH Runtime.Priority.normal (pure () : LeanIn.Task.Async Unit)
+    seqIds := t.token.id :: seqIds
+  let sequential := seqIds.length
+  let sequentialDistinct := seqIds.eraseDups.length
+  let contN := 64
+  let collectIds (k : Nat) : IO (List Nat) := do
+    let mut ids : List Nat := []
+    for _ in List.range k do
+      let t ← Runtime.Handle.spawn tokensH Runtime.Priority.normal (pure () : LeanIn.Task.Async Unit)
+      ids := t.token.id :: ids
+    return ids
+  let ta ← IO.asTask (collectIds contN) _root_.Task.Priority.dedicated
+  let tb ← IO.asTask (collectIds contN) _root_.Task.Priority.dedicated
+  let ra ← IO.wait ta
+  let rb ← IO.wait tb
+  let ca := match ra with | .ok ids => ids | .error _ => ([] : List Nat)
+  let cb := match rb with | .ok ids => ids | .error _ => ([] : List Nat)
+  let contendedIds := ca ++ cb
+  let contended := contendedIds.length
+  let contendedDistinct := contendedIds.eraseDups.length
+  IO.println s!"tokens|sequential={sequential}|sequentialDistinct={sequentialDistinct}|contended={contended}|contendedDistinct={contendedDistinct}"
+  -- ================= measurement rows, printed and never asserted =================
+  let benchN := 200
+  let hbE ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let hbH := Runtime.handle hbE
+  let hbGate ← (LeanIn.Task.Join.new : IO (LeanIn.Task.Join Unit))
+  let hbTok ← LeanIn.Task.Cancel.new
+  let hbProg : LeanIn.Task.Async Unit := do
+    let _ ← LeanIn.Task.Async.await (show LeanIn.Task.Task Unit from ⟨hbGate, hbTok⟩)
+    pure ()
+  let hbCarrier ← IO.asTask (Runtime.run hbE hbProg) _root_.Task.Priority.dedicated
+  let mut hbParked := false
+  let mut hbSpins := 0
+  while !hbParked && hbSpins < 200000 do
+    let m ← Runtime.Handle.metrics hbH
+    if m.parked == 1 then hbParked := true else IO.sleep 1; hbSpins := hbSpins + 1
+  let hbT0 ← IO.monoNanosNow
+  for _ in List.range benchN do
+    let _ ← Runtime.Handle.spawn hbH Runtime.Priority.normal (pure () : LeanIn.Task.Async Unit)
+  let hbT1 ← IO.monoNanosNow
+  LeanIn.Task.Join.resolve hbGate ()
+  let _ ← IO.wait hbCarrier
+  let spawnUs := (hbT1 - hbT0) / benchN / 1000
+  let hbE2 ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let hbProg2 : LeanIn.Task.Async Nat := do
+    let t0 ← monadLift (IO.monoNanosNow : IO Nat)
+    for _ in List.range benchN do
+      let _ ← monadLift (Runtime.spawn hbE2 Runtime.Priority.normal (pure () : LeanIn.Task.Async Unit))
+      pure ()
+    let t1 ← monadLift (IO.monoNanosNow : IO Nat)
+    return t1 - t0
+  let enqNs ← Runtime.run hbE2 hbProg2
+  let wakeUs := enqNs / benchN / 1000
+  IO.println s!"handlebench|n={benchN}|spawnUs={spawnUs}|wakeUs={wakeUs}"
+  let mcN := 10000
+  let plainE ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let meteredE ← Runtime.Executor.newMetered 256 1
+  let mcRun : Sched.Executor LeanIn.Task.Item 256 → Nat → IO Nat := fun e n => do
+    let hooks ← Runtime.Hooks.new
+    let done ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+    let cnt ← Std.Mutex.new (0 : Nat)
+    let bump : IO Nat := cnt.atomically do
+      let k ← get
+      set (k + 1)
+      return k
+    let body : LeanIn.Task.Async Unit := do
+      let c ← monadLift bump
+      if c + 1 == n then monadLift (IO.Promise.resolve (.ok ()) done : BaseIO Unit)
+      pure ()
+    let prog : LeanIn.Task.EAsync IO.Error Unit := do
+      for _ in List.range n do
+        let _ ← monadLift (Runtime.spawn e Runtime.Priority.normal body)
+        pure ()
+      let _ ← Runtime.awaitPromiseE hooks done
+      pure ()
+    let t0 ← IO.monoNanosNow
+    let _ ← Runtime.run e prog
+    return (← IO.monoNanosNow) - t0
+  let mcRounds := 5
+  let mut plainMin := 0
+  let mut plainMax := 0
+  let mut meteredMin := 0
+  let mut meteredMax := 0
+  for r in List.range mcRounds do
+    -- Both arms run the same program at the same item count, on executors built the same way except that one is
+    -- metered; the order alternates so a drift across the invocation cannot be read as the metering, and each
+    -- arm's reading is its minimum over the rounds.
+    let (mNs, pNs) ←
+      if r % 2 == 0 then do
+        let m ← mcRun meteredE mcN
+        let p ← mcRun plainE mcN
+        pure (m, p)
+      else do
+        let p ← mcRun plainE mcN
+        let m ← mcRun meteredE mcN
+        pure (m, p)
+    if r == 0 then
+      plainMin := pNs; plainMax := pNs; meteredMin := mNs; meteredMax := mNs
+    else
+      plainMin := Nat.min plainMin pNs; plainMax := Nat.max plainMax pNs
+      meteredMin := Nat.min meteredMin mNs; meteredMax := Nat.max meteredMax mNs
+  IO.println s!"metricscost|n={mcN}|rounds={mcRounds}|meteredUs={meteredMin / 1000}|plainUs={plainMin / 1000}|meteredMaxUs={meteredMax / 1000}|plainMaxUs={plainMax / 1000}"
+  IO.println handleCtlLine
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -2934,6 +3416,12 @@ def main (args : List String) : IO UInt32 := do
     return ← runtimeService (((argValue rest "--bound").bind String.toNat?).getD 2)
   | "--runtime-registry" :: _ => return ← runtimeRegistry
   | "--runtime-select" :: _ => return ← runtimeSelect
+  | "--runtime-handle" :: rest =>
+    let readyFile :=
+      match argValue rest "--ready-file" with
+      | some p => p
+      | none   => (argAfter rest "--ready-file").getD ""
+    return ← runtimeHandle readyFile
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

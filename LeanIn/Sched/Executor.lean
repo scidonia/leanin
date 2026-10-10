@@ -53,6 +53,18 @@ def State.Aligned (st : State α cap) : Prop := st.sched.work = st.pool.inFlight
 def State.toModel (st : State α cap) : Model.Pool α × Model.Sched :=
   (st.pool.toModel, st.sched.toModel)
 
+/-- What one carrier has fired, and the nanoseconds of the installed clock it spent inside them.
+
+Measured only by a metered executor, and a duration needs a clock: under the live clock this is
+`IO.monoNanosNow`, under a driver's virtual clock it is virtual nanoseconds, which do not advance while work
+runs. So `busyNanos` is a reading to print rather than a quantity to assert. -/
+structure CarrierCounters where
+  /-- Items this carrier ran. -/
+  fired     : Nat := 0
+  /-- Nanoseconds of the installed clock spent inside them. -/
+  busyNanos : Nat := 0
+deriving Inhabited, Repr
+
 /-- An executor: one mutex over the pair. Every transaction below is one critical section, which is what
 makes the model's atomicity a property of this code rather than a hope about the scheduler. -/
 structure Executor (α : Type) (cap : Nat) where
@@ -74,6 +86,13 @@ take sites do when the pool turns out to be empty. Every site that can modify th
 site reads the pool value it read after modifying it: the take sites ask the scheduler first, so a refusal
 never modifies anything. -/
   placeholder : State α cap
+  /-- Whether the carrier loop accumulates `counters`. Off for `Executor.new`, on for `Executor.newMetered`:
+  the default item path pays one test of this field and neither a lock nor a clock read. -/
+  metered : Bool
+  /-- Per-carrier accumulators, index 0 while there is one carrier. Written by the carrier loop around each
+  item's run and read by `Handle.metrics`; a read copies two scalars per carrier, mutates nothing and notifies
+  nobody, so it cannot perturb what it measures. -/
+  counters : Std.Mutex (List CarrierCounters)
 
 def Executor.new (α : Type) (cap : Nat) (workers : Nat) : IO (Executor α cap) := do
   -- A placeholder of its own, not the state the cell starts with: a transaction mutates the state it read,
@@ -81,7 +100,18 @@ def Executor.new (α : Type) (cap : Nat) (workers : Nat) : IO (Executor α cap) 
   let fresh := { pool := emptyPool α cap, sched := Scheduler.initial workers }
   return { state := ← Std.Mutex.new fresh,
            cv := ← Std.Condvar.new
-           placeholder := { pool := emptyPool α cap, sched := Scheduler.initial workers } }
+           placeholder := { pool := emptyPool α cap, sched := Scheduler.initial workers },
+           metered := false,
+           counters := ← Std.Mutex.new [] }
+
+/-- **Record one fired item on carrier 0.** The metered path's own write, one critical section per item — which
+is the cost the default configuration does not pay. -/
+def Executor.accrue (e : Executor α cap) (busyNanos : Nat) : IO Unit :=
+  e.counters.atomically do
+    let cs ← get
+    match cs with
+    | []        => set ([{ fired := 1, busyNanos := busyNanos }] : List CarrierCounters)
+    | c :: rest => set ({ c with fired := c.fired + 1, busyNanos := c.busyNanos + busyNanos } :: rest)
 
 /-- **Submit, without the real-world token.** The body of `submit`, split out because a *waker* runs in
 `BaseIO`: a continuation registered on a stock `Task` cannot call an `IO` action, and enqueuing is the one
@@ -261,44 +291,62 @@ def Executor.tryTake (e : Executor α cap) : IO (Option (Option α)) :=
       | (none, _) => set st; return none
       | (some x, p') => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some (some x))
 
-/-- **One step of a worker: take work, or park until there is some.** The predicate is re-checked under
-the same lock a submit notifies under, which is what makes the model's check-and-park atomicity real: a
-worker that finds nothing parks *inside* this critical section rather than between two of them, so a wakeup
-cannot be lost in the gap.
+/-- **Park until there is work to take, or until the executor is stopping with the pool empty.**
+
+The wait `Executor.workWith` falls back to, split out so the idle-hooked path and the plain one share it. The
+predicate is re-checked under the same lock a submit notifies under, which is what makes the model's
+check-and-park atomicity real: a worker that finds nothing parks *inside* this critical section rather than
+between two of them, so a wakeup cannot be lost in the gap. -/
+private def Executor.parkUntilWork (e : Executor α cap) : IO (Option α) :=
+  e.state.atomicallyOnce e.cv
+    (pred := do
+      let st ← get
+      if st.pool.inFlight ≠ 0 ∨ st.sched.stopping then return true
+      else
+        -- Nothing to take, so this worker is about to park — and it says so *while still holding the
+        -- lock*, in the same critical section that will wait. A submit cannot slip between the check and
+        -- the park, which is the whole content of the model's `park` having no transition while work is
+        -- held. Guarded on `parked = 0` so a spurious wake does not record a second park for the same
+        -- worker; the `k` below clears it. One worker is `parked := 1`, which is M3's single carrier.
+        if st.sched.parked = 0 then
+          set ({ st with sched := { st.sched with parked := 1 } })
+        return false)
+    (k := do
+      let st ← get
+      match st.sched.take with
+      | none    => return none
+      | some s' =>
+        set e.placeholder
+        match st.pool.take with
+        | (none, _) => set st; return none
+        -- Waking to take work means the worker is no longer parked, in the same critical section as the
+        -- take, so the state never shows a worker both parked and holding work.
+        | (some x, p') => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some x))
+
+/-- **One step of a worker: take work, or park until there is some.**
+
+`idle` is asked once, and only when the pool has nothing to give while the executor still runs: it returns
+`true` when it produced work — a driver advancing a virtual clock, whose fired timer enqueued a resumed step —
+so the second take finds it. With the constant-`false` hook this is `Executor.work`, one test later.
 
 `none` means the pool was stopping. A take advances the pool and the scheduler together, exactly as
 `Executor.take` does — the two halves of the alignment cannot come apart here either.
 
 **The common case does not reach the park.** `tryTake` runs first, and only when it reports an empty pool that
-is still running does this park — which is once per drained queue rather than once per item. -/
-def Executor.work (e : Executor α cap) : IO (Option α) := do
+is still running does this fall back to `parkUntilWork` — which is once per drained queue rather than once per
+item. -/
+def Executor.workWith (e : Executor α cap) (idle : IO Bool) : IO (Option α) := do
   match ← e.tryTake with
   | some r => return r
   | none   =>
-    e.state.atomicallyOnce e.cv
-      (pred := do
-        let st ← get
-        if st.pool.inFlight ≠ 0 ∨ st.sched.stopping then return true
-        else
-          -- Nothing to take, so this worker is about to park — and it says so *while still holding the
-          -- lock*, in the same critical section that will wait. A submit cannot slip between the check and
-          -- the park, which is the whole content of the model's `park` having no transition while work is
-          -- held. Guarded on `parked = 0` so a spurious wake does not record a second park for the same
-          -- worker; the `k` below clears it. One worker is `parked := 1`, which is M3's single carrier.
-          if st.sched.parked = 0 then
-            set ({ st with sched := { st.sched with parked := 1 } })
-          return false)
-      (k := do
-        let st ← get
-        match st.sched.take with
-        | none    => return none
-        | some s' =>
-          set e.placeholder
-          match st.pool.take with
-          | (none, _) => set st; return none
-          -- Waking to take work means the worker is no longer parked, in the same critical section as the
-          -- take, so the state never shows a worker both parked and holding work.
-          | (some x, p') => set ({ st with pool := p', sched := { s' with parked := 0 } }); return (some x))
+    if ← idle then
+      match ← e.tryTake with
+      | some r => return r
+      | none   => e.parkUntilWork
+    else e.parkUntilWork
+
+/-- One step of a worker with nowhere to advance to: `Executor.workWith` and a hook that reports nothing. -/
+def Executor.work (e : Executor α cap) : IO (Option α) := e.workWith (do return false)
 
 /-- Is the executor stopping? A stop is a flag every transaction already reads — `tryTake` refuses and reports it
 — and a loop that has to *decide* whether to keep accepting needs the same reading from outside rather than a
@@ -316,10 +364,14 @@ def Executor.snapshot (e : Executor α cap) : IO (Model.Pool α × Model.Sched) 
     let st ← get
     return st.toModel
 
-/-- What the executor currently holds, for an observer outside the critical section. -/
+/-- **What the executor currently holds, read through the model projection.** Both numbers are the
+specification's own fields: `work` and `parked` out of `Scheduler.toModel`, the scheduler half of
+`State.toModel`. A reading taken here is therefore the value the refinement is stated over rather than a
+second count that must be related to it — the pool's own count is the one that must agree with `work`, and
+`State.Aligned` is what proves it does. -/
 def Executor.observe (e : Executor α cap) : IO (Nat × Nat) :=
   e.state.atomically do
-    let st ← get
-    return (st.pool.inFlight, st.sched.parked)
+    let s := (← get).sched.toModel
+    return (s.work, s.parked)
 
 end LeanIn.Sched

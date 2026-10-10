@@ -41,6 +41,9 @@ W7, selection and racing (`select`/`join`, and the runtime's `race`) and a place
 `Runtime.spawn` (D17), is met: SC16 is green — `nix develop -c bash tests/executor-contract.sh SC16` — and its
 rows are in `docs/PERFORMANCE.md` §3.3.
 
+W13, the runtime handle, the counters and deterministic time (D18), is met too: SC17 is green —
+`nix develop -c bash tests/executor-contract.sh SC17` — and its rows are in `docs/PERFORMANCE.md` §3.4.
+
 Two findings did the shaping, and both were surprises:
 
 1. **The scheduler is a global singleton with no injection point.** `static task_manager * g_task_manager` (`object.cpp:1095`), constructed at startup, no handle, no second instance. So

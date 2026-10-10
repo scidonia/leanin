@@ -535,6 +535,149 @@ printed and never asserted.
 
 ______________________________________________________________________
 
+### SC17 — a handle spawns onto a running executor, a signal stops then drains, and a timeout is read from a harness clock
+
+**Actor.** The public `controls` executable (`lake exe controls --runtime-handle --ready-file PATH`),
+driven in the background by the fixture, playing three actors: for clause one, the mode's own thread — a
+thread that is **not** a carrier — plus one dedicated `IO.asTask (Runtime.run e1 program) …` thread that
+is; for clause two, the executable's accept loop on a carrier plus the shell fixture, which is the
+process that delivers the signal; for clause three, the calling thread driving a virtual clock. Nothing
+here calls a private function: every compared value is a named field of a record the executable printed
+on stdout.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC17`, which starts the executable in the
+background, polls the marker file it publishes with a bound, sends `SIGTERM` to the pid the marker
+names (tolerating a pid that has already exited — the signal's delivery is asserted by the scenario, not
+by the fixture), waits for it to exit, and parses the records it printed. The one externally delivered
+event in the scenario is that signal. An invocation that does not run, prints no record, prints a
+malformed record, publishes no marker, exits non-zero without the check's `fail` line, or is bounded by
+the watchdog is a setup error, never the `Then`.
+
+**Given.** A fresh single-carrier `Sched.Executor.new LeanIn.Task.Item 256 1` and `Runtime.Hooks.new`
+per clause. **Clause one.** A `Runtime.Handle` over `e1`; the run's program parks on a task-layer
+`Join` cell, and the cell is resolved by the spawned computation the mode sends through the handle.
+**Clause two.** A `Runtime.Listener.bind 127.0.0.1:0`, a `Std.Mutex`-guarded accept counter, a
+`Std.Mutex`-guarded event log, an `IO.Promise` gate the served body parks on, an `IO.Promise` for "the
+stop was observed", and a 9-byte payload; the run's program publishes the listener address, spawns
+`Runtime.serveUntilStopped hooks e2 l 1 body []`, registers a `.sigterm` waiter and awaits it through
+`Runtime.awaitSignal`. **Clause three.** A fresh `HarnessClock` per arm, `Clock := HarnessClock.clock
+hc`, and the stated instants `completesAt = 30`, `longDeadline = 100`, `shortDeadline = 20`.
+
+**When.** One invocation, three clauses, with every ordering enforced by the mode's own awaits and never
+by which thread wins:
+
+1. **The handle.** The mode starts the run on a dedicated thread and, from its own thread, waits until
+   `Handle.metrics` reports `ready = 0, parked = 1` (the carrier is parked inside the driver's wait).
+   It then calls `Handle.spawn h1 .normal spawned` once; `spawned` records `IO.getTID` and resolves the
+   program's cell.
+2. **The signal.** The main thread connects the first client and sends the payload, then waits (bounded
+   by "the accept counter read 1, or the carrier task finished") and writes the marker file with its own
+   pid. The fixture sees the marker and sends `SIGTERM`. The handler step — resumed on the carrier from
+   the registered waiter — records `signal` and `stop-observed`, calls `Handle.stop`, and resolves the
+   gate; the loop stops accepting and drains the one handle it holds; the body echoes and finishes; the
+   drain returns. After observing the stop, the main thread connects a second client, sends the payload
+   and closes it without reading, counting `offered = 2`.
+3. **The clock.** Three arms, each its own `Runtime.runVirtual hc e3` on the calling thread: the longer
+   deadline does not trip (`withTimeout c 100 (sleep c 30; pure 7)`), the shorter deadline is the same
+   test at `20`, and a deadline raced against a timer handle is `Task.select` over a spawned
+   `sleep c 30` and a spawned await of a gate that is never resolved.
+
+**Then.** There is exactly one `handle|`, one `clock|`, one `signal|` and one `tokens|` record per
+invocation, shaped exactly with nonempty values, as `handle|spawnTid|ranTid|carrierTid|readyBefore|
+parkedBefore|readyAfter|parkedAfter|runUs`, `clock|completesAt|longDeadline|longOutcome|longElapsed|
+shortDeadline|shortOutcome|shortElapsed|pendingAfter|deadlineAt|deadlineWinner|runUs`,
+`signal|signal|signalSeen|stopSeen|handlerCarrier|acceptedAtStop|acceptedFinal|offered|bodyDone|
+inFlightAfter|pendingHooks|listener|log|runUs`, and `tokens|sequential|sequentialDistinct|contended|
+contendedDistinct`. The clauses are read from their own named fields:
+
+- **SC17-O1 — a non-carrier thread spawns and the work runs on a carrier.** `ranTid == carrierTid` and
+  `ranTid != spawnTid` with `carrierTid != spawnTid`, so the work ran on a carrier and not on the thread
+  that spawned it. The affirmative control, in the same record, is `parkedBefore == 1` and
+  `readyBefore == 0`: the carrier was parked when the foreign spawn arrived, so the wake protocol was
+  exercised rather than a spawn into an idle pool; and `readyAfter == 0`, `parkedAfter == 0`, so the run
+  returned with nothing held and nobody parked.
+- **SC17-O2 — a registered signal stops accepting, then drains.** `signal == 15` (SIGTERM on this
+  platform) and `signalSeen == yes`; the stop was observed before the second offer and no later
+  connection was accepted (`acceptedFinal == 1` while `offered == 2`, and no `accept:2` in the log). The
+  affirmative control, in the same run, is `acceptedAtStop == 1` — the counter did move for the
+  connection offered before the stop, so `acceptedFinal == 1` is a reading about a loop that can count,
+  not a counter stuck at zero, and `offered == 2` makes it non-vacuous. The connection in flight
+  completed (`bodyDone == yes`, `drain-returned` after `body-echoed`); the drain returned with nothing held
+  and nothing outstanding (`inFlightAfter == 0`, `pendingHooks == 0`); the handler's step ran on a
+  carrier (`handlerCarrier == yes`); and the socket outlived its last use (`listener` nonempty, read
+  after the drain). The log relation is exactly one `accept:1`, one `offer:2`, one `stop-observed`, one
+  `body-echoed`, one `drain-returned`, with `accept:1 < stop-observed < body-echoed < drain-returned`
+  and `stop-observed < offer:2`.
+- **SC17-O3 — a timeout whose elapsed time is read from the harness clock.** `longOutcome == some:7` and
+  `longElapsed == completesAt`; `shortDeadline < completesAt` (the control is proved shorter, so the
+  pair is a relation and not two numbers), `shortOutcome == none` and `shortElapsed == shortDeadline`;
+  `pendingAfter == 1` (the run ended at the winning instant without advancing to the loser); and
+  `deadlineWinner == timer` with `deadlineAt == completesAt`. `runUs` on every record, `carrierTid`, the
+  counters' per-carrier `carriers` field and the three measurement rows are printed and never asserted.
+
+**The detectors' own control, in the same run.** `handle_ok`, `signal_ok`, `clock_ok` and `tokens_ok`
+are the record-string detectors the assertions are built from, and `signal_log_ok` is the log relation
+inside `signal_ok`. They must accept a well-formed record written from the record syntax and the
+expectation, and reject each near miss, one per clause plus this one: the work ran on the calling thread
+(`ranTid = spawnTid`), a connection offered after the stop was accepted (`acceptedFinal = 2`), the
+harness clock never advanced (`longElapsed = 0`), and a duplicate token id was handed out
+(`sequentialDistinct = sequential - 1`). The delivered near-miss count is four — the fourth is the
+token-id control's — and a near miss the detector accepts is a fixture defect reported as a setup error,
+separately from the `Then`. The mode's own `handlectl|` readings must hold too: `accepted` for the
+well-formed set, `rejected` for each of the four near misses, and `variants = 4`.
+
+**Assertion order.** `check_sc17` evaluates the three clauses first, in order O1, O2, O3, and the
+`tokens|` control after them, so the first assertion a run reports is never the one whose failure is
+interleaving-dependent.
+
+**The failure this scenario records on the staged tree.** The operations are new, and the staging is a
+plausible first cut per clause. `Handle.spawn` fires the item on the calling thread instead of routing
+through `Executor.spawnBase`/`submitBase`, so `ranTid = spawnTid`; `Runtime.awaitSignal` creates the
+waiter and calls `wait` — the watcher is registered — but returns at once rather than awaiting the
+returned task, so the handler stops the executor before the first connection is offered and the accept
+counter never moves; and `HarnessClock.clock`'s `sleep` schedules at `now` rather than `now + d`, so
+every timer fires at instant zero. The check reports the first failing clause — SC17-O1 — as its own
+`Then`:
+
+```
+SC17 Then: the spawned work did not run on a carrier
+  observed: spawnTid=<main> ranTid=<main> carrierTid=<carrier> parkedBefore=1
+```
+
+The same run's `clock|` record carries `longElapsed=0 completesAt=30 longOutcome=some:7` (and
+`shortOutcome=none`, `shortElapsed=0`), and its `signal|` record carries `acceptedAtStop=0
+acceptedFinal=0 offered=2 signalSeen=no stopSeen=yes bodyDone=no log=[stop-observed,drain-returned,
+offer:2]`. On the fixed tree the three read `ranTid=carrierTid ≠ spawnTid`, `longElapsed=30` with
+`shortOutcome=none`, and `signal=15 signalSeen=yes acceptedAtStop=1 acceptedFinal=1 bodyDone=yes`. The
+`tokens|` control's sequential half stayed `sequential=64 sequentialDistinct=64` on every staged run —
+deterministic, and it holds. Its contended half read `contended=128 contendedDistinct=126` on the staged
+tree in the run that caught it: two duplicate token ids handed out by the unfixed allocator under two
+foreign threads. That run is the defect the control exists for; other runs read `contendedDistinct=128`
+because the interleaving has to go unluckily, and the reading holds on every run once the allocator's
+read-modify-write is inside a critical section. The contended half can therefore pass on the unfixed
+tree, which is why it is a control and the fourth `handlectl|` variant rather than a clause or a gate's
+red. A red is only a red if it is a clause's own assertion: a missing or malformed record, a signal that
+killed the process, a marker that never appeared, or a watchdog expiry is a setup error, not the `Then`.
+
+**Why, and what it rests on.** Clause one is the reason the handle exists: a thread that is not a carrier
+originates work, the wake is delivered by `submitBase`'s check-and-notify under the same lock the
+parking predicate is re-checked under, and the counters are read through the model projection across the
+thread boundary. The handle is not a `Send` marker and the claim is argued, not proved — the
+serializability lemma `docs/primitive-theory.md` §4 states as unproved is what would close it — so the
+scenario asserts tids and counters, not sharing. Clause two's signal is real and delivered from outside:
+the waiter is a libuv watcher whose handler resolves the promise on the loop thread, and the awaiting
+continuation reaches our executor only through W1's seam, so the delivery thread only enqueues and the
+handler's step runs on a carrier, which the record reads as `handlerCarrier`. Every ordering is enforced
+by the mode's awaits — the marker and the counter for `accept:1 < stop-observed`, the gate for
+`stop-observed < body-echoed`, the loop's own `Registry.drain` for `body-echoed < drain-returned`, and
+the stop promise for `stop-observed < offer:2` — never by which thread wins; and the second connection
+cannot be accepted because the accept is non-blocking and the loop checks `isStopping` before every
+accept attempt, so a connection created after the stop meets a check, not a `tryAccept`. Clause three
+states the clock claim in its strongest clock-free form: the elapsed time is read from `HarnessClock`'s
+virtual instant and compared against the instants the mode stated, so no scenario reads a live clock.
+
+______________________________________________________________________
+
 ### SC14 — the service's own obligations: no drop, a live bound, and resolution within a deadline
 
 **Actor.** A Lean executable server (`lake exe controls --runtime-service`): an accept loop of ours

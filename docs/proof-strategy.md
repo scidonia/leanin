@@ -116,6 +116,17 @@ list code; it reaches no `IO.Promise`, no atomics and no new syscall, so no entr
 place a child's `Ctx` is built, and the drain awaits handles outside the lock, so neither introduces substrate.
 The two model propositions and the liveness limit are stated and argued in §3.
 
+**W13's handle, counters and clock change the TCB in no way (D18).** The handle's three operations are
+compositions of shipped transactions, so their whole mechanism is `Std.Mutex`/`Std.Condvar` — A1, A4/A5 —
+over pure list and natural-number code, and `Cancel.new`'s allocator becomes one such critical section rather
+than an unguarded `IO.Ref`. `Clock.live` composes `IO.monoNanosNow` (**A7**) with the timer leaf behind W1's
+seam, and `HarnessClock` calls no clock at all. The one new import edge into `Std.Async` is `Std.Async.Signal`
+in `LeanIn/Runtime/Leaf.lean`, whose externs (`lean_uv_signal_mk`/`_next`/`_stop` → `runtime/uv/signal.cpp`)
+are the leaf layer's wholesale reuse D3 names rather than a new substrate; `IO.asTask … Task.Priority.dedicated`
+is called by the test mode, not by library code, and is already controlled. No `IO.Promise` construction is
+added in the library, so `Blocking.lean`'s direct promise reach stays the only one. `#print axioms` is unchanged
+because W13 adds no theorem.
+
 The honest framing: **the proof is about a model of the scheduler, and the model is a design decision
 that we control.** The project's central architectural question is therefore not "what do we prove"
 but **"how thin can we make the layer between the proven model and the running code."** That is why
@@ -189,6 +200,17 @@ from A1–A7 ([`primitive-theory.md`](primitive-theory.md) §6) — a handler th
 drain unbounded. **Trigger to take a model:** before `Registry` gains a bound or a `shutdown`, or before
 a server's liveness is argued from a drain deadline (W13) — then `LeanIn/Model/Registry.lean` with
 `Registry.Sound` and a reachability probe in `LeanIn/Test/Dynamics.lean`'s idiom.
+
+**What W13 states and argues.** The handle's usable-off-carrier property, `Handle.CriticalSections`, and the
+counters' consistency with the model are **argued, not proved**, for D14's reasons: the refinement they would
+need is the missing serializability lemma (§4), and the handle's surface is fixed by an audit of the cells its
+three operations reach under their own locks. The counters are read through `Executor.observe`, the same
+projection the refinement is stated over, so their consistency is the projection's own fact rather than a
+second obligation. Their executable half is SC17, whose clause-O1 reads the counters across a thread boundary
+and whose `tokens|` control reads the token-id property the allocator fix exists for. **The deadline arm's
+obligation is not discharged:** a deadline is expressible (the clock plus `spawn` and `select`, exercised by
+SC17-O3), but `Registry`'s cancel-what-outlives-a-deadline arm and the drain-liveness argument D16 deferred
+remain absent, and D18 records the trigger as met with the item open.
 
 ______________________________________________________________________
 

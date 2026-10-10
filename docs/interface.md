@@ -262,7 +262,62 @@ await is what makes its return mean the handlers finished. The registry holds ha
 it aborts nothing — Lean has no drop hook that could (W5) — and a handle it took is still awaitable by anyone else
 holding it. `drain` awaits rather than cancels: cancelling what outlives a deadline is `Runtime.cancel`, issued by
 whoever holds the clock. *This is D16's design, and it is built: `LeanIn/Task/Registry.lean`, its `joinAll`/`drain`
-in `Net.lean`'s serving loops, and SC15 drives it at the public executable.*
+`drain` in `Net.lean`'s serving loops, and SC15 drives it at the public executable.*
+
+**A handle is a narrowed capability, and the narrowing is the design.** `Runtime.handle (e : Sched.Executor α cap) : Handle α cap`
+holds the executor and exposes exactly three operations: `Handle.spawn (h) (prio) (a) : IO (Task.Task α)`,
+which builds the child's item — `Join.new`, `Cancel.new`, `Task.Item.stamp` — and routes it through
+`Executor.spawnBase` (`.high`) or `Executor.submitBase` (`.normal`), the two placements D17 already fixed;
+`Handle.stop (h) : IO Unit`, which is `Executor.stop`; and `Handle.metrics (h) : IO Metrics`. The executor is
+a **private field with a private constructor**, so this is the type's surface rather than a convention: from
+outside the module a caller can neither project the executor out of a `Handle`, build one, nor pattern-match
+one apart, and so cannot reach a carrier-side operation through it. What it **withholds** is the point:
+`Executor.work`, `Executor.park`, `Executor.tryTake`, `Executor.snapshot` and
+every `Hooks` operation are carrier-side and are not reachable from a `Handle`, so a thread that is not a
+carrier can originate work and ask the runtime to stop without being handed the whole executor. The claim
+that makes its use off-carrier sound is `Handle.CriticalSections`: every shared cell those operations reach
+is read and written inside that cell's own lock — the executor's `state`, its `cv` only inside a `state`
+section, `Cancel`'s counter, `Join`'s own lock, and the counters — so their critical sections are
+serializable against a carrier's and the executor's `State.Aligned`/`Scheduler.Live` invariants survive a
+foreign-thread spawn. `Executor.submitBase`'s `cv.notifyOne` is issued inside the same `state` critical
+section that records the work, which is the same lock the parking predicate is re-checked under, so a spawn
+from a parked-against thread cannot be lost (P6 for this producer). This is an argument, not a theorem — it
+needs the serializability lemma [`primitive-theory.md`](primitive-theory.md) §4 states as unproved — and it
+is **not** a `Send` marker: it fixes one object by audit and checks nothing a caller shares with a thread.
+The audit's one finding is a real defect: `Cancel.new`'s id allocator read and wrote an `IO.Ref` under no
+lock, and a handle's spawn allocates a token off the carrier, so the allocator now does its read-modify-write
+in one `Std.Mutex` critical section — a correction of D8's rule, not a new primitive. *This is D18's design,
+and it is built: `LeanIn/Runtime/Basic.lean`, and SC17-O1 drives it at the public executable.*
+
+**The counters are read through the model projection, so a counter cannot disagree with the model.** `Metrics`
+is `ready : Nat`, `parked : Nat` and `carriers : Option (List CarrierCounters)`, where `CarrierCounters` is
+`fired` and `busyNanos` per carrier. `ready` is `Pool.inFlight`, which `State.Aligned` proves equals
+`Scheduler.work`, and `parked` is `Scheduler.parked`; `Executor.observe` reports the model projection's own two
+fields — `work` and `parked` out of `Scheduler.toModel` — in one critical section that mutates nothing, enqueues
+nothing and notifies nobody, so a read cannot perturb what it measures and cannot disagree with the model that
+the scheduler's half of the refinement is stated over. `carriers` is `some` only for an executor built metered
+(`Executor.newMetered`), and metering is opt-in so the default item path pays one `Bool` test and neither a
+lock nor a clock read. Busy time is a duration in nanoseconds of whichever clock the driver was given, so
+under a harness clock it is zero by construction (virtual time does not advance while work runs); it is
+printed and never asserted, the `runUs` precedent. *This is D18's design, and it is built:
+`LeanIn/Sched/Executor.lean`, `LeanIn/Runtime/Basic.lean`, and SC17-O1 reads `readyBefore`/`parkedBefore`/
+`readyAfter`/`parkedAfter` across a thread boundary.*
+
+**Time enters as a parameter, and the harness drives it rather than replacing the timer.** `Clock` is
+`{ now : IO Nat, sleep : Std.Time.Millisecond.Offset → Task.Async Unit }`; `Runtime.sleep` and
+`Runtime.withTimeout` take one, and `Clock.live hooks` is today's exact composition — `IO.monoNanosNow` for
+the reading and the libuv timer behind W1's seam for the wait — so the production path is the same code it
+was, reached through a record instead of directly. `HarnessClock` is the second implementation: a virtual
+`now` and a sorted list of timers under its own mutex, with `advance : IO Bool` moving `now` to the earliest
+deadline and firing that timer; its `sleep d` schedules at `now + d` and registers nothing with libuv, so no
+live clock is read on a harness run. `Runtime.runVirtual (hc) (e) (a)` is `Runtime.runWith (e) (now := hc.now)
+(idle := fun _ => hc.advance)` — the general driver with the harness's reading for the metered path and one
+advance per idle round — so it parks exactly as `blockOn` does when nothing can be advanced to, which keeps
+it composable with a live leaf or another thread's delivery. No production primitive is added: `Clock.live`
+composes two things already on the register, and `HarnessClock` calls no clock at all. The harness clock is
+exercised by SC17-O3, at a stated instant rather than by waiting; the serving loops build `Clock.live hooks`
+locally, so a harness-driven drain is not offered. *This is D18's design, and it is built:
+`LeanIn/Runtime/Clock.lean`, `LeanIn/Runtime/Time.lean`, and SC17-O3 drives it at the public executable.*
 
 ______________________________________________________________________
 
@@ -276,8 +331,11 @@ Each of these is a decision, not an oversight:
   homogeneous list, not the `Sum`-nested branches a `select!` macro expands to, so an arity-indexed or
   heterogeneous shape is not offered. And when several handles are ready it promises no fairness: it returns the
   first handle to *become* ready as it observed it, with list order breaking ties only among handles already
-  resolved at the call — a rule about a race already run, not a claim about one to come. The timer's own handle —
-  the deadline arm a request races against — is the other half still missing (W13).
+  resolved at the call — a rule about a race already run, not a claim about one to come. The timer's own
+  handle — the deadline arm a request races against — is now *expressible*: the clock of §4 plus `Runtime.spawn`
+  and `select` let a request race a timer's handle, and SC17-O3 decides one at a stated instant. What is still
+  absent is the *policy* arm — a `Registry` that cancels what outlives a deadline, and the drain-liveness
+  argument D16 deferred — which is D18's recorded open item.
 - **No bare `wait`.** Only `awaitUntil`-shaped operations, because A4 permits spurious wakeups. A
   `Condvar.wait` without a predicate should be unrepresentable in `leanin`'s API.
 - **No fairness or priority guarantee.** A1 gives none and A6 gives none. Nothing in the interface may
@@ -291,13 +349,22 @@ Each of these is a decision, not an oversight:
 - **No `Send`/`Sync`.** Lean has none; O2 in [`decisions.md`](decisions.md) is unresolved. Until it
   closes, the interface cannot be frozen — this is the one thing that blocks it. The task-local
   context is gated on the same item: it is per-computation and tested on one carrier, and the
-  cross-carrier half of its inheritance law is W8's (D16).
+  cross-carrier half of its inheritance law is W8's (D16). The `Handle` of §4 is not an exception: it
+  is a narrowed capability fixing one object by audit, argued rather than proved, and it neither checks
+  nor restricts what a caller shares with a thread — so it does not close O2 and must not read as if it
+  did.
+- **No consistent counter snapshot, and no pacing guarantee for an external signal.** A `Metrics` read
+  takes two short critical sections — `Executor.observe` for `ready`/`parked`, the counters lock for the
+  per-carrier list — and copies scalars, so it is not a single-instant image of the whole executor, only
+  what each critical section saw. And a registered signal is delivered by the OS: nothing here promises
+  *when* a `kill` reaches the handler, only the order of what the handler then did (SC10, SC17).
 - **No `shutdown` and no abort-all on the registry.** `LeanIn/Task/Registry.lean`'s `drain` awaits what it
   holds; it does not cancel. Cancelling what outlives a deadline is `Runtime.cancel`, already public and
   issued by whoever holds the clock, and the registry's contribution is only that it then drains. An
   operation that cancels the membership itself — a `Registry.shutdown`/`abortAll` — is deliberately absent:
-  its cancellation half is that same `Runtime.cancel`, and testing "outlives the deadline" needs a harness
-  clock this milestone does not have, since a wall-clock test of it is a sleep (W13; D16).
+  its cancellation half is that same `Runtime.cancel`, and testing "outlives the deadline" needs a clock it
+  can advance, which the harness clock of §4 now provides (W13); the cancel arm itself is still absent, so
+  this is D18's open item rather than a missing instrument.
 - **No `LocalSet`, `block_in_place`, `block_on`-variants, or runtime-flavour enum** in v1. One flavour
   (single-carrier, D2), shaped on `LocalRuntime`.
 
