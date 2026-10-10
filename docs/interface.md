@@ -169,10 +169,36 @@ computation that wants its children to stop with it has to cancel them.
 pair of classes can in fact express. `Async` here is **continuation-based** (`await` registers a continuation
 and yields; it never blocks a thread), which is what makes a single-carrier executor possible at all.
 
-`race` is not one of them, and building the layer is what settled that: "whichever handle becomes ready
-first" needs an operation that awaits *any* of several, while `await` names one. Tokio reaches the same place
-through a `JoinSet` and `select`, so the operation exists to be added — but adding it is an interface
-decision, and until it is made `race` is in [§5](#5-deliberately-absent) rather than here.
+**`select` is the operation, and it is the first-ready one.** `LeanIn/Task/Basic.lean` gives the layer
+`select (h : Task α) (hs : List (Task α)) : Async (Nat × α)` — homogeneous, and non-empty: `h` is the head, so
+index `0` names it and index `i+1` names `hs[i]`, and a zero-handle `select` is unrepresentable rather than a
+meaningless `none`. It returns the winner's index *into the list as given* and its value, and it **detects
+readiness, not order**: one shared `Join (Nat × α)` is registered on every handle through `Join.onReady`, each
+continuation carrying its index, and the winner is the first `Join.resolveFirst` — so a handle that became ready
+earlier but was reached later in the list still wins. Among handles already resolved when `select` is reached the
+earliest in list order wins; among handles resolved while it waits, the first resolution wins. It **cancels
+nothing**: a `Task` is a value whose cell is the value's home, so a handle passed to `select` is still awaitable
+elsewhere, and a caller that wants the rest can keep them. `join (hs : List (Task α)) : Async (List α)` is the
+all-of companion (`hs.mapM Async.await`, `join [] = pure []`); the pair case stays `concurrently`.
+
+**`race` cancels its losers, and it is a runtime combinator.** `Runtime.race (hooks : Hooks) (v : α) (h : Task α)
+(hs : List (Task α)) : Task.Async (Nat × α)` is `select` followed by `cancel hooks t v` for every non-winner. It
+lives in the runtime because cancelling needs `Hooks` to retire a loser's leaf registrations and the task layer
+has none. Of a cancelled loser a caller observes exactly W5's laws: its cell resolves with `v` exactly once and
+immediately, no step of it runs afterwards, and its registrations are retired; a loser that finished *before*
+the race returned keeps its own value, because a cancellation never replaces a value that exists. There is no
+second abandonment mechanism — `race` is `select` composed with the existing `Runtime.cancel`.
+
+**A priority argument on the runtime's outside spawn, and it promises nothing.** `Runtime.spawn (e : Executor cap)
+(prio : Priority) (a : Task.Async α) : IO (Task.Task α)` takes `Priority.high`/`Priority.normal`, which select a
+*placement lane*: `.high` places the task's first step in the owner-local one-slot LIFO buffer
+(`Executor.spawnBase` → `Pool.spawn`), `.normal` appends it to the FIFO ring (`Executor.submitBase` →
+`Pool.submit`). The slot is served before the ring while the tick's allowance lasts, so a `.high` spawn issued
+after a `.normal` one is served first — but the argument is a placement request and nothing more; §5's
+no-fairness-or-priority bullet governs it, and "high" promises only that the task is placed where the queue
+serves sooner, never that it runs sooner. The register is unchanged: `select`/`join` use `Join`'s existing
+operations and `ctx.resume`, `race` reuses `Runtime.cancel`, and `spawn`'s two destinations already exist — no
+new primitive, no new extern, no new direct promise call (D17).
 
 **Leaf operations are not ours.** Timers, sockets, DNS, signals and processes stay in `Std.Async` and
 are reached across one bridge: an external event attaches a continuation that pushes into `inject`
@@ -244,18 +270,23 @@ ______________________________________________________________________
 
 Each of these is a decision, not an oversight:
 
-- **No `race`.** Awaiting the first of several handles needs a `select`-shaped operation, because `await`
-  names one handle; the surface has no such operation, so §4's combinators are `concurrently` and
-  `background`. The loser's cancellation is no longer a separate absence — `Runtime.cancel` drops a
-  computation's scheduled work and wakes its awaiter (`tokio-workplan.md`, W5) — and `race` is still absent
-  for the reason it always was: awaiting *any* of several needs the operation itself, not only a way to
-  abandon the others. The timer's own handle is the other half still missing (W7).
+- **No heterogeneous `select`, and no guarantee about which ready handle wins.** `select`, `join` and `race`
+  are now in §4 — the first-ready operation the layer needed, its all-of companion, and the runtime combinator
+  that cancels the losers. What remains absent is generality and any ordering promise. `select` is over a
+  homogeneous list, not the `Sum`-nested branches a `select!` macro expands to, so an arity-indexed or
+  heterogeneous shape is not offered. And when several handles are ready it promises no fairness: it returns the
+  first handle to *become* ready as it observed it, with list order breaking ties only among handles already
+  resolved at the call — a rule about a race already run, not a claim about one to come. The timer's own handle —
+  the deadline arm a request races against — is the other half still missing (W13).
 - **No bare `wait`.** Only `awaitUntil`-shaped operations, because A4 permits spurious wakeups. A
   `Condvar.wait` without a predicate should be unrepresentable in `leanin`'s API.
 - **No fairness or priority guarantee.** A1 gives none and A6 gives none. Nothing in the interface may
   read as promising that a task *will* run, only that it is queued. This governs §4's sync primitives too:
   a mutex's or semaphore's waiter order is unspecified, and a channel serves its queue FIFO and its waiters
-  in no promised order.
+  in no promised order. `Runtime.spawn`'s priority argument is not an exception: it selects a *placement
+  lane* — the owner-local LIFO slot or the FIFO run queue — and promises nothing about when the task runs.
+  It is honoured by the implementation and promised by no document; "high" is not a total order, and two
+  `.high` spawns displace each other through the slot's ordinary overflow rule.
 - **No atomics.** Not exposed (D4, D7).
 - **No `Send`/`Sync`.** Lean has none; O2 in [`decisions.md`](decisions.md) is unresolved. Until it
   closes, the interface cannot be frozen — this is the one thing that blocks it. The task-local

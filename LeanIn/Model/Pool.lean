@@ -159,6 +159,12 @@ example : (({(emptyPool Nat) with cap := 4, ring := [0, 1, 2, 3]}).submit 4).inj
 /-- A spawn into a free slot occupies it, and the ring is untouched. -/
 example : ((emptyPool Nat).spawn 7).lifo = some 7 := by decide
 
+/-- The hypothesis `take_slot_first` consumes is **reachable and staged by a real operation**: a
+local `spawn` populates the slot, and the fresh pool's poll count is within the allowance — so the
+lemma is not about an unreachable state, and the slot is not hand-filled. -/
+example : ((emptyPool Nat).spawn 7).lifo = some 7 ∧ ((emptyPool Nat).spawn 7).lifoPolls < 3 := by
+  decide
+
 /-- A second spawn takes the slot, displacing the first. -/
 example : (((emptyPool Nat).spawn 1).spawn 7).lifo = some 7 := by decide
 
@@ -227,6 +233,16 @@ theorem take_conserves {p : Pool α} (h : p.Consistent) : (p.take).2.Consistent 
       simp_all [Pool.Consistent, Pool.inFlight]
       omega
     | none => exact takeFromRing_conserves h
+
+/-- **The slot is taken first while the allowance lasts.** A one-line restatement of `take`'s own
+definition, and the model half of the priority argument: `.high` places a task in the slot
+(`Pool.spawn`) where the owner takes it before the ring, `.normal` appends it to the ring
+(`Pool.submit`). The priorities themselves are not modelled — a modelled priority ordering would be a
+fairness statement the interface forbids — so what is stated is the *mechanism*, not a promise. -/
+theorem take_slot_first (p : Pool α) (x : α)
+    (hl : p.lifo = some x) (hp : p.lifoPolls < p.lifoCap) : (p.take).1 = some x := by
+  unfold Pool.take
+  rw [ite_eq_left hp, hl]
 
 theorem steal_conserves {p : Pool α} (h : p.Consistent) : (p.steal).2.Consistent :=
   takeFromRing_conserves h

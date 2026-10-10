@@ -187,4 +187,22 @@ def cancel {α : Type} (hooks : Hooks) (t : Task.Task α) (v : α) : IO Unit := 
   t.cancel v
   hooks.retire
 
+/-- **Race a handle against others**: the first of them to become ready wins, and every non-winner is cancelled
+with `v`.
+
+`select` decides which handle won and leaves the rest running; this applies `cancel` to each loser, so a loser
+resolves with `v` exactly once and immediately, no step of it runs afterwards, and its registrations are retired.
+A loser that finished before the race returned keeps its own value: a cancellation never replaces a value that
+exists. -/
+def race {α : Type} (hooks : Hooks) (v : α) (h : Task.Task α) (hs : List (Task.Task α)) :
+    Task.Async (Nat × α) := do
+  let r ← Task.select h hs
+  let rec go : List (Task.Task α) → Nat → Task.Async Unit
+    | [], _ => pure ()
+    | t :: ts, i => do
+        if i != r.1 then monadLift (cancel hooks t v)
+        go ts (i + 1)
+  go (h :: hs) 0
+  return r
+
 end LeanIn.Runtime

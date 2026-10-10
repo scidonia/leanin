@@ -642,6 +642,105 @@ trusted-base table are unchanged, and `#print axioms` is unchanged because W12 a
 
 ______________________________________________________________________
 
+### D17 — `select` is one shared cell on every handle; `race` is the runtime layer that cancels; priority is a placement lane.
+
+**What it is, and where it lives.** `LeanIn/Task/Basic.lean` gains two task-layer combinators.
+`select (h : Task α) (hs : List (Task α)) : Async (Nat × α)` is homogeneous and non-empty — head-and-rest, so a
+zero-handle selection is unrepresentable rather than a checked error — and returns the winner's index into the
+list as given and its value. `join (hs : List (Task α)) : Async (List α)` is `hs.mapM Async.await`, with
+`join [] = pure []`; the pair case stays `concurrently` (`Basic.lean:332`). `LeanIn/Runtime/Leaf.lean` gains
+`race {α : Type} (hooks : Hooks) (v : α) (h : Task α) (hs : List (Task α)) : Task.Async (Nat × α)` beside
+`cancel`. `LeanIn/Runtime/Basic.lean` gains `inductive Priority | high | normal` and changes `spawn` to take it.
+
+**One shared cell, registered on every handle — not one cell per handle joined afterwards.** `select` makes one
+fresh `Join (Nat × α)` and, for each handle `t` at list index `i`, calls `Join.onReady t.cell (fun v =>
+Join.resolveFirst j (i, v))`. The winner is the first `Join.resolveFirst` — the law already stated at
+`Basic.lean:135`, whose doc names this race ("the first of them is the result", "what a timeout or a
+`select`-shaped operation needs"). This reuses the law rather than restating it: a resolution that arrives while
+`select` waits resolves the shared cell, and a later one is ignored, so the mechanism is the existing
+first-writer-wins cell and not a new race account. **The tie rule follows from `onReady`'s immediate path:** if a
+handle is already resolved when its registration runs, the continuation runs at once, in list order, so among
+handles already resolved at the call the earliest in list order wins, and among handles resolved afterward the
+first resolution wins. `select` then mirrors `Async.await`'s "already there" path (`Basic.lean:277`): if the
+shared cell is resolved at the end of the registration loop it calls `k` in-step, costing a lock and no
+scheduling round. **Rejected: one cell per handle, joined afterwards.** It would need a second race to decide
+which of the per-handle cells resolved first, and that second race is exactly the shared cell; and it would
+either park on each cell in turn (which the head-only first cut does, and cannot see a later handle) or rebuild
+`resolveFirst` per handle. **Rejected: `select` as a `MonadAwait` method.** The class deliberately hides the
+cell behind `Handle` (`Basic.lean:312-316`), and `select` needs the cell; a method would force every
+implementation to have one for a second implementation that does not exist. **Rejected: `select` over
+`List (Task α)` returning `Option (Nat × α)`.** It makes a zero-handle selection total at the cost of an arm in
+every caller; the repository's taste is to make the bad state unrepresentable (`interface.md:281`). **Rejected:
+the heterogeneous `select!`-shaped surface** (`Sum`-nested branches): Lean's `do` notation does not expand
+branches as Tokio's macro does, so it would need an n-ary sum type and a per-arity combinator for a generality no
+caller exercises.
+
+**`select` does not cancel; `race` is the layer that does.** A `Task` is a value whose cell is the value's home,
+so a handle passed to `select` is still awaitable elsewhere: `select` transfers no ownership and leaves every
+loser running, and a caller that wants "wait for the first of several, then continue with the rest" keeps the
+handles. `race` is `select` followed by `cancel hooks t v` for every non-winner, so **every observable claim
+about a cancelled loser is W5's law's consequence and not a new law about selection**: the loser's cell resolves
+with `v` exactly once and immediately (`Join.resolveFirst`), no step of it runs afterwards (`Item.fire`,
+`Basic.lean:99`), and its registrations are retired (`hooks.retire`, `Leaf.lean:77`). A loser that finished
+before the race returned keeps its own value, because `resolveFirst` ignores a second resolution and a
+cancellation never replaces a value that exists. `race` lives in the runtime because cancelling needs `Hooks` to
+retire a loser's registrations and the task layer has none. **Rejected: `race` in the task layer** — it would
+either duplicate the registry or cancel without retiring. **Rejected: a `select` that cancels its losers** (what
+Tokio's `select!` does when the unselected branch owner drops the future) — this repository's cancellation is an
+explicit operation with a caller-supplied value (`Task.cancel`, `Basic.lean:248`), and a selection that cancels
+makes the mechanism do policy the caller cannot see. There is **no second abandonment mechanism**: `race`
+composes `select` with the existing `Runtime.cancel`.
+
+**Priority is a placement lane, and it routes through the two existing destinations.** `spawn (e : Executor cap)
+(prio : Priority) (a : Task.Async α)` branches on the argument: `.high` places the task's first step with
+`Executor.spawnBase` (`Executor.lean:159` → `Pool.spawn`, the one-slot LIFO buffer), `.normal` with
+`Executor.submitBase` (`Executor.lean:93` → `Pool.submit`, the FIFO ring). The two destinations are the two
+placements the model already states and the refinement already proves (`toModel_spawn`, `toModel_submit`), and the
+new producer routes **through** them rather than opening a third: this satisfies the rule that all producers go
+through one internal scheduling-destination decision, because the two lanes *are* those two destinations and the
+producer writes the pool through nothing else. **Operationally, "priority"
+means: place the task where the queue serves sooner. It does not mean the task will run sooner.** The slot holds
+one task, so a second `.high` spawn displaces the first through the same overflow rule `Pool.spawn` applies;
+"high" is not a total order and nothing about it is promised. **Rejected: priority as a field on `Item`, or a
+priority-ordered ring/inject** — it changes the pool's stated FIFO/ring semantics and needs new model functions
+and proofs, to promise an order the interface must not promise. **Rejected: priority on the task-layer
+`Async.spawn`** — the task layer has no queue to order (it calls `ctx.resume`, the parent's route), so the
+argument would be accepted and ignored, and `Async.spawn` has many callers.
+
+**The model question, answered.** The priority argument needs no new model structure: it selects between two
+placements the model already refines, and the served order is already `Model.Pool.take`'s
+(`Model/Pool.lean:94-103`). The milestone adds one derived lemma,
+`Model.Pool.take_slot_first (p) (x) (hl : p.lifo = some x) (hp : p.lifoPolls < p.lifoCap) : (p.take).1 = some x`
+— a one-line restatement of the definition — and its hypothesis is **reachable and staged by a real operation**,
+not hand-filled: `example : ((emptyPool Nat).spawn 7).lifo = some 7 ∧ ((emptyPool Nat).spawn 7).lifoPolls < 3 :=
+by decide`, so the slot is populated by local `spawn` before the property is claimed. `#print axioms
+LeanIn.Model.take_slot_first` is **empty**: the proof resolves the definition's `if` with `ite_eq_left` (the
+non-deprecated replacement for `if_pos`), not with `simp`/`split`, which pull in `propext` or
+`Classical.choice`. What that list does and does not see: it is dependencies, not hypotheses, so an axiom-free
+line means "nothing was assumed as an axiom", never "nothing was assumed". **The priorities themselves are not
+in the model**, and must not be: a modelled priority ordering would be the fairness statement `interface.md` §5
+forbids. What the model states is the *mechanism* — the slot is taken before the ring while the allowance lasts;
+the order a priority argument produces is an instance of `take_slot_first`, not a new property. **Rejected: a
+dedicated `LeanIn/Model/Select.lean`** — `select` resolves a `Join` through a law that already exists and adds no
+scheduling, so a model file would state no property the `Join` laws do not.
+
+**The register and the TCB are unchanged.** Checked by inspecting calls and import edges rather than by text
+search. `select`/`join` use `Join.new`/`Join.onReady`/`Join.resolveFirst`/`Join.value?` (a `Std.Mutex` inside
+`Join`, A1) and `ctx.resume`; `Task/Basic.lean`'s imports are unchanged (`Std`, `LeanIn.Sched.Executor`).
+`race` uses `Runtime.cancel` → `Task.cancel` (`Join.resolveFirst`) + `Hooks.retire`, with no new promise call.
+`spawn`'s priority uses `Executor.spawnBase`/`submitBase` (a `Std.Mutex` and a `Std.Condvar`), both shipped. No
+new `IO.Promise` construction, no new `_root_.Task` call path, no new extern, no new import edge into
+`Std.Async`. D7's register and [`proof-strategy.md`](proof-strategy.md)'s trusted-base table are therefore
+unchanged, and [`primitive-theory.md`](primitive-theory.md) gains nothing.
+
+**Deferred: the heterogeneous `select` and the deadline arm, with their triggers.** The `Sum`-nested/`HList`
+shape is deferred until a caller needs to select across handle types (the deferred trigger is W8's multi-carrier
+surface and a server racing a request against a *typed* deadline). The deadline arm — `select` given a handle a
+timer resolves — is **W13's**: it needs the clock W13 builds, and a deadline parameter here would be a clock this
+milestone does not have. `interface.md` §5 records both as the residual absences.
+
+______________________________________________________________________
+
 ## Open
 
 None. All decisions are closed; D9 should be revisited once the interface has seen use.

@@ -279,6 +279,35 @@ def Async.await (t : Task α) : Async α := ⟨fun k ctx => do
   | some v => k v
   | none   => Join.onReady t.cell (fun v => ctx.resume (Item.ofAction (k v)))⟩
 
+/-- **The first of several handles to become ready.**
+
+Homogeneous and non-empty: `h` is the head, so index `0` names it and index `i+1` names `hs[i]`; a zero-handle
+`select` is unrepresentable rather than a meaningless `none`. It returns the winner's index into the list as
+given and its value, and it does not cancel its losers — a handle passed to `select` is still awaitable
+elsewhere.
+
+Among handles already resolved when `select` is reached, the earliest in list order wins; among handles resolved
+while `select` waits, the first resolution wins. -/
+def select (h : Task α) (hs : List (Task α)) : Async (Nat × α) := ⟨fun k ctx => do
+  let j ← (Join.new : IO (Join (Nat × α)))
+  -- One registration per handle, each carrying its index. `Join.onReady` runs a continuation immediately when
+  -- the handle is already resolved, so an already-satisfiable `select` resolves `j` during this loop, in list
+  -- order — the tie rule for handles resolved before the call.
+  let rec go : List (Task α) → Nat → IO Unit
+    | [], _ => pure ()
+    | t :: ts, i => do
+        Join.onReady t.cell (fun v => Join.resolveFirst j (i, v))
+        go ts (i + 1)
+  go (h :: hs) 0
+  -- Mirror `Async.await`: a value already in the shared cell (a handle resolved during the loop) is returned
+  -- in-step with no scheduling round; otherwise the step parks on the shared cell.
+  match ← Join.value? j with
+  | some w => k w
+  | none   => Join.onReady j (fun w => ctx.resume (Item.ofAction (k w)))⟩
+
+/-- **Wait for every handle, in list order.** `join [] = pure []`, and the pair case stays `concurrently`. -/
+def join (hs : List (Task α)) : Async (List α) := hs.mapM Async.await
+
 /-- **What generic code is written against**: joining and starting, with the handle type alongside. -/
 class MonadAwait (m : Type → Type) where
   /-- The handle type: what starting a computation in `m` gives you. -/

@@ -2341,6 +2341,82 @@ registry_ok() {
   registry_o3_ok "$rec" || return 1
 }
 
+# --- SC16 — selection, racing and priority ————————————————————————————————————————————————
+
+# select_ok <record> — SC16-O1 as a detector: the handle that became ready first is the one `select`
+# returned — `winner` is the first entry of the run's own readiness log — and the two handles are
+# distinct. The affirmative control, in the same record, is the concrete expectation `winner=h1` with
+# `readyOrder=h1,h0`, so the relation is not `x == x`; `select` left the loser running
+# (`loserValue=10`) and `join` collected both values in list order (`joined=10,20`). Every operand is
+# read through `field` from its own named field, never from a neighbouring one.
+select_ok() {
+  local rec="$1" left right winner readyOrder loserValue joined
+  record_is "$rec" left right winner readyOrder winnerValue loserValue joined carrier runUs || return 1
+  left="$(field left "$rec")" || return 1
+  right="$(field right "$rec")" || return 1
+  winner="$(field winner "$rec")" || return 1
+  readyOrder="$(field readyOrder "$rec")" || return 1
+  loserValue="$(field loserValue "$rec")" || return 1
+  joined="$(field joined "$rec")" || return 1
+  [ "$left" != "$right" ] || return 1
+  case "$readyOrder" in
+  '' | ',' | ','* | *',' | *',,'*) return 1 ;;
+  *,*,*) return 1 ;;
+  esac
+  [ "${readyOrder%%,*}" = "$winner" ] || return 1
+  [ "$winner" = "h1" ] || return 1
+  [ "$readyOrder" = "h1,h0" ] || return 1
+  [ "$loserValue" = "10" ] || return 1
+  [ "$joined" = "10,20" ] || return 1
+}
+
+# race_ok <record> — SC16-O2 as a detector: a caller awaiting the cancelled loser gets the race's
+# value (`loserOutcome=error`), no step of the loser ran afterwards (`loserRanOn=no`), the loser's
+# cell holds the cancellation (`loserFinal=error`), and its registration is already retired
+# (`pendingAfter=0`). The control, in the same record, is `winnerRan=yes` and `pendingBefore != 0`:
+# the loser was parked with a registration before the race, so a zero `pendingAfter` is a change of
+# state, not a reading of zero. Every operand is read through `field` from this record.
+race_ok() {
+  local rec="$1" lo lr lf pa wr pb
+  record_is "$rec" winner loser loserOutcome loserRanOn pendingBefore pendingAfter winnerRan \
+    loserFinal runUs || return 1
+  lo="$(field loserOutcome "$rec")" || return 1
+  lr="$(field loserRanOn "$rec")" || return 1
+  lf="$(field loserFinal "$rec")" || return 1
+  pa="$(field pendingAfter "$rec")" || return 1
+  wr="$(field winnerRan "$rec")" || return 1
+  pb="$(field pendingBefore "$rec")" || return 1
+  case "$pa$pb" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$lo" = "error" ] || return 1
+  [ "$lr" = "no" ] || return 1
+  [ "$lf" = "error" ] || return 1
+  [ "$pa" -eq 0 ] || return 1
+  [ "$wr" = "yes" ] || return 1
+  [ "$pb" -ne 0 ] || return 1
+}
+
+# priority_ok <record> — SC16-O3 as a detector: a `.high` spawn is served before a `.normal` spawn
+# regardless of issue order (`normalThenHigh=high,normal` and `highThenNormal=high,normal`), no
+# preloaded ring item is served before the high task (`servedBeforeHigh=0`) and every one before the
+# normal task (`servedBeforeNormal=k`). The control, in the same record, is `k != 0`, so the last is
+# not two zero counts; `highThenNormal` is the issue-order-reversed repeat that would also pass were
+# the argument ignored. Every operand is read through `field` from this record.
+priority_ok() {
+  local rec="$1" k nth htn sbh sbn
+  record_is "$rec" k normalThenHigh highThenNormal servedBeforeHigh servedBeforeNormal runUs || return 1
+  k="$(field k "$rec")" || return 1
+  nth="$(field normalThenHigh "$rec")" || return 1
+  htn="$(field highThenNormal "$rec")" || return 1
+  sbh="$(field servedBeforeHigh "$rec")" || return 1
+  sbn="$(field servedBeforeNormal "$rec")" || return 1
+  case "$k$sbh$sbn" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$k" -ne 0 ] || return 1
+  [ "$nth" = "high,normal" ] || return 1
+  [ "$htn" = "high,normal" ] || return 1
+  [ "$sbh" -eq 0 ] || return 1
+  [ "$sbn" -eq "$k" ] || return 1
+}
+
 # --- SC15 — the task-local context is inherited, and the registry drains ————————————————————————————————
 check_sc15() {
   local out status ctx reg ctl round v key
@@ -2462,6 +2538,141 @@ check_sc15() {
   done
 }
 
+# --- SC16 — selection, racing and priority ————————————————————————————————————————————————
+check_sc16() {
+  local out status ctl sel rac pri round v
+  local left right winner readyOrder winnerValue loserValue joined
+  local rwinner rloser rlo rlr rpb rpa rwr rlf
+  local k nth htn sbh sbn
+  local o1bad o2bad o3bad variant_count=4
+  local -a records=()
+
+  # The detectors' own control, from the record syntax and the expectation alone: each must accept a
+  # well-formed record and reject the near miss a list-ordered `select`, a race that left its loser
+  # running, a race that did not retire the loser's registration, or a placement that ignored the
+  # priority argument would produce. The near misses are written here rather than taken from the mode,
+  # because the detectors' contract is shaped by the record syntax and the expectation.
+  select_ok 'left=h0|right=h1|winner=h1|readyOrder=h1,h0|winnerValue=20|loserValue=10|joined=10,20|carrier=100|runUs=1' ||
+    setup_error "SC16: the selection detector rejected a well-formed record" \
+      "the detectors' own control, not the SC16 Then"
+  race_ok 'winner=w|loser=l|loserOutcome=error|loserRanOn=no|pendingBefore=1|pendingAfter=0|winnerRan=yes|loserFinal=error|runUs=1' ||
+    setup_error "SC16: the race detector rejected a well-formed record" \
+      "the detectors' own control, not the SC16 Then"
+  priority_ok 'k=4|normalThenHigh=high,normal|highThenNormal=high,normal|servedBeforeHigh=0|servedBeforeNormal=4|runUs=1' ||
+    setup_error "SC16: the priority detector rejected a well-formed record" \
+      "the detectors' own control, not the SC16 Then"
+  if select_ok 'left=h0|right=h1|winner=h0|readyOrder=h1,h0|winnerValue=10|loserValue=20|joined=10,20|carrier=100|runUs=1'; then
+    setup_error "SC16: the selection detector accepted a near miss" \
+      "record: [winner=h0 while readyOrder=h1,h0]" \
+      "the detectors' own control, not the SC16 Then"
+  fi
+  if race_ok 'winner=w|loser=l|loserOutcome=ok|loserRanOn=yes|pendingBefore=1|pendingAfter=0|winnerRan=yes|loserFinal=ok|runUs=1'; then
+    setup_error "SC16: the race detector accepted a near miss" \
+      "record: [loserRanOn=yes]" \
+      "the detectors' own control, not the SC16 Then"
+  fi
+  if race_ok 'winner=w|loser=l|loserOutcome=error|loserRanOn=no|pendingBefore=1|pendingAfter=1|winnerRan=yes|loserFinal=error|runUs=1'; then
+    setup_error "SC16: the race detector accepted a near miss" \
+      "record: [pendingAfter=1]" \
+      "the detectors' own control, not the SC16 Then"
+  fi
+  if priority_ok 'k=4|normalThenHigh=normal,high|highThenNormal=high,normal|servedBeforeHigh=4|servedBeforeNormal=4|runUs=1'; then
+    setup_error "SC16: the priority detector accepted a near miss" \
+      "record: [normalThenHigh=normal,high]" \
+      "the detectors' own control, not the SC16 Then"
+  fi
+  printf 'SC16 control: rejected a list-ordered select whose head won, a race that left its loser running, a race that did not retire the loser registration, and a placement that ignored the priority argument\n'
+
+  # Three invocations, each of which must satisfy the Then.
+  for round in 1 2 3; do
+    out="$(bounded lake exe controls --runtime-select)"
+    status=$?
+    check_status SC16 "$status" "lake exe controls --runtime-select"
+    require_header "$out"
+
+    mapfile -t records < <(grep '^select|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC16 Then: the selection behaviour not observed exactly once" \
+        "expected exactly one select| record, saw ${#records[@]} in invocation $round"
+    sel="${records[0]}"
+    mapfile -t records < <(grep '^race|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC16 Then: the race behaviour not observed exactly once" \
+        "expected exactly one race| record, saw ${#records[@]} in invocation $round"
+    rac="${records[0]}"
+    mapfile -t records < <(grep '^priority|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC16 Then: the priority behaviour not observed exactly once" \
+        "expected exactly one priority| record, saw ${#records[@]} in invocation $round"
+    pri="${records[0]}"
+
+    record_is "${sel#select|}" left right winner readyOrder winnerValue loserValue joined carrier runUs ||
+      fail "SC16 Then: the selection behaviour not observed exactly once" \
+        "the record is not exactly left/right/winner/readyOrder/winnerValue/loserValue/joined/carrier/runUs with nonempty values: [$sel]"
+    record_is "${rac#race|}" winner loser loserOutcome loserRanOn pendingBefore pendingAfter winnerRan \
+      loserFinal runUs ||
+      fail "SC16 Then: the race behaviour not observed exactly once" \
+        "the record is not exactly winner/loser/loserOutcome/loserRanOn/pendingBefore/pendingAfter/winnerRan/loserFinal/runUs with nonempty values: [$rac]"
+    record_is "${pri#priority|}" k normalThenHigh highThenNormal servedBeforeHigh servedBeforeNormal runUs ||
+      fail "SC16 Then: the priority behaviour not observed exactly once" \
+        "the record is not exactly k/normalThenHigh/highThenNormal/servedBeforeHigh/servedBeforeNormal/runUs with nonempty values: [$pri]"
+
+    ctl="$(grep '^selectctl|' <<<"$out" | head -1)"
+    [ -n "$ctl" ] ||
+      setup_error "SC16: the checker controls are missing" "no selectctl record in the invocation"
+    record_is "${ctl#selectctl|}" accepted rejected variants ||
+      setup_error "SC16: the checker-control record is not the expected shape" "control: [$ctl]"
+    bound_field v accepted "$ctl" "SC16 control"
+    [ "$v" = "yes" ] ||
+      setup_error "SC16: the checker did not accept the well-formed trio" "accepted=$v"
+    bound_field v rejected "$ctl" "SC16 control"
+    [ "$v" = "yes" ] ||
+      setup_error "SC16: the checker did not reject a near miss" "rejected=$v"
+    bound_field v variants "$ctl" "SC16 control"
+    [ "$v" -eq "$variant_count" ] ||
+      setup_error "SC16: the checker did not test every variant" "variants=$v expected=$variant_count"
+
+    bound_field left left "$sel" "SC16 Then"
+    bound_field right right "$sel" "SC16 Then"
+    bound_field winner winner "$sel" "SC16 Then"
+    bound_field readyOrder readyOrder "$sel" "SC16 Then"
+    bound_field loserValue loserValue "$sel" "SC16 Then"
+    bound_field joined joined "$sel" "SC16 Then"
+    bound_field rwinner winner "$rac" "SC16 Then"
+    bound_field rloser loser "$rac" "SC16 Then"
+    bound_field rlo loserOutcome "$rac" "SC16 Then"
+    bound_field rlr loserRanOn "$rac" "SC16 Then"
+    bound_field rpb pendingBefore "$rac" "SC16 Then"
+    bound_field rpa pendingAfter "$rac" "SC16 Then"
+    bound_field rwr winnerRan "$rac" "SC16 Then"
+    bound_field rlf loserFinal "$rac" "SC16 Then"
+    bound_field k k "$pri" "SC16 Then"
+    bound_field nth normalThenHigh "$pri" "SC16 Then"
+    bound_field htn highThenNormal "$pri" "SC16 Then"
+    bound_field sbh servedBeforeHigh "$pri" "SC16 Then"
+    bound_field sbn servedBeforeNormal "$pri" "SC16 Then"
+
+    # Each clause is read from its own named fields; all three are evaluated so the two that hold are
+    # observed to hold, and the first that does not is the one reported.
+    o1bad=0 o2bad=0 o3bad=0
+    select_ok "${sel#select|}" || o1bad=1
+    race_ok "${rac#race|}" || o2bad=1
+    priority_ok "${pri#priority|}" || o3bad=1
+    [ "$o1bad" -eq 0 ] ||
+      fail "SC16 Then: the handle that became ready second won" \
+        "observed: winner=$winner readyOrder=$readyOrder"
+    [ "$o2bad" -eq 0 ] ||
+      fail "SC16 Then: race did not cancel its loser, or its registration was not retired" \
+        "observed: winner=$rwinner loser=$rloser loserOutcome=$rlo loserRanOn=$rlr loserFinal=$rlf pendingBefore=$rpb pendingAfter=$rpa winnerRan=$rwr"
+    [ "$o3bad" -eq 0 ] ||
+      fail "SC16 Then: the priority argument did not change the order the queue served" \
+        "observed: k=$k normalThenHigh=$nth highThenNormal=$htn servedBeforeHigh=$sbh servedBeforeNormal=$sbn"
+
+    printf 'SC16 ok (invocation %s): winner=%s readyOrder=%s loserValue=%s joined=%s | winner=%s loser=%s loserOutcome=%s loserRanOn=%s pendingBefore=%s pendingAfter=%s | normalThenHigh=%s highThenNormal=%s servedBeforeHigh=%s servedBeforeNormal=%s\n' \
+      "$round" "$winner" "$readyOrder" "$loserValue" "$joined" "$rwinner" "$rloser" "$rlo" "$rlr" "$rpb" "$rpa" "$nth" "$htn" "$sbh" "$sbn"
+  done
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -2478,8 +2689,9 @@ SC12) check_sc12 ;;
 SC13) check_sc13 ;;
 SC14) check_sc14 ;;
 SC15) check_sc15 ;;
+SC16) check_sc16 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13|SC14|SC15\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13|SC14|SC15|SC16\n' >&2
   exit 2
   ;;
 esac

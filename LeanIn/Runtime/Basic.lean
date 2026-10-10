@@ -25,13 +25,25 @@ abbrev Executor (cap : Nat) := Sched.Executor Task.Item cap
 is the function a waker calls — see `Task.Async`. -/
 def resumeOf (e : Executor cap) : Task.Item → BaseIO Unit := fun it => e.spawnBase it
 
+/-- **Where a spawn asks the executor to place the task's first step.** `.high` is the owner-local one-slot LIFO
+buffer, served before the ring while the tick's allowance lasts; `.normal` is the FIFO ring. It is a placement
+request and promises nothing about *when* the task runs. -/
+inductive Priority where
+  | high
+  | normal
+
 /-- **Spawn from outside a body**: the ring, because there is no current worker's slot to use — the interface's
-"or inject if called from outside". -/
-def spawn (e : Executor cap) (a : Task.Async α) : IO (Task.Task α) := do
+"or inject if called from outside". `prio` selects the placement lane: `.high` goes to the LIFO slot
+(`Executor.spawnBase`), `.normal` appends to the ring (`Executor.submitBase`); a `.high` task is served sooner,
+never promised to run. -/
+def spawn (e : Executor cap) (prio : Priority) (a : Task.Async α) : IO (Task.Task α) := do
   let cell ← Task.Join.new
   let cancel ← Task.Cancel.new
   let ctx : Task.Ctx := { cancel := cancel, resume := fun it => resumeOf e (it.stamp cancel), «local» := {} }
-  e.submit (Task.Item.stamp (Task.Item.ofAction (a.step (fun v => Task.Join.resolve cell v) ctx)) cancel)
+  let it := Task.Item.stamp (Task.Item.ofAction (a.step (fun v => Task.Join.resolve cell v) ctx)) cancel
+  match prio with
+  | .high   => e.spawnBase it
+  | .normal => e.submitBase it
   return ⟨cell, cancel⟩
 
 /-- **Drive the executor on the caller's thread** until `finished` holds.

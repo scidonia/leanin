@@ -2528,6 +2528,383 @@ def runtimeRegistry : IO UInt32 := do
     IO.println s!"registryheld|k={k}|drainUs={drainUs / 1000}"
     return 0
 
+/- **SC16 — selection, racing and priority.**
+
+One invocation of `--runtime-select` reads three clause records. The **selection** clause spawns two
+gated computations and a releaser on one carrier, calls `Task.select` in the spawn step before any of
+them has run, and records which handle `select` returned, the order the handles became ready, both
+values `join` collected, and the loser's own value. The **race** clause spawns a parked loser and a
+completing winner and calls `Runtime.race`, reading the loser's outcome and final cell value, the log
+of steps that ran, and the registry's outstanding-registration count read immediately after `race`
+returned and before the loser's gate is released. The **priority** clause preloads the ring and issues
+a `.normal` and a `.high` spawn in both orders, reading the label order the carrier served.
+
+Every compared value is a named field of one of the three records; the mode also prints its own
+checker's readings on a well-formed trio and on near misses (`selectctl|`), and four measurement rows,
+printed and never asserted.
+
+Diagnostic: `lake exe controls --runtime-select`. -/
+
+/-- The `select|` record's fields, in the order the mode prints them. -/
+def selectFields : List String :=
+  ["left", "right", "winner", "readyOrder", "winnerValue", "loserValue", "joined", "carrier", "runUs"]
+
+/-- The `race|` record's fields, in the order the mode prints them. -/
+def raceFields : List String :=
+  ["winner", "loser", "loserOutcome", "loserRanOn", "pendingBefore", "pendingAfter", "winnerRan",
+   "loserFinal", "runUs"]
+
+/-- The `priority|` record's fields, in the order the mode prints them. -/
+def priorityFields : List String :=
+  ["k", "normalThenHigh", "highThenNormal", "servedBeforeHigh", "servedBeforeNormal", "runUs"]
+
+/-- SC16-O1 as a detector: the handle that became ready first is the one `select` returned — `winner`
+is the first entry of the run's own readiness log — and the two handles are distinct; the affirmative
+control, in the same record, is the concrete expectation `winner=h1` with `readyOrder=h1,h0`, so the
+relation is not `x == x`; and `select` left the loser running (`loserValue=10`) and `join` collected
+both values in list order (`joined=10,20`). Every operand is read from its own named field. -/
+def selectOk (rec : String) : Bool :=
+  registryShaped rec selectFields &&
+  match serviceField rec "left", serviceField rec "right", serviceField rec "winner",
+        serviceField rec "readyOrder", serviceField rec "loserValue",
+        serviceField rec "joined" with
+  | some left, some right, some winner, some readyOrder, some loserValue, some joined =>
+      let parts := readyOrder.splitOn ","
+      left != right && parts.length == 2 && parts.head? == some winner &&
+      winner == "h1" && readyOrder == "h1,h0" &&
+      loserValue == "10" && joined == "10,20"
+  | _, _, _, _, _, _ => false
+
+/-- SC16-O2 as a detector: a caller awaiting the cancelled loser gets the race's value (`error`),
+no step of the loser ran afterwards, the loser's cell holds the cancellation, and its registration
+was retired before the loser's gate was released (`pendingAfter=0`). The affirmative control, in the
+same record, is `winnerRan=yes` and `pendingBefore != 0` — the loser was parked with a registration
+before the race, so `pendingAfter=0` is a change of state, not a reading of zero. -/
+def raceOk (rec : String) : Bool :=
+  registryShaped rec raceFields &&
+  serviceField rec "loserOutcome" == some "error" &&
+  serviceField rec "loserRanOn" == some "no" &&
+  serviceField rec "loserFinal" == some "error" &&
+  serviceNat rec "pendingAfter" == some 0 &&
+  serviceField rec "winnerRan" == some "yes" &&
+  (match serviceNat rec "pendingBefore" with | some n => n != 0 | none => false)
+
+/-- SC16-O3 as a detector: a `.high` spawn is served before a `.normal` spawn regardless of issue
+order (`normalThenHigh=high,normal` and `highThenNormal=high,normal`), with no preloaded ring item
+served before the high task and every one served before the normal task. The control, in the same
+record, is `k != 0`, so `servedBeforeNormal == k` is not two zero counts; `highThenNormal` is the
+issue-order-reversed repeat that would also pass were the argument ignored. -/
+def priorityOk (rec : String) : Bool :=
+  registryShaped rec priorityFields &&
+  serviceField rec "normalThenHigh" == some "high,normal" &&
+  serviceField rec "highThenNormal" == some "high,normal" &&
+  serviceNat rec "servedBeforeHigh" == some 0 &&
+  (match serviceNat rec "k", serviceNat rec "servedBeforeNormal" with
+   | some k, some served => k != 0 && served == k
+   | _, _ => false)
+
+/-- A well-formed `select|` record, built from the record syntax and the expectation rather than from
+the mode's output, so the checker's controls cannot agree with the mode by construction. -/
+def selectGoodRec : String :=
+  "left=h0|right=h1|winner=h1|readyOrder=h1,h0|winnerValue=20|loserValue=10|joined=10,20|carrier=100|runUs=1"
+
+/-- The staged red: a later handle became ready first, but the list-ordered `select` returned the head. -/
+def selectNearListOrder : String := selectGoodRec.replace "winner=h1" "winner=h0"
+
+/-- A well-formed `race|` record, likewise. -/
+def raceGoodRec : String :=
+  "winner=w|loser=l|loserOutcome=error|loserRanOn=no|pendingBefore=1|pendingAfter=0|winnerRan=yes|loserFinal=error|runUs=1"
+
+/-- The loser ran on after the race returned. -/
+def raceNearRanOn : String := raceGoodRec.replace "loserRanOn=no" "loserRanOn=yes"
+
+/-- The loser's registration was not retired at the race. -/
+def raceNearPending : String := raceGoodRec.replace "pendingAfter=0" "pendingAfter=1"
+
+/-- A well-formed `priority|` record, likewise. -/
+def priorityGoodRec : String :=
+  "k=4|normalThenHigh=high,normal|highThenNormal=high,normal|servedBeforeHigh=0|servedBeforeNormal=4|runUs=1"
+
+/-- The priority argument ignored: the ring served the `.normal` spawn issued first. -/
+def priorityNearOrder : String :=
+  priorityGoodRec.replace "normalThenHigh=high,normal" "normalThenHigh=normal,high"
+
+/-- The mode's own checker readings: `accepted=yes` when the well-formed select/race/priority trio is
+accepted, `rejected=yes` when every near miss is rejected, and `variants=4`, the number of near-miss
+variants tested. -/
+def selectCtlLine : String :=
+  "selectctl|accepted=" ++
+    (if selectOk selectGoodRec && raceOk raceGoodRec && priorityOk priorityGoodRec then "yes" else "no") ++
+  "|rejected=" ++
+    (if !(selectOk selectNearListOrder) && !(raceOk raceNearRanOn) &&
+        !(raceOk raceNearPending) && !(priorityOk priorityNearOrder) then "yes" else "no") ++
+  "|variants=4"
+
+/-- One priority run: preload `k` parked `.normal` computations (each appending `n<i>` on its first
+step, then parking), then a fresh `.normal` task labelled `normal` and a fresh `.high` task labelled
+`high` (in `issueHighFirst` order). Each first step appends its label to one `Std.Mutex`-guarded list —
+the order the carrier served — and the run returns that list once all `k+2` have run. -/
+def priorityRun (k : Nat) (issueHighFirst : Bool) : IO (List String) := do
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let hooks ← Runtime.Hooks.new
+  let release ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let allServed ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let served ← Std.Mutex.new ([] : List String)
+  let count ← IO.mkRef (0 : Nat)
+  let servedMod (f : List String → List String) : IO Unit := served.atomically do set (f (← get))
+  let record (label : String) : IO Unit := do
+    servedMod (fun s => s ++ [label])
+    let n ← count.get
+    count.set (n + 1)
+    if n + 1 == k + 2 then IO.Promise.resolve (.ok ()) allServed
+  let parked (label : String) : LeanIn.Task.Async Unit := do
+    monadLift (record label)
+    let _ ← Runtime.awaitPromiseE hooks release
+    pure ()
+  let program : LeanIn.Task.EAsync IO.Error Unit := do
+    for i in List.range k do
+      let _ ← monadLift (Runtime.spawn e Runtime.Priority.normal (parked s!"n{i}"))
+      pure ()
+    if issueHighFirst then
+      let _ ← monadLift (Runtime.spawn e Runtime.Priority.high (parked "high"))
+      let _ ← monadLift (Runtime.spawn e Runtime.Priority.normal (parked "normal"))
+      pure ()
+    else
+      let _ ← monadLift (Runtime.spawn e Runtime.Priority.normal (parked "normal"))
+      let _ ← monadLift (Runtime.spawn e Runtime.Priority.high (parked "high"))
+      pure ()
+    let _ ← Runtime.awaitPromiseE hooks allServed
+    pure ()
+  let _ ← Runtime.run e program
+  served.atomically get
+
+/-- The label order in which the two fresh priority tasks were served, read from the served list. -/
+def servedLabelOrder (ls : List String) : String :=
+  String.intercalate "," (ls.filter (fun l => l == "normal" || l == "high"))
+
+/-- How many preloaded ring labels were served before `target`'s first step. The preloaded labels are
+the `n<i>` ones; the two fresh labels are excluded. -/
+def servedBefore (target : String) (ls : List String) : Nat :=
+  ((ls.takeWhile (fun l => l != target)).filter
+    (fun l => l != "normal" && l != "high")).length
+
+/-- One `prioritybench` measurement: preload `k` parked `.normal` tasks, issue one fresh spawn in the
+named lane, and time the run to its return. Printed and never asserted; it may read a clock. -/
+def priorityOne (k : Nat) (high : Bool) : IO Nat := do
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let hooks ← Runtime.Hooks.new
+  let release ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let allServed ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let count ← IO.mkRef (0 : Nat)
+  let record : IO Unit := do
+    let n ← count.get
+    count.set (n + 1)
+    if n + 1 == k + 1 then IO.Promise.resolve (.ok ()) allServed
+  let body : LeanIn.Task.Async Unit := do
+    monadLift record
+    let _ ← Runtime.awaitPromiseE hooks release
+    pure ()
+  let program : LeanIn.Task.EAsync IO.Error Unit := do
+    for _ in List.range k do
+      let _ ← monadLift (Runtime.spawn e Runtime.Priority.normal body)
+      pure ()
+    let _ ← monadLift (Runtime.spawn e (if high then Runtime.Priority.high else Runtime.Priority.normal) body)
+    let _ ← Runtime.awaitPromiseE hooks allServed
+    pure ()
+  let t0 ← IO.monoNanosNow
+  let _ ← Runtime.run e program
+  let t1 ← IO.monoNanosNow
+  return t1 - t0
+
+/-- `prioritybench`: `n` high and `n` normal spawn-to-first-step timings beside a preloaded ring. -/
+def priorityBench (k n : Nat) : IO (Nat × Nat) := do
+  let mut highNs := 0
+  let mut normalNs := 0
+  for _ in List.range n do
+    highNs := highNs + (← priorityOne k true)
+    normalNs := normalNs + (← priorityOne k false)
+  return (highNs, normalNs)
+
+/-- A handle whose cell is already resolved, so a benchmark can await it without a scheduling round. -/
+def resolvedTask {α : Type} (v : α) : IO (LeanIn.Task.Task α) := do
+  let cell ← LeanIn.Task.Join.new
+  LeanIn.Task.Join.resolve cell v
+  let token ← LeanIn.Task.Cancel.new
+  return ⟨cell, token⟩
+
+/-- **SC16 — selection, racing and priority.**
+
+One invocation on one carrier per clause; the records are `select|`, `race|` and `priority|`, followed
+by the checker's `selectctl|` and the measurement rows.
+
+Diagnostic: `lake exe controls --runtime-select`. -/
+def runtimeSelect : IO UInt32 := do
+  let carrier ← IO.getTID
+  -- SELECTION
+  let selStart ← IO.monoNanosNow
+  let selE ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let selHooks ← Runtime.Hooks.new
+  let g0 ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let g1 ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let readyLog ← Std.Mutex.new ([] : List String)
+  let readyMod (f : List String → List String) : IO Unit := readyLog.atomically do set (f (← get))
+  let selWinnerRef ← IO.mkRef (0 : Nat)
+  let selWinnerValueRef ← IO.mkRef (0 : Nat)
+  let selLoserValueRef ← IO.mkRef (0 : Nat)
+  let selJoinedRef ← IO.mkRef ([] : List Nat)
+  let selProg : LeanIn.Task.EAsync IO.Error Unit := do
+    let h0Body : LeanIn.Task.Async Nat := do
+      let _ ← Runtime.awaitPromiseE selHooks g0
+      monadLift (readyMod (fun s => s ++ ["h0"]))
+      return 10
+    let h1Body : LeanIn.Task.Async Nat := do
+      let _ ← Runtime.awaitPromiseE selHooks g1
+      monadLift (readyMod (fun s => s ++ ["h1"]))
+      monadLift (IO.Promise.resolve (.ok ()) g0 : BaseIO Unit)
+      return 20
+    let rBody : LeanIn.Task.Async Unit := do
+      monadLift (IO.Promise.resolve (.ok ()) g1 : BaseIO Unit)
+    let h0 ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.spawn h0Body)
+    let h1 ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.spawn h1Body)
+    let _hr ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.spawn rBody)
+    let (winner, winnerValue) ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.select h0 [h1])
+    let loser := if winner == 0 then h1 else h0
+    let loserValue ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await loser)
+    let joined ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.join [h0, h1])
+    selWinnerRef.set winner
+    selWinnerValueRef.set winnerValue
+    selLoserValueRef.set loserValue
+    selJoinedRef.set joined
+  match ← Runtime.run selE selProg with
+  | .error err => IO.println s!"select|failed={err}"; return 1
+  | .ok () =>
+    let winner ← selWinnerRef.get
+    let winnerValue ← selWinnerValueRef.get
+    let loserValue ← selLoserValueRef.get
+    let joined ← selJoinedRef.get
+    let readyOrder ← readyLog.atomically get
+    let selUs := (← IO.monoNanosNow) - selStart
+    let winnerLabel := if winner == 0 then "h0" else "h1"
+    IO.println s!"select|left=h0|right=h1|winner={winnerLabel}|readyOrder={String.intercalate "," readyOrder}|winnerValue={winnerValue}|loserValue={loserValue}|joined={String.intercalate "," (joined.map toString)}|carrier={carrier}|runUs={selUs / 1000}"
+  -- RACE
+  let raceStart ← IO.monoNanosNow
+  let raceE ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let raceHooks ← Runtime.Hooks.new
+  let gRel ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let lParked ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let raceLog ← Std.Mutex.new ([] : List String)
+  let raceMod (f : List String → List String) : IO Unit := raceLog.atomically do set (f (← get))
+  let rWinnerRef ← IO.mkRef (0 : Nat)
+  let rPendingBeforeRef ← IO.mkRef (0 : Nat)
+  let rPendingAfterRef ← IO.mkRef (0 : Nat)
+  let rLoserOutcomeRef ← IO.mkRef "none"
+  let rLoserFinalRef ← IO.mkRef "none"
+  let raceProg : LeanIn.Task.EAsync IO.Error Unit := do
+    let lBody : LeanIn.Task.Async (Except IO.Error Unit) := do
+      monadLift (IO.Promise.resolve (.ok ()) lParked : BaseIO Unit)
+      monadLift (raceMod (fun s => s ++ ["l-started"]))
+      let _ ← Runtime.awaitPromiseE raceHooks gRel
+      monadLift (raceMod (fun s => s ++ ["l-ran"]))
+      return .ok ()
+    let wBody : LeanIn.Task.Async (Except IO.Error Unit) := do
+      monadLift (raceMod (fun s => s ++ ["w-ran"]))
+      return .ok ()
+    let hl ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.spawn lBody)
+    let hw ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.spawn wBody)
+    let _ ← Runtime.awaitPromiseE raceHooks lParked
+    let pendingBefore ← monadLift (Runtime.pending raceHooks)
+    let raceV : Except IO.Error Unit := .error (.userError "sc16")
+    let (rwinner, _rv) ← LeanIn.Task.EAsync.ofAsync (Runtime.race raceHooks raceV hw [hl])
+    let pendingAfter ← monadLift (Runtime.pending raceHooks)
+    rWinnerRef.set rwinner
+    rPendingBeforeRef.set pendingBefore
+    rPendingAfterRef.set pendingAfter
+    monadLift (IO.Promise.resolve (.ok ()) gRel : BaseIO Unit)
+    let loserOutcome ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await hl)
+    let loserFinal? ← monadLift (LeanIn.Task.Join.value? hl.cell)
+    rLoserOutcomeRef.set (match loserOutcome with | .error _ => "error" | .ok _ => "ok")
+    rLoserFinalRef.set (match loserFinal? with
+      | some (.error _) => "error" | some (.ok _) => "ok" | none => "none")
+  match ← Runtime.run raceE raceProg with
+  | .error err => IO.println s!"race|failed={err}"; return 1
+  | .ok () =>
+    let rwinner ← rWinnerRef.get
+    let pendingBefore ← rPendingBeforeRef.get
+    let pendingAfter ← rPendingAfterRef.get
+    let loserOutcome ← rLoserOutcomeRef.get
+    let loserFinal ← rLoserFinalRef.get
+    let raceSteps ← raceLog.atomically get
+    let raceUs := (← IO.monoNanosNow) - raceStart
+    let winnerRan := if raceSteps.contains "w-ran" then "yes" else "no"
+    let loserRanOn := if raceSteps.contains "l-ran" then "yes" else "no"
+    let winnerLabel := if rwinner == 0 then "w" else "l"
+    let loserLabel := if rwinner == 0 then "l" else "w"
+    IO.println s!"race|winner={winnerLabel}|loser={loserLabel}|loserOutcome={loserOutcome}|loserRanOn={loserRanOn}|pendingBefore={pendingBefore}|pendingAfter={pendingAfter}|winnerRan={winnerRan}|loserFinal={loserFinal}|runUs={raceUs / 1000}"
+  -- PRIORITY
+  let prioStart ← IO.monoNanosNow
+  let k := 4
+  let runA ← priorityRun k false
+  let runB ← priorityRun k true
+  let normalThenHigh := servedLabelOrder runA
+  let highThenNormal := servedLabelOrder runB
+  let servedBeforeHigh := servedBefore "high" runA
+  let servedBeforeNormal := servedBefore "normal" runB
+  let prioUs := (← IO.monoNanosNow) - prioStart
+  IO.println s!"priority|k={k}|normalThenHigh={normalThenHigh}|highThenNormal={highThenNormal}|servedBeforeHigh={servedBeforeHigh}|servedBeforeNormal={servedBeforeNormal}|runUs={prioUs / 1000}"
+  IO.println selectCtlLine
+  -- MEASUREMENT (printed, never asserted): a select's cost against a plain await, a race's cost
+  -- against a plain await, the priority order the argument changes, and enqueue-to-first-step.
+  let benchN := 2000
+  let benchE ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let benchHooks ← Runtime.Hooks.new
+  let selBenchUs ← IO.mkRef (0 : Nat)
+  let selAwaitUs ← IO.mkRef (0 : Nat)
+  let raceBenchUs ← IO.mkRef (0 : Nat)
+  let raceAwaitUs ← IO.mkRef (0 : Nat)
+  let benchProg : LeanIn.Task.EAsync IO.Error Unit := do
+    let h ← monadLift (resolvedTask (7 : Nat))
+    let h2 ← monadLift (resolvedTask (8 : Nat))
+    let t0 ← monadLift (IO.monoNanosNow : IO Nat)
+    for _ in List.range benchN do
+      let _ ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.select h [h2])
+    let t1 ← monadLift (IO.monoNanosNow : IO Nat)
+    selBenchUs.set (t1 - t0)
+    let t2 ← monadLift (IO.monoNanosNow : IO Nat)
+    for _ in List.range benchN do
+      let _ ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await h)
+    let t3 ← monadLift (IO.monoNanosNow : IO Nat)
+    selAwaitUs.set (t3 - t2)
+    let rw ← monadLift (resolvedTask (.ok () : Except IO.Error Unit))
+    let t4 ← monadLift (IO.monoNanosNow : IO Nat)
+    for _ in List.range benchN do
+      let started ← monadLift (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+      let gate ← monadLift (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+      let lBody : LeanIn.Task.Async (Except IO.Error Unit) := do
+        monadLift (IO.Promise.resolve (.ok ()) started : BaseIO Unit)
+        let _ ← Runtime.awaitPromiseE benchHooks gate
+        return .ok ()
+      let hl ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.spawn lBody)
+      let _ ← Runtime.awaitPromiseE benchHooks started
+      let _ ← LeanIn.Task.EAsync.ofAsync
+        (Runtime.race benchHooks (.error (.userError "sc16")) rw [hl])
+      pure ()
+    let t5 ← monadLift (IO.monoNanosNow : IO Nat)
+    raceBenchUs.set (t5 - t4)
+    let t6 ← monadLift (IO.monoNanosNow : IO Nat)
+    for _ in List.range benchN do
+      let _ ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await rw)
+    let t7 ← monadLift (IO.monoNanosNow : IO Nat)
+    raceAwaitUs.set (t7 - t6)
+  let _ ← Runtime.run benchE benchProg
+  IO.println s!"selectbench|n={benchN}|selectUs={(← selBenchUs.get) / 1000}|awaitUs={(← selAwaitUs.get) / 1000}"
+  IO.println s!"racebench|n={benchN}|raceUs={(← raceBenchUs.get) / 1000}|awaitUs={(← raceAwaitUs.get) / 1000}"
+  IO.println s!"priorityorder|k={k}|normalThenHigh={normalThenHigh}|highThenNormal={highThenNormal}|servedBeforeHigh={servedBeforeHigh}|servedBeforeNormal={servedBeforeNormal}"
+  let benchK := 4
+  let benchRounds := 100
+  let (highNs, normalNs) ← priorityBench benchK benchRounds
+  IO.println s!"prioritybench|n={benchRounds}|k={benchK}|highUs={highNs / 1000}|normalUs={normalNs / 1000}"
+  return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -2556,6 +2933,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-service" :: rest =>
     return ← runtimeService (((argValue rest "--bound").bind String.toNat?).getD 2)
   | "--runtime-registry" :: _ => return ← runtimeRegistry
+  | "--runtime-select" :: _ => return ← runtimeSelect
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

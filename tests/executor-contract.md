@@ -418,6 +418,123 @@ asserted. `runUs` on both records, and `carrier`, are printed, never asserted.
 
 ______________________________________________________________________
 
+### SC16 — selection, racing and priority
+
+**Actor.** A Lean executable client of the task layer and the runtime (`lake exe controls
+--runtime-select`), driving on one `Sched.Executor.new LeanIn.Task.Item 256 1` per clause with
+`Runtime.Hooks.new` for the gate completions: the task-layer `select` and `join`
+(`LeanIn/Task/Basic.lean`), the runtime `race` (`LeanIn/Runtime/Leaf.lean`), and `Runtime.spawn` with
+its priority argument (`LeanIn/Runtime/Basic.lean`). Nothing here calls a private function: every
+compared value is a named field of a record the executable prints on stdout. The carrier is the
+mode's own `IO.getTID`.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC16`, which invokes
+`lake exe controls --runtime-select` three times and asserts on the one `select|`, one `race|` and one
+`priority|` record, and the one `selectctl|` checker record, each invocation prints. Every compared
+value is a named field of its own record, read by key; an absent, repeated or empty field fails the
+check rather than resolving to a neighbouring value. An invocation that does not run, prints no
+record, prints a malformed record, exits non-zero without the check's `fail` line, or is bounded by the
+watchdog is a setup error, never the `Then`.
+
+**Given.** Gates are `IO.Promise`s resolved by the mode's own steps, so order is enforced by awaits
+rather than by a clock or a socket; `Runtime.Hooks.new` carries the gate registrations, so
+`Runtime.pending` is a real reading of outstanding registrations. The readiness log is one
+`Std.Mutex`-guarded `List String`: each task's completing step appends its label, so the log records
+the order the handles became ready. The served-order log is a second `Std.Mutex`-guarded list: each
+spawned task's first step appends its label, so the log is the order the carrier served them.
+
+**When.** Three clauses, each on its own carrier, with the order enforced by awaits:
+
+1. **Selection.** The root spawns `h0`, `h1` and `R` (task-layer `Async.spawn`; their first steps are
+   enqueued but none has run, so neither cell is resolved), then in the same step calls
+   `select h0 [h1]` and yields. `R` resolves `g1`; `h1` runs, appends `h1` first, resolves `g0`, and
+   returns `20`; `h0` appends `h0` second and returns `10`. `select`'s continuation runs and yields
+   `(winner, value)`; the root awaits the loser and records `loserValue`, then runs `join [h0, h1]`
+   and records `joined`.
+2. **Race.** A fresh carrier: spawn `l` and `w`; `l` resolves `lParked`, appends `l-started`, parks on
+   `g`, and appends `l-ran` when resumed. The root awaits `lParked`, records
+   `pendingBefore ← Runtime.pending hooks`, calls `race hooks (.error (.userError "sc16")) w [l]`,
+   records `pendingAfter ← Runtime.pending hooks` **before `g` is released**, then resolves `g` and
+   records `loserRanOn` from the log, `loserOutcome` from awaiting `l`, and `loserFinal` from `l`'s
+   cell.
+3. **Priority.** Two fresh carriers. Preload `k = 4` parked `.normal` tasks; then issue a `.normal`
+   and a `.high` fresh spawn in `.normal`-then-`.high` order (recording `normalThenHigh` and
+   `servedBeforeHigh`), and repeat with the issue order reversed (recording `highThenNormal` and
+   `servedBeforeNormal`).
+
+**Then.** There is exactly one `select|`, one `race|` and one `priority|` record per invocation,
+shaped exactly with nonempty values, as `select|left|right|winner|readyOrder|winnerValue|loserValue|
+joined|carrier|runUs`, `race|winner|loser|loserOutcome|loserRanOn|pendingBefore|pendingAfter|
+winnerRan|loserFinal|runUs`, and `priority|k|normalThenHigh|highThenNormal|servedBeforeHigh|
+servedBeforeNormal|runUs`. The three clauses are read from their own named fields:
+
+- **SC16-O1** — the handle that became ready first is the one `select` returned: `winner ==
+  readyOrder[0]`, both operands bound to their own field. The affirmative control, in the same record,
+  is that `readyOrder` has exactly two entries with `left != right`, and that `winner == h1` while
+  `readyOrder == h1,h0` — so the relation is not `x == x`; and `select` left the loser running
+  (`loserValue == 10`, its own value produced after `select` returned), with `join` collecting both
+  values in list order (`joined == 10,20`). `winnerValue`, `carrier` and `runUs` are recorded, never
+  asserted.
+- **SC16-O2** — `race` cancels its losers with W5's laws: `loserOutcome == error` (a caller awaiting
+  the cancelled loser gets the race's value, exactly once), `loserRanOn == no` (no step of the loser
+  ran after the race returned), `loserFinal == error`, and `pendingAfter == 0` read immediately after
+  `race` returned and before the loser's gate is released. The control, in the same record, is
+  `winnerRan == yes` and `pendingBefore != 0`: the loser was parked with a registration before the
+  race, so `pendingAfter == 0` is a change of state, not a reading of zero.
+- **SC16-O3** — the priority argument changes the order the queue serves: `normalThenHigh ==
+  high,normal` and `highThenNormal == high,normal` (a `.high` spawn is served before a `.normal` spawn
+  regardless of issue order), with `servedBeforeHigh == 0` and `servedBeforeNormal == k`. The control,
+  in the same record, is `k != 0`, so `servedBeforeNormal == k` is not two zero counts; and
+  `highThenNormal` is the issue-order-reversed repeat that would pass even were the argument ignored,
+  so it is the affirmative control for the log's readability rather than the assertion.
+
+**The detectors' own control, in the same run.** `select_ok`, `race_ok` and `priority_ok` are the
+record-string detectors the assertions are built from. They must accept a well-formed trio written
+from the record syntax and the expectation, and reject each near miss, one per clause: a list-ordered
+`select` whose head won (`winner=h0` while `readyOrder=h1,h0`), a race that left its loser running
+(`loserRanOn=yes`), a race that did not retire the loser's registration (`pendingAfter=1`), and a
+placement that ignored the priority argument (`normalThenHigh=normal,high`). The delivered near-miss
+count is four, and a near miss the detector accepts is a fixture defect reported as a setup error,
+separately from the `Then`. The mode's own `selectctl|` readings must hold too: `accepted` for the
+well-formed trio, `rejected` for each near miss, and `variants` naming the four near-miss variants
+tested.
+
+**The failure this scenario records on the staged tree.** The operations are new, so the staged first
+cuts are the plausible ones: `select` staged as a list-ordered await of the head (it never registers
+on a later handle, so a handle that became ready first is invisible to it), `race` staged as `select`
+with no cancellation, and `spawn` staged as ignoring its priority argument (both lanes take the ring,
+so a `.high` spawn issued after a `.normal` spawn lands behind it). The check reports the first failing
+clause — SC16-O1 — as its own `Then`:
+
+```
+SC16 Then: the handle that became ready second won
+  observed: winner=h0 readyOrder=h1,h0
+```
+
+and the same run's `race|` record carries `loserOutcome=ok loserRanOn=yes pendingAfter=1`, while its
+`priority|` record carries `normalThenHigh=normal,high`. On the fixed tree the three read
+`winner=h1 readyOrder=h1,h0`, `loserOutcome=error loserRanOn=no pendingAfter=0`, and
+`normalThenHigh=high,normal`. A red is only a red if it is a clause's own assertion: a missing or
+malformed record, a non-zero exit without a `fail` line, or a watchdog expiry is a setup error, not
+the `Then`. `select` must be called in the spawn step, before any handle resolves — called later, an
+already-resolved handle wins by list order and O1's red vanishes; and `h1` resolves `g0` in its own
+body, so both handles resolve and the staged `select` does not hang.
+
+**Why, and what it rests on.** First-ready-wins is the `Join.resolveFirst` law (`Basic.lean`): a
+handle resolved while `select` waits resolves the shared target and a later resolution is ignored,
+which is why the root calls `select` before any child has run. `select` does not cancel its losers
+because the task layer has no `Hooks` to retire a registration and "wait for the first of several,
+then continue with the rest" is a legitimate use; `race` adds `cancel`, so a loser resolves with the
+race's value exactly once and immediately (`resolveFirst`), no step of it runs afterwards
+(`Item.fire`), and its registration is retired (`hooks.retire`). The priority argument is a placement
+choice — `.high` uses the one-slot LIFO buffer, `.normal` the FIFO ring — and promises nothing about
+when a task runs. No assertion is a duration and no order is a clock: the only orderings are the gates
+the mode's own steps resolve, and `carrier` and `runUs` are printed, never asserted. The mode also
+prints four measurement rows — `selectbench|`, `racebench|`, `priorityorder|` and `prioritybench|` —
+printed and never asserted.
+
+______________________________________________________________________
+
 ### SC14 — the service's own obligations: no drop, a live bound, and resolution within a deadline
 
 **Actor.** A Lean executable server (`lake exe controls --runtime-service`): an accept loop of ours

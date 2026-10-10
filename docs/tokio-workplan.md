@@ -455,6 +455,35 @@ absence), `race`/`join` combinators once it exists, and a priority argument on `
 **Acceptance.** A scenario observing that the first of several handles to become ready is the one which wins,
 and a priority scenario asserting the order the queue serves.
 
+**Met, and what its record reads.** All three deliverables are in. `LeanIn/Task/Basic.lean` carries
+`select (h : Task α) (hs : List (Task α)) : Async (Nat × α)` — homogeneous and non-empty, detecting the first
+handle to *become* ready rather than the first in list order, with list order breaking ties only among handles
+already resolved at the call — and its all-of companion `join (hs : List (Task α)) : Async (List α)`. It cancels
+nothing. `LeanIn/Runtime/Leaf.lean` carries `race`, which is `select` followed by `cancel hooks t v` for every
+non-winner, so a cancelled loser's observables are exactly W5's laws' consequences and a loser that finished
+before the race returned keeps its own value. `LeanIn/Runtime/Basic.lean`'s `spawn` takes a `Priority`
+(`high`/`normal`) that selects a placement lane — the one-slot LIFO buffer (`Executor.spawnBase` → `Pool.spawn`)
+or the FIFO ring (`Executor.submitBase` → `Pool.submit`) — and promises nothing about when the task runs. The
+scenario is SC16, green on every run — `nix develop -c bash tests/executor-contract.sh SC16`, which invokes
+`lake exe controls --runtime-select` three times and asserts the same fields in each. One invocation's records
+read `winner=h1 readyOrder=h1,h0` (the handle that became ready first won, against a readiness log where the
+head became ready second), with `loserValue=10 joined=10,20` (the loser was left running and produced its own
+value after `select` returned; `join` collected both in list order); `loserOutcome=error loserRanOn=no
+pendingBefore=1 pendingAfter=0 winnerRan=yes` (the race cancelled the loser with its value, no step of it ran
+afterwards, and its registration was retired); and `normalThenHigh=high,normal highThenNormal=high,normal
+servedBeforeHigh=0 servedBeforeNormal=4` (a `.high` spawn is served before a `.normal` one regardless of issue
+order). The milestone's measurement rows are `--runtime-select`'s `selectbench|`/`racebench|`/`priorityorder|`/
+`prioritybench|` lines, recorded with their command in `docs/PERFORMANCE.md` §3.3; the design, the losers' fate,
+the register statement and the model question are in `docs/decisions.md` D17 and the module prose.
+
+**Two premises, corrected or confirmed.** The risk that the priority argument would move onto `Async.spawn` —
+a cutover with many call sites — did not occur: `Runtime.spawn` had **zero callers** at the base revision, so
+changing its signature was not a cutover. And the priority argument needed **no new model structure**: it
+selects between two placements the model already refines, so the model obligation is one derived lemma,
+`Model.Pool.take_slot_first` (axiom-free), whose hypothesis is reachable by a `decide` example staging the slot
+through local `Pool.spawn`. What is deferred is the heterogeneous `select` and the deadline arm — the latter is
+W13's clock, `interface.md` §5's residual absence.
+
 ### W12 — Task-local context and a connection registry
 
 **Deliverable.** A task-local store — a request id, a deadline, a tracing context, read without threading it
@@ -659,7 +688,7 @@ CPS indirection, which is P1.
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | met (SC14) | the product |
 | 10 | **W12** task-locals, connection registry | met (SC15) | log context, drainable shutdown |
-| 11 | **W7** selection, racing, priority | | racing a request against its deadline |
+| 11 | **W7** selection, racing, priority | met (SC16) | racing a request against its deadline |
 | 12 | **W13** handle, metrics, deterministic time | | operating it, capacity, timeout tests |
 | 13 | **W8** multi-carrier and stealing (O2 first) | | more than one core |
 | 14 | **W15** parameterise the async surface upstream (parallel, gates nothing) | | W9's shape |

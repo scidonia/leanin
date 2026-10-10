@@ -199,6 +199,42 @@ its drain genuinely parks and so prices scheduling a woken continuation rather t
 asserted, and none gates anything (§1). The registry's construction and its unbounded membership are
 [`decisions.md`](decisions.md) D16 and the module prose.
 
+### 3.3 Selection, racing and priority (W7)
+
+`nix develop -c lake exe controls --runtime-select` prints four `…bench|`/`priorityorder|` lines beside SC16's
+records. All are over n = 2 000 rounds except `prioritybench` (100 rounds), and each is ⚪ — the operations did not
+exist before this milestone, so there is no earlier mechanism to divide by. Each is nevertheless a same-run pair
+with its own `awaitUs` baseline, which is the comparison the workplan names: a selection's and a race's cost
+against a plain await.
+
+| shape | readings | source |
+|---|---|---|
+| `selectbench\|n=2000\|selectUs=…\|awaitUs=…` — 2 000 rounds of `select` over two handles whose cells are already resolved, against 2 000 plain `Async.await`s on a resolved handle, in one run: `select`'s cost against a plain await, including the shared cell's registration loop (which short-circuits in-step here) | selectUs **2 286 / 2 476 / 2 714 / 2 722 µs** against awaitUs **1 149 / 1 321 / 1 605 / 1 618 µs** across four runs (≈1.1–1.4 µs per `select`, ≈0.6–0.8 µs per await); at `LEAN_NUM_THREADS=1` selectUs 2 788 µs against awaitUs 1 601 µs | `--runtime-select` |
+| `racebench\|n=2000\|raceUs=…\|awaitUs=…` — 2 000 rounds of `race` over a resolved winner against a parked loser, each round spawning the loser, awaiting its start and cancelling it, against 2 000 plain awaits on a resolved handle: the race's cost against a plain await, *including the loser's cancellation and the loser's own spawn* | raceUs **113 871 / 127 662 / 128 943 / 137 594 µs** against awaitUs **836 / 1 048 / 1 071 / 1 117 µs** (≈57–69 µs per race round against ≈0.4–0.6 µs per await); at `LEAN_NUM_THREADS=1` raceUs 88 726 µs against awaitUs 873 µs | `--runtime-select` |
+| `priorityorder\|k=4\|normalThenHigh=…\|highThenNormal=…\|servedBeforeHigh=…\|servedBeforeNormal=…` — the served label order for a `.normal`-then-`.high` issue and the reverse, and how many of the 4 preloaded ring tasks were served before the fresh task's first step, high vs normal: the order the argument changes | `normalThenHigh=high,normal`, `highThenNormal=high,normal`, `servedBeforeHigh=0`, `servedBeforeNormal=4` — identical in every run | `--runtime-select` |
+| `prioritybench\|n=100\|k=4\|highUs=…\|normalUs=…` — enqueue-to-first-step for a `.high` and a `.normal` spawn with the ring preloaded with 4 parked tasks (100 rounds each) | highUs **19 622 µs** against normalUs **18 964 µs** in one default run; at `LEAN_NUM_THREADS=1` highUs 9 660 µs against normalUs 9 739 µs — the two lanes do not separate outside §1's ±30% drift, the expected reading, since placement decides *which* preloaded task goes first, not how long enqueuing one costs | `--runtime-select` |
+
+**What each row is evidence for, and where a row's halves are not comparable.** `priorityorder` is the ordering
+evidence: the stable `servedBeforeHigh=0` / `servedBeforeNormal=4` pair the scenario asserts, printed a second
+time as a measurement, so its meaning does not depend on the machine — this is where the placement is visible.
+`prioritybench` is deliberately expected to read flat (`highUs ≈ normalUs`, the difference inside §1's ±30% drift):
+the lanes change *which* handle is served first, not *how many* are served, so throughput is expected to be the
+same for both. A reader should not look for a benefit in `prioritybench` and should not read the flat pair as the
+feature not working — the benefit is `priorityorder`'s `servedBefore*` pair, and `prioritybench` is only the
+statement that choosing a lane does not cost throughput.
+
+`selectbench` prices the shared-cell machinery against a bare await; the gap is the registration loop plus the
+extra cell the `select` step parks on. **`racebench` is the row whose two halves are not comparable, said plainly
+rather than left to the arithmetic.** Per round, `raceUs` includes the **loser's spawn** (a whole computation and
+the scheduling of its first step), an **await of the loser's readiness gate**, and the **race itself** (select plus
+the loser's cancellation and registration retire); the `awaitUs` baseline spawns nothing and awaits an
+already-resolved handle. The ~100× gap is therefore mostly the loser's spawn and its lifecycle, **not** the race's
+decision — so the row is ⚪ and is not evidence that selection is two orders of magnitude more expensive than an
+await. It is what the command reproduces, and a like-for-like baseline — a row spawning and awaiting the same
+handles in the race's shape — is deliberately not offered.
+
+No row is asserted, and none gates anything (§1).
+
 ## 4. 🔴 Where we are worse
 
 Stated before anything above it, because it is the honest part of this document. Three rows carry no factor: the
@@ -330,6 +366,8 @@ record is not updated for it.
 | `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-sync` | the same `syncbench\|` rows, and the invocation §3.1's `LEAN_NUM_THREADS=1` channel figures come from — the stock channel beside ours at one pool thread |
 | `nix develop -c lake exe controls --runtime-registry` | the handle registry's cost (§3.2): 10 000 handles registered and drained, the same count awaited from a bare `List` as the control, and a drain over 4 outstanding handlers released after it begins; plus SC15's `context\|` and `registry\|` records and its checker's `registryctl\|` readings |
 | `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-registry` | the same `registrybench\|`/`registryhand\|`/`registryheld\|` rows at one pool thread — the invocation §3.2's one-thread figures come from, since the registry is single-carrier code and the figure is not a scaling claim |
+| `nix develop -c lake exe controls --runtime-select` | selection, racing and priority (§3.3): 2 000 rounds of `select` against a plain await, 2 000 rounds of `race` (each round spawning, awaiting and cancelling a parked loser) against a plain await, the served label order for a `.normal`-then-`.high` issue and the reverse with the preloaded-ring counts, and enqueue-to-first-step for both lanes; plus SC16's `select\|`, `race\|` and `priority\|` records and its checker's `selectctl\|` readings |
+| `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-select` | the same `selectbench\|`/`racebench\|`/`priorityorder\|`/`prioritybench\|` rows at one pool thread — the invocation §3.3's one-thread figures come from, since the runtime is single-carrier code and the figures are not scaling claims |
 
 ## 7. What these numbers are not
 

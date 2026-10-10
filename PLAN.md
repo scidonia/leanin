@@ -37,6 +37,9 @@ so each unblocks the next, extending this plan's M4 and M5 rather than replacing
 semaphore and bounded channel (D14), is met there: SC13 is green and its rows are in `docs/PERFORMANCE.md`.
 W12, the task-local context and the `JoinSet`-shaped connection registry (D16), is met there too: SC15 is green —
 `nix develop -c bash tests/executor-contract.sh SC15` — and its rows are in `docs/PERFORMANCE.md` §3.2.
+W7, selection and racing (`select`/`join`, and the runtime's `race`) and a placement priority argument on
+`Runtime.spawn` (D17), is met: SC16 is green — `nix develop -c bash tests/executor-contract.sh SC16` — and its
+rows are in `docs/PERFORMANCE.md` §3.3.
 
 Two findings did the shaping, and both were surprises:
 
