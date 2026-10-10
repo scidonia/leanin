@@ -211,6 +211,33 @@ exactly that: a cancelled waiter is granted nothing and consumes nothing. Our me
 wake is only a hint — the waiter acquires in its own step, and a skipped wake transfers nothing. *This is D14's
 design, and it is built: `LeanIn/Task/Sync.lean`, and SC13 drives it at the public executable.*
 
+**A task-local context is carried, not threaded.** `LeanIn/Task/Basic.lean` gives the layer a `Local` record —
+a `requestId`, a `deadline` and a tracing `trace` — carried as a field of `Ctx` (`Ctx.local`), with two
+operations: `Async.local`, a field read of the immutable `Ctx` a step already holds, and `Async.withLocal`,
+which runs a computation under a value. An `Async.spawn` inside a `withLocal` builds the child's `Ctx` from the
+parent's, so the child inherits the innermost enclosing value at its spawn site, and no signature between a
+reader and its caller gains a parameter. The record is typed rather than a name-keyed store: a reader and a
+writer agree by type rather than by convention, and the child takes one immutable copy at its spawn site rather
+than a map behind a second lock. Nothing in the runtime reads these fields — the runtime schedules, and a
+caller's log line or deadline check reads them. *This is D16's design, and it is built: `LeanIn/Task/Basic.lean`,
+and SC15-O1 drives it at the public executable.* Its scoping is read as a one-carrier pair — inheritance by a
+spawned child and non-inheritance by an unrelated computation — because the clause's second half ("and not from
+a task on another carrier") needs a second carrier that does not exist yet: W8, and O2 below.
+
+**A `JoinSet`-shaped set of handles is the task layer's own, and drains by awaiting.** `LeanIn/Task/Registry.lean`
+is one `Std.Mutex` over a membership `List`, with `new`, `add`, `spawn`, `size`, `joinAll` and `drain`. Every
+operation is a critical section over pure list code; the awaits happen *outside* the lock, on a snapshot the lock
+has released, because running a continuation inside would enqueue — which takes the executor's lock — while
+holding this one. The registry is **unbounded**: it holds handles, it does not meter admissions. The connection
+limit stays the proved semaphore in `Runtime.serveBounded` (D15), so a second bound inside the registry would be
+a second place the limit lives and would make `add` a parking operation, wrong for a drain path. `drain` takes
+the whole membership in one critical section, clears the registry, and awaits each taken handle outside it; that
+await is what makes its return mean the handlers finished. The registry holds handles, not **ownership**: dropping
+it aborts nothing — Lean has no drop hook that could (W5) — and a handle it took is still awaitable by anyone else
+holding it. `drain` awaits rather than cancels: cancelling what outlives a deadline is `Runtime.cancel`, issued by
+whoever holds the clock. *This is D16's design, and it is built: `LeanIn/Task/Registry.lean`, its `joinAll`/`drain`
+in `Net.lean`'s serving loops, and SC15 drives it at the public executable.*
+
 ______________________________________________________________________
 
 ## 5. Deliberately absent
@@ -231,7 +258,15 @@ Each of these is a decision, not an oversight:
   in no promised order.
 - **No atomics.** Not exposed (D4, D7).
 - **No `Send`/`Sync`.** Lean has none; O2 in [`decisions.md`](decisions.md) is unresolved. Until it
-  closes, the interface cannot be frozen — this is the one thing that blocks it.
+  closes, the interface cannot be frozen — this is the one thing that blocks it. The task-local
+  context is gated on the same item: it is per-computation and tested on one carrier, and the
+  cross-carrier half of its inheritance law is W8's (D16).
+- **No `shutdown` and no abort-all on the registry.** `LeanIn/Task/Registry.lean`'s `drain` awaits what it
+  holds; it does not cancel. Cancelling what outlives a deadline is `Runtime.cancel`, already public and
+  issued by whoever holds the clock, and the registry's contribution is only that it then drains. An
+  operation that cancels the membership itself — a `Registry.shutdown`/`abortAll` — is deliberately absent:
+  its cancellation half is that same `Runtime.cancel`, and testing "outlives the deadline" needs a harness
+  clock this milestone does not have, since a wall-clock test of it is a sleep (W13; D16).
 - **No `LocalSet`, `block_in_place`, `block_on`-variants, or runtime-flavour enum** in v1. One flavour
   (single-carrier, D2), shaped on `LocalRuntime`.
 

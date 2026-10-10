@@ -109,6 +109,13 @@ reach stays the only one. Their flat `Async` surface (`Mutex.lock`, `Semaphore.a
 is a retry step stamped by `ctx.resume`, so it introduces no new substrate. The semaphore's model obligation is
 stated and deferred in D14, and `docs/primitive-theory.md` §6 records the register's non-change.
 
+**W12's context and registry change the TCB in no way (D16).** `Local` and `Ctx` are pure structure, and
+`Registry`'s whole mechanism is one `Std.Mutex` critical section per operation — A1, already trusted — over pure
+list code; it reaches no `IO.Promise`, no atomics and no new syscall, so no entry is added above and
+`Blocking.lean`'s direct promise reach stays the only one. The context's inheritance is a value copy at the one
+place a child's `Ctx` is built, and the drain awaits handles outside the lock, so neither introduces substrate.
+The two model propositions and the liveness limit are stated and argued in §3.
+
 The honest framing: **the proof is about a model of the scheduler, and the model is a design decision
 that we control.** The project's central architectural question is therefore not "what do we prove"
 but **"how thin can we make the layer between the proven model and the running code."** That is why
@@ -163,6 +170,25 @@ P8-class items W14 does *not* discharge — it records them rather than leaving 
    executor's own evidence, because the service model does not model leaves.
 5. D14's deferred semaphore invariant (`permits + holders = capacity`) stays deferred: D15 records the
    partial activation of D14's trigger and restates what remains.
+
+**What W12 states and argues.** The task-local context and the handle registry carry two propositions,
+written in `LeanIn/Task/Registry.lean`'s module doc and in [`decisions.md`](decisions.md) D16 —
+`Registry.Sound` (every `add` is matched by exactly one `drain`-take: `held.length + drained.length =
+added.length`, with no duplicate drain, at quiescent points) and `Local.Inherited` (a computation's
+`ctx.local` is the innermost enclosing `withLocal` value at its spawn site). Both are **argued, not
+proved**, for D14's reasons: they are by construction and have no state to reason about — one
+`Std.Mutex`-guarded list whose append and take are single critical sections, and on one carrier (D2)
+steps do not interleave, so the arithmetic is a list lemma; and `Async.spawn` copies `ctx.local` into
+the child while every continuation closes over the `Ctx` that built it, so inheritance is the
+termination rule of the term. A model with no refinement theorem proves nothing about the code, and
+the refinement needs the missing serializability lemma (§4). Their executable half is SC15, which reads
+the drain's "returns only after the handlers finished" from the mode's own annotations;
+`tests/ModelOracle.lean` is untouched. **The liveness half is not provable and is not claimed:** that a
+`drain` terminates requires that a handler neither finishes nor is cancelled, which is not derivable
+from A1–A7 ([`primitive-theory.md`](primitive-theory.md) §6) — a handler that never returns makes the
+drain unbounded. **Trigger to take a model:** before `Registry` gains a bound or a `shutdown`, or before
+a server's liveness is argued from a drain deadline (W13) — then `LeanIn/Model/Registry.lean` with
+`Registry.Sound` and a reachability probe in `LeanIn/Test/Dynamics.lean`'s idiom.
 
 ______________________________________________________________________
 

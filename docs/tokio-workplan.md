@@ -468,6 +468,30 @@ what make a log line say which request it belongs to.
 carrier, and not from a task on another carrier; a drain scenario where `shutdown` returns only after the
 outstanding handlers have finished, with the live count observed to fall to zero.
 
+**Met, and what its record reads.** Both deliverables are in. `LeanIn/Task/Basic.lean` carries the `Local`
+record — a request id, a deadline and a tracing context — as a field of `Ctx`, with `Async.local` and
+`Async.withLocal`, and `Async.spawn` copies the parent's local into the child's `Ctx`, so a spawned computation
+inherits the innermost enclosing value at its spawn site. `LeanIn/Task/Registry.lean` is the `JoinSet`-shaped set
+of handles (`new`, `add`, `spawn`, `size`, `joinAll`, `drain`), and `Net.lean`'s serving loops use it — `joinAll`
+in `serveNJoin`, `drain` in `serveUntilStopped`/`serveBoundedLoop` — so shutdown is a drain *operation*.
+The scenario is SC15, green on every run —
+`nix develop -c bash tests/executor-contract.sh SC15`, which invokes `lake exe controls --runtime-registry` three
+times and asserts the same fields in each. One invocation's records read
+`scope=7 child=7 unrelated=0` (the value installed on the client computation is read by the computation it
+spawned and not by one it did not), `heldBefore=4 completions=3 completedAtDrainReturn=3 liveAtDrainReturn=0
+heldAfter=0` (the drain returned only after the outstanding handlers finished, with the live count at zero) and
+`cancelOutcome=error` (a cancelled handle neither hangs the drain nor is granted to a caller). The milestone's
+measurement rows are `--runtime-registry`'s `registrybench|`/`registryhand|`/`registryheld|` lines, recorded with
+their command in `docs/PERFORMANCE.md` §3.2; the design, the deferred deadline arm and the argued model
+obligation are in `docs/decisions.md` D16 and the module prose.
+
+**Two limits, recorded rather than hidden.** The clause's second half — "and not from a task on another carrier"
+— is not observable, because the runtime is single-carrier (D2) and W8 has not landed; it is rendered as the
+inheritance/non-inheritance pair on one carrier, `carrierCount=1` names the deferral, and the cross-carrier half
+is **W8's**. And "cancel what outlives the deadline" is not tested: it needs W13's harness clock, since a
+wall-clock test of it is a sleep. The registry is **unbounded by decision** — a `JoinSet` holds handles and does
+not meter admissions — so it is *not* D13's blocking-pool answer, and D13's row carries that correction.
+
 ### W13 — Runtime handle, metrics, and deterministic time
 
 **Deliverable.** A handle that spawns onto a running executor from a thread that is not a carrier (a signal
@@ -634,7 +658,7 @@ CPS indirection, which is P1.
 | 7 | **W4** blocking pool | met (SC12) | file I/O, sync APIs, CPU in a handler |
 | 8 | **W6** async sync and backpressure | | shared state, connection limits |
 | 9 | **W14** the service's own refinement | met (SC14) | the product |
-| 10 | **W12** task-locals, connection registry | | log context, drainable shutdown |
+| 10 | **W12** task-locals, connection registry | met (SC15) | log context, drainable shutdown |
 | 11 | **W7** selection, racing, priority | | racing a request against its deadline |
 | 12 | **W13** handle, metrics, deterministic time | | operating it, capacity, timeout tests |
 | 13 | **W8** multi-carrier and stealing (O2 first) | | more than one core |

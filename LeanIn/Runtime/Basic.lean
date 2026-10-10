@@ -30,7 +30,7 @@ def resumeOf (e : Executor cap) : Task.Item → BaseIO Unit := fun it => e.spawn
 def spawn (e : Executor cap) (a : Task.Async α) : IO (Task.Task α) := do
   let cell ← Task.Join.new
   let cancel ← Task.Cancel.new
-  let ctx : Task.Ctx := { cancel := cancel, resume := fun it => resumeOf e (it.stamp cancel) }
+  let ctx : Task.Ctx := { cancel := cancel, resume := fun it => resumeOf e (it.stamp cancel), «local» := {} }
   e.submit (Task.Item.stamp (Task.Item.ofAction (a.step (fun v => Task.Join.resolve cell v) ctx)) cancel)
   return ⟨cell, cancel⟩
 
@@ -84,7 +84,7 @@ def run (e : Executor cap) (a : Task.Async α) : IO α := do
   let done ← IO.mkRef (none : Option α)
   -- The driver's own computation carries a token nothing hands out, and its first item is left unstamped: `run`
   -- is a caller's thread waiting, and the computation it drives is not one another task holds a handle to.
-  let ctx : Task.Ctx := { cancel := ← Task.Cancel.new, resume := resumeOf e }
+  let ctx : Task.Ctx := { cancel := ← Task.Cancel.new, resume := resumeOf e, «local» := {} }
   e.submit (Task.Item.ofAction (a.step (fun v => done.set (some v)) ctx))
   blockOn e (do return (← done.get).isSome)
   match ← done.get with

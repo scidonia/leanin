@@ -10,6 +10,7 @@ import LeanIn.Sched.Pool
 import LeanIn.Sched.Scheduler
 import LeanIn.Sched.Executor
 import LeanIn.Task.Basic
+import LeanIn.Task.Registry
 import LeanIn.Task.Sync
 import LeanIn.Runtime.Basic
 import LeanIn.Runtime.Blocking

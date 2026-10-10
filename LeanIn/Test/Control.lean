@@ -7,6 +7,7 @@ import LeanIn.Runtime.Net
 import LeanIn.Runtime.Time
 import LeanIn.Runtime.Blocking
 import LeanIn.Task.Sync
+import LeanIn.Task.Registry
 
 /-!
 # Runtime controls for the bridge axioms
@@ -2221,6 +2222,312 @@ def runtimeService (bound : Nat) : IO UInt32 := do
     IO.println s!"servicebench|n={n}|bound={bound}|runUs={runUs}|usPerConn={runUs / n}|connsPerSec={connsPerSec}"
     return 0
 
+/-- The `context|` record's fields, in the order the mode prints them. -/
+def registryCtxFields : List String :=
+  ["root", "scope", "child", "unrelated", "childAfterPark", "carrierCount", "carrier",
+   "childTid", "childOnCarrier", "trace", "runUs"]
+
+/-- The `registry|` record's fields, in the order the mode prints them. -/
+def registryRegFields : List String :=
+  ["k", "heldBefore", "begins", "liveHighWater", "cancelled", "completions",
+   "completedAtDrainReturn", "liveAtDrainReturn", "heldAfter", "drainReturned",
+   "cancelOutcome", "cancelledEndByHandler", "carrier", "runUs"]
+
+/-- The record's fields are exactly `fields`, in order, each nonempty. -/
+def registryShaped (rec : String) (fields : List String) : Bool :=
+  let toks := rec.splitOn "|"
+  toks.length == fields.length &&
+  (toks.zip fields).all (fun (tok, key) =>
+    match tok.splitOn "=" with
+    | [k, v] => k == key && v != ""
+    | _      => false)
+
+/-- SC15-O1 as a detector: the spawned child read the value its client task installed, the unrelated
+computation read the default, the install took effect (`scope ≠ root`), the read happened on the
+carrier the root drives, and it happened in the child's resumed step. Every operand is read from its
+own named field. -/
+def contextOk (rec : String) : Bool :=
+  registryShaped rec registryCtxFields &&
+  match serviceNat rec "child", serviceNat rec "scope", serviceNat rec "root",
+        serviceNat rec "unrelated", serviceField rec "childAfterPark",
+        serviceField rec "childOnCarrier", serviceField rec "childTid",
+        serviceField rec "carrier" with
+  | some child, some scope, some root, some unrelated, some afterPark, some onCarrier,
+    some childTid, some carrier =>
+      child == scope && unrelated == root && scope != root &&
+      afterPark == "yes" && onCarrier == "yes" && childTid == carrier
+  | _, _, _, _, _, _, _, _ => false
+
+/-- SC15-O2 as a detector: the registry held `k` handles and all began, every held handler is
+accounted for, the drain returned only after the completing handlers finished, the live count fell to
+zero and nothing was left held — with the affirmative control that the live high-water reached the
+held count. -/
+def registryO2Ok (rec : String) : Bool :=
+  match serviceNat rec "k", serviceNat rec "heldBefore", serviceNat rec "begins",
+        serviceNat rec "liveHighWater", serviceNat rec "cancelled", serviceNat rec "completions",
+        serviceNat rec "completedAtDrainReturn", serviceNat rec "liveAtDrainReturn",
+        serviceNat rec "heldAfter" with
+  | some k, some heldBefore, some begins, some high, some cancelled, some completions,
+    some atDrainReturn, some liveAtDrainReturn, some heldAfter =>
+      heldBefore == k && begins == k && completions + cancelled == heldBefore &&
+      atDrainReturn == completions && liveAtDrainReturn == 0 && heldAfter == 0 &&
+      high == heldBefore && heldBefore != 0
+  | _, _, _, _, _, _, _, _, _ => false
+
+/-- SC15-O3 as a detector: a caller still awaiting a handle the drain took gets the cancellation, no
+step of the cancelled handler ran afterwards, the cancelled handle was not left behind, and the drain
+terminated. -/
+def registryO3Ok (rec : String) : Bool :=
+  serviceField rec "drainReturned" == some "yes" &&
+  serviceField rec "cancelOutcome" == some "error" &&
+  serviceField rec "cancelledEndByHandler" == some "no" &&
+  serviceNat rec "heldAfter" == some 0
+
+/-- The record satisfies every binding of the registry clause: it is shaped as `registryRegFields`,
+and both obligations hold, read from their own named fields. -/
+def registryOk (rec : String) : Bool :=
+  registryShaped rec registryRegFields && registryO2Ok rec && registryO3Ok rec
+
+/-- A well-formed `context|` record, built from the record syntax and the expected values rather than
+from the mode's output, so the checker's controls cannot agree with the mode by construction. -/
+def contextGoodRec : String :=
+  "root=0|scope=7|child=7|unrelated=0|childAfterPark=yes|carrierCount=1|carrier=100|childTid=100|childOnCarrier=yes|trace=sc15|runUs=1"
+
+/-- A well-formed `registry|` record, likewise. -/
+def registryGoodRec : String :=
+  "k=4|heldBefore=4|begins=4|liveHighWater=4|cancelled=1|completions=3|completedAtDrainReturn=3|liveAtDrainReturn=0|heldAfter=0|drainReturned=yes|cancelOutcome=error|cancelledEndByHandler=no|carrier=100|runUs=1"
+
+/-- No inheritance: the child read the default. -/
+def registryCtxNearChildNotInherited : String := contextGoodRec.replace "child=7" "child=0"
+
+/-- The installed value leaked to a computation the client did not spawn. -/
+def registryCtxNearSiblingLeak : String := contextGoodRec.replace "unrelated=0" "unrelated=7"
+
+/-- The drain returned before the outstanding handlers finished: the live count is still up and the
+snapshot's completion count is short. -/
+def registryRegNearDrainEarly : String :=
+  (registryGoodRec.replace "completedAtDrainReturn=3" "completedAtDrainReturn=0").replace
+    "liveAtDrainReturn=0" "liveAtDrainReturn=3"
+
+/-- Handles left behind by the drain. -/
+def registryRegNearHeldLeft : String := registryGoodRec.replace "heldAfter=0" "heldAfter=1"
+
+/-- A step of the cancelled handler ran after its cancellation. -/
+def registryRegNearCancelledRanOn : String :=
+  registryGoodRec.replace "cancelledEndByHandler=no" "cancelledEndByHandler=yes"
+
+/-- The mode's own checker readings, on a well-formed pair and on each near miss: `accepted` then
+`rejected` when the checker discriminates. -/
+def registryCtlLine : String :=
+  "registryctl|recordGood=" ++ serviceReading (contextOk contextGoodRec && registryOk registryGoodRec) ++
+  "|childNotInherited=" ++ serviceReading (contextOk registryCtxNearChildNotInherited && registryOk registryGoodRec) ++
+  "|siblingLeak=" ++ serviceReading (contextOk registryCtxNearSiblingLeak && registryOk registryGoodRec) ++
+  "|drainEarly=" ++ serviceReading (contextOk contextGoodRec && registryOk registryRegNearDrainEarly) ++
+  "|heldLeft=" ++ serviceReading (contextOk contextGoodRec && registryOk registryRegNearHeldLeft) ++
+  "|cancelledRanOn=" ++ serviceReading (contextOk contextGoodRec && registryOk registryRegNearCancelledRanOn)
+
+/-- The registry clause's own annotations, appended under one `Std.Mutex`: the ids in begin order, the
+ids whose connection lifetime ended (a handler's own end, or the canceller's end for the handle it
+cancelled), the online live count and its running maximum, and the number of handlers that reached
+their own end. -/
+private structure RegistryLog where
+  begins : List Nat := []
+  ends : List Nat := []
+  live : Nat := 0
+  liveHigh : Nat := 0
+  handled : Nat := 0
+
+/-- **SC15 — the task-local context is inherited, and the registry drains.**
+
+One invocation, on one carrier, reads three things. The context clause installs a `Task.Local` on a
+client computation (`Async.withLocal`), spawns a child from it, and has the child read `Async.local`
+in a *resumed* step after parking on a gate: the child reads the installed value, a computation
+spawned outside the scope reads the default, and no step's signature gains a parameter. The registry
+clause registers `k` handlers that begin and park, cancels one, and drains: the drain returns only
+after the completing handlers have finished, leaves nothing held, and a caller still holding the
+cancelled handle gets the cancellation rather than a hang. The mode also prints this mode's own
+checker's verdicts on a well-formed pair and on near misses on a `registryctl|` line, and three
+measurement rows, printed and never asserted.
+
+Diagnostic: `lake exe controls --runtime-registry`. -/
+def runtimeRegistry : IO UInt32 := do
+  let k := 4
+  let benchN := 10000
+  let e ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let hooks ← Runtime.Hooks.new
+  let carrier ← IO.getTID
+  let startAt ← IO.mkRef (0 : Nat)
+  -- MEASUREMENT (printed, never asserted): the add path, the drain path over already-resolved cells,
+  -- and the same handles awaited from a bare List by hand.
+  let benchReg ← LeanIn.Task.Registry.new (α := Unit)
+  let benchE ← Sched.Executor.new LeanIn.Task.Item 256 1
+  let benchAddUs ← IO.mkRef (0 : Nat)
+  let benchDrainUs ← IO.mkRef (0 : Nat)
+  let benchHandUs ← IO.mkRef (0 : Nat)
+  let benchProg : LeanIn.Task.EAsync IO.Error Unit := do
+    let clock : IO Nat := IO.monoNanosNow
+    let t0 ← monadLift clock
+    let hs ← (List.range benchN).mapM (fun _ =>
+      LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Registry.spawn benchReg (pure () : LeanIn.Task.Async Unit)))
+    let t1 ← monadLift clock
+    benchAddUs.set (t1 - t0)
+    for h in hs do let _ ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await h)
+    let t2 ← monadLift clock
+    LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Registry.drain benchReg)
+    let t3 ← monadLift clock
+    benchDrainUs.set (t3 - t2)
+    let hs2 ← (List.range benchN).mapM (fun _ =>
+      LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.spawn (pure () : LeanIn.Task.Async Unit)))
+    for h in hs2 do let _ ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await h)
+    let t4 ← monadLift clock
+    for h in hs2 do let _ ← LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await h)
+    let t5 ← monadLift clock
+    benchHandUs.set (t5 - t4)
+  let benchOut ← Runtime.run benchE benchProg
+  match benchOut with
+  | .error err => IO.println s!"registrybench|failed={err}"
+  | .ok () => pure ()
+  -- The synchronized fake the context clause needs: two IO.Promise gates the mode's own steps
+  -- resolve, so the order is enforced by awaits rather than by a clock or a socket.
+  let l7 : LeanIn.Task.Local := { requestId := 7, deadline := none, trace := "sc15" }
+  let signal ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let gate ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let rootRef ← IO.mkRef (0 : Nat)
+  let scopeRef ← IO.mkRef (0 : Nat)
+  let childRef ← IO.mkRef (0 : Nat)
+  let unrelatedRef ← IO.mkRef (0 : Nat)
+  let traceRef ← IO.mkRef ""
+  let childTidRef ← IO.mkRef (0 : UInt64)
+  let childStepRef ← IO.mkRef (0 : Nat)
+  -- The registry clause's gates and its one locked log.
+  let release ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let allParked ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let allEnded ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let drainStarted ← (IO.Promise.new : IO (IO.Promise (Except IO.Error Unit)))
+  let log ← Std.Mutex.new ({} : RegistryLog)
+  let logRead : IO RegistryLog := log.atomically get
+  let logMod (f : RegistryLog → RegistryLog) : IO Unit := log.atomically do set (f (← get))
+  let heldBeforeRef ← IO.mkRef (0 : Nat)
+  let heldAfterRef ← IO.mkRef (0 : Nat)
+  let snapshotRef ← IO.mkRef (none : Option RegistryLog)
+  let drainUsRef ← IO.mkRef (0 : Nat)
+  let drainReturnedRef ← IO.mkRef "no"
+  let cancelOutcomeRef ← IO.mkRef "none"
+  let program : LeanIn.Task.EAsync IO.Error Unit := do
+    -- CONTEXT
+    let rootLocal ← LeanIn.Task.EAsync.ofAsync LeanIn.Task.Async.local
+    rootRef.set rootLocal.requestId
+    let bBody : LeanIn.Task.EAsync IO.Error Nat := do
+      let l ← LeanIn.Task.EAsync.ofAsync LeanIn.Task.Async.local
+      return l.requestId
+    -- The child resolves the signal in its first step and parks; it reads `Async.local` only when it
+    -- is resumed, so the value is read by a task scheduled on the carrier on its own token.
+    let a1Body : LeanIn.Task.EAsync IO.Error (Nat × UInt64) := do
+      monadLift (IO.Promise.resolve ((.ok () : Except IO.Error Unit)) signal : BaseIO Unit)
+      let _ ← Runtime.awaitPromiseE hooks gate
+      childStepRef.set 2
+      let l ← LeanIn.Task.EAsync.ofAsync LeanIn.Task.Async.local
+      let tid ← monadLift (IO.getTID : IO UInt64)
+      return (l.requestId, tid)
+    let aBody : LeanIn.Task.EAsync IO.Error (Nat × String × Nat × UInt64) := do
+      let l ← LeanIn.Task.EAsync.ofAsync LeanIn.Task.Async.local
+      let h ← LeanIn.Task.MonadAsync.spawn a1Body
+      let _ ← Runtime.awaitPromiseE hooks signal
+      monadLift (IO.Promise.resolve ((.ok () : Except IO.Error Unit)) gate : BaseIO Unit)
+      let (child, tid) ← LeanIn.Task.MonadAwait.await h
+      return (l.requestId, l.trace, child, tid)
+    let bh ← LeanIn.Task.MonadAsync.spawn bBody
+    let ah ← LeanIn.Task.MonadAsync.spawn (LeanIn.Task.Async.withLocal l7 aBody)
+    let unrelated ← LeanIn.Task.MonadAwait.await bh
+    let (scope, trace, child, childTid) ← LeanIn.Task.MonadAwait.await ah
+    unrelatedRef.set unrelated
+    scopeRef.set scope
+    traceRef.set trace
+    childRef.set child
+    childTidRef.set childTid
+    -- REGISTRY
+    let handler (id : Nat) : LeanIn.Task.EAsync IO.Error Unit := do
+      monadLift (logMod fun s =>
+        { s with begins := s.begins ++ [id], live := s.live + 1,
+                 liveHigh := max s.liveHigh (s.live + 1) })
+      let begun ← monadLift logRead
+      if begun.begins.length == k then monadLift (IO.Promise.resolve ((.ok () : Except IO.Error Unit)) allParked : BaseIO Unit)
+      let _ ← Runtime.awaitPromiseE hooks release
+      monadLift (logMod fun s =>
+        { s with ends := s.ends ++ [id], live := s.live - 1, handled := s.handled + 1 })
+      let doneN ← monadLift logRead
+      if doneN.handled == k - 1 then monadLift (IO.Promise.resolve ((.ok () : Except IO.Error Unit)) allEnded : BaseIO Unit)
+    let reg ← monadLift (LeanIn.Task.Registry.new (α := Except IO.Error Unit))
+    let hs ← (List.range k).mapM (fun id =>
+      LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Registry.spawn reg (handler id)))
+    let _ ← Runtime.awaitPromiseE hooks allParked
+    let heldBefore ← monadLift (LeanIn.Task.Registry.size reg)
+    heldBeforeRef.set heldBefore
+    match hs[k - 1]? with
+    | none => pure ()
+    | some h3 =>
+      -- The connection's lifetime ends where the cancellation is issued (SC14's `endConn` shape), so
+      -- the cancelling step appends the id to `ends`; the cancelled handler's own append is absent.
+      monadLift (Runtime.cancel hooks h3 (.error (.userError "sc15")) : IO Unit)
+      monadLift (logMod fun s => { s with ends := s.ends ++ [k - 1], live := s.live - 1 })
+      let d : LeanIn.Task.EAsync IO.Error Unit := do
+        monadLift (IO.Promise.resolve ((.ok () : Except IO.Error Unit)) drainStarted : BaseIO Unit)
+        let t0 ← monadLift (IO.monoNanosNow : IO Nat)
+        LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Registry.drain reg)
+        let t1 ← monadLift (IO.monoNanosNow : IO Nat)
+        drainUsRef.set (t1 - t0)
+        let s ← monadLift logRead
+        snapshotRef.set (some s)
+      let dh ← LeanIn.Task.MonadAsync.spawn d
+      let _ ← Runtime.awaitPromiseE hooks drainStarted
+      monadLift (IO.Promise.resolve ((.ok () : Except IO.Error Unit)) release : BaseIO Unit)
+      let _ ← LeanIn.Task.MonadAwait.await dh
+      drainReturnedRef.set "yes"
+      let _ ← Runtime.awaitPromiseE hooks allEnded
+      let co ← (LeanIn.Task.EAsync.ofAsync (LeanIn.Task.Async.await h3) :
+        LeanIn.Task.EAsync IO.Error (Except IO.Error Unit))
+      cancelOutcomeRef.set (match co with | .error _ => "error" | .ok _ => "ok")
+      let heldAfter ← monadLift (LeanIn.Task.Registry.size reg)
+      heldAfterRef.set heldAfter
+  startAt.set (← IO.monoNanosNow)
+  let outcome ← Runtime.run e program
+  match outcome with
+  | .error err => IO.println s!"registry|failed={err}"; return 1
+  | .ok () =>
+    let finalLog ← logRead
+    let root0 ← rootRef.get
+    let scope ← scopeRef.get
+    let child ← childRef.get
+    let unrelated ← unrelatedRef.get
+    let trace ← traceRef.get
+    let childTid ← childTidRef.get
+    let childStep ← childStepRef.get
+    let heldBefore ← heldBeforeRef.get
+    let heldAfter ← heldAfterRef.get
+    let snap ← snapshotRef.get
+    let drainUs ← drainUsRef.get
+    let drainReturned ← drainReturnedRef.get
+    let cancelOutcome ← cancelOutcomeRef.get
+    let returnedAt ← IO.monoNanosNow
+    let runUs := (returnedAt - (← startAt.get)) / 1000
+    let childOnCarrier := if childTid == carrier then "yes" else "no"
+    let childAfterPark := if childStep == 2 then "yes" else "no"
+    let completions := finalLog.handled
+    let cancelled := 1
+    let liveHighWater := finalLog.liveHigh
+    let begins := finalLog.begins.length
+    let completedAtDrainReturn := match snap with | some s => s.handled | none => 0
+    let liveAtDrainReturn := match snap with | some s => s.live | none => 0
+    let threes := (finalLog.ends.filter (fun x => x == k - 1)).length
+    let cancelledEndByHandler := if threes >= 2 then "yes" else "no"
+    IO.println s!"context|root={root0}|scope={scope}|child={child}|unrelated={unrelated}|childAfterPark={childAfterPark}|carrierCount=1|carrier={carrier}|childTid={childTid}|childOnCarrier={childOnCarrier}|trace={trace}|runUs={runUs}"
+    IO.println s!"registry|k={k}|heldBefore={heldBefore}|begins={begins}|liveHighWater={liveHighWater}|cancelled={cancelled}|completions={completions}|completedAtDrainReturn={completedAtDrainReturn}|liveAtDrainReturn={liveAtDrainReturn}|heldAfter={heldAfter}|drainReturned={drainReturned}|cancelOutcome={cancelOutcome}|cancelledEndByHandler={cancelledEndByHandler}|carrier={carrier}|runUs={runUs}"
+    IO.println registryCtlLine
+    IO.println s!"registrybench|n={benchN}|addUs={(← benchAddUs.get) / 1000}|drainUs={(← benchDrainUs.get) / 1000}|usPerHandle={(← benchDrainUs.get) / benchN}"
+    IO.println s!"registryhand|n={benchN}|us={(← benchHandUs.get) / 1000}"
+    IO.println s!"registryheld|k={k}|drainUs={drainUs / 1000}"
+    return 0
+
 /-- Run every control that can be run, or one executor scenario when named. -/
 def main (args : List String) : IO UInt32 := do
   -- The affirmative baseline header, in every mode, before any observation: a check reads it to tell
@@ -2248,6 +2555,7 @@ def main (args : List String) : IO UInt32 := do
   | "--runtime-sync" :: _ => return ← runtimeSync
   | "--runtime-service" :: rest =>
     return ← runtimeService (((argValue rest "--bound").bind String.toNat?).getD 2)
+  | "--runtime-registry" :: _ => return ← runtimeRegistry
   | "--executor-replay" :: rest =>
     let seed := ((argValue rest "--seed").bind String.toNat?).getD 0
     let script := (argValue rest "--script").getD "main"

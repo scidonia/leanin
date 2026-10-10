@@ -3,6 +3,7 @@ import Std.Async.TCP
 import LeanIn.Runtime.Leaf
 import LeanIn.Runtime.Time
 import LeanIn.Task.Error
+import LeanIn.Task.Registry
 import LeanIn.Task.Sync
 
 /-!
@@ -104,17 +105,41 @@ called it, and an untested export is worse than a missing one, since the driver 
 back where it is used. -/
 def serveNJoin (hooks : Hooks) (l : Listener) (n : Nat) (body : Conn → Task.EAsync IO.Error Unit) :
     Task.EAsync IO.Error Unit := do
-  let hs ← (List.range n).mapM (fun _ => do
+  let reg : Task.Registry (Except IO.Error Unit) ← monadLift (Task.Registry.new (α := Except IO.Error Unit))
+  for _ in List.range n do
     let client ← Listener.accept l hooks
-    Task.MonadAsync.spawn (body client))
-  hs.forM (fun h => Task.MonadAwait.await h)
+    let h ← Task.MonadAsync.spawn (body client)
+    monadLift (Task.Registry.add reg h)
+  Task.EAsync.ofAsync (Task.Registry.joinAll reg)
+
+/-- The accept-until-stop loop of `serveUntilStopped`: one attempt per iteration, with the accepted connection's
+handle registered in a `Registry`, until `Executor.isStopping` — then `Registry.drain` awaits everything still
+registered, so the stop is a drain *operation* rather than a `List.forM` in the loop. -/
+private partial def serveUntilStoppedLoop (hooks : Hooks) (e : Sched.Executor Task.Item cap) (l : Listener)
+    (interval : Std.Time.Millisecond.Offset) (body : Conn → Task.EAsync IO.Error Unit)
+    (reg : Task.Registry (Except IO.Error Unit)) : Task.EAsync IO.Error Unit := do
+  if ← monadLift (e.isStopping : IO Bool) then
+    Task.EAsync.ofAsync (Task.Registry.drain reg)
+  else
+    match ← monadLift (Std.Async.TCP.Socket.Server.tryAccept l.srv : IO (Option Conn)) with
+    | some client =>
+      let h ← Task.MonadAsync.spawn (body client)
+      monadLift (Task.Registry.add reg h)
+      serveUntilStoppedLoop hooks e l interval body reg
+    | none =>
+      Task.EAsync.ofAsync (sleep hooks interval)
+      serveUntilStoppedLoop hooks e l interval body reg
 
 /-- **Accept until the executor is stopping, then finish what is in flight and return.**
 
 A drain in the shape W5 asks for: stop accepting, let the connections already accepted run to completion, and
 return only *after* awaiting them — so a driver returns with nothing held rather than with work it will never
 run. It takes the executor because the decision it makes is the executor's own flag; `Executor.isStopping` is the
-reading, and there is no second copy of it here.
+reading, and there is no second copy of it here. The outstanding handles are a `Registry`; the stop is
+`Registry.drain`, which takes the membership, clears it, and awaits each handle *outside* the lock.
+
+The trailing `hs` parameter is the loop's initial membership, kept so the signature is unchanged; callers pass
+`[]`, and it is seeded into the registry once, at entry, before the loop runs.
 
 **It is exercised, and by a scenario rather than a diagnostic.** The first version of the diagnostic for this loop
 — connect, send, stop, read — hung, and the hang was the driver's rather than the loop's: `blockOn` ended as soon
@@ -126,19 +151,12 @@ inFlightAfter=0 pendingHooks=0`.
 sleeps `interval` between attempts instead of parking on a selector. The accept-versus-shutdown choice is
 exactly a `select`, the interface has none yet, and the price of not having it is a drain whose latency is one
 poll interval rather than immediate. -/
-partial def serveUntilStopped (hooks : Hooks) (e : Sched.Executor Task.Item cap) (l : Listener)
+def serveUntilStopped (hooks : Hooks) (e : Sched.Executor Task.Item cap) (l : Listener)
     (interval : Std.Time.Millisecond.Offset) (body : Conn → Task.EAsync IO.Error Unit)
     (hs : List (Task.Task (Except IO.Error Unit))) : Task.EAsync IO.Error Unit := do
-  if ← monadLift (e.isStopping : IO Bool) then
-    hs.forM (fun h => Task.MonadAwait.await h)
-  else
-    match ← monadLift (Std.Async.TCP.Socket.Server.tryAccept l.srv : IO (Option Conn)) with
-    | some client =>
-      let h ← Task.MonadAsync.spawn (body client)
-      serveUntilStopped hooks e l interval body (h :: hs)
-    | none =>
-      Task.EAsync.ofAsync (sleep hooks interval)
-      serveUntilStopped hooks e l interval body hs
+  let reg : Task.Registry (Except IO.Error Unit) ← monadLift (Task.Registry.new (α := Except IO.Error Unit))
+  monadLift (hs.forM (fun h => Task.Registry.add reg h))
+  serveUntilStoppedLoop hooks e l interval body reg
 
 /-- The admission loop of `serveBounded`: one admission per iteration, with the handles accepted so
 far accumulated, until exactly `n` connections have been served — then every handle is awaited.
@@ -149,9 +167,9 @@ step and resumes it holding the permit, so the accept below always runs with one
 releases the permit it was holding before the failure travels, so no failure path can drain the bound. -/
 private partial def serveBoundedLoop (hooks : Hooks) (l : Listener) (sem : Task.Sync.Semaphore)
     (serve : Conn → Task.EAsync IO.Error Unit) (i n : Nat)
-    (hs : List (Task.Task (Except IO.Error Unit))) : Task.EAsync IO.Error Unit := do
+    (reg : Task.Registry (Except IO.Error Unit)) : Task.EAsync IO.Error Unit := do
   if i ≥ n then
-    hs.forM (fun h => Task.MonadAwait.await h)
+    Task.EAsync.ofAsync (Task.Registry.drain reg)
   else
     if ← monadLift (Task.Sync.Semaphore.tryAcquire sem) then pure ()
     else Task.EAsync.ofAsync (Task.Sync.Semaphore.acquire sem)
@@ -161,7 +179,8 @@ private partial def serveBoundedLoop (hooks : Hooks) (l : Listener) (sem : Task.
       monadLift (Task.Sync.Semaphore.release sem)
       throw e
     let h ← Task.MonadAsync.spawn (serve client)
-    serveBoundedLoop hooks l sem serve (i + 1) n (h :: hs)
+    monadLift (Task.Registry.add reg h)
+    serveBoundedLoop hooks l sem serve (i + 1) n reg
 
 /-- **An accept loop with an admission bound.** It serves exactly `n` connections while admitting at
 most `bound` at a time: with the bound full the loop parks on the semaphore rather than admitting, and
@@ -196,7 +215,8 @@ def serveBounded (hooks : Hooks) (l : Listener) (bound : Nat) (n : Nat)
     catch e =>
       monadLift (Task.Sync.Semaphore.release sem)
       throw e
-  serveBoundedLoop hooks l sem serve 0 n []
+  let reg : Task.Registry (Except IO.Error Unit) ← monadLift (Task.Registry.new (α := Except IO.Error Unit))
+  serveBoundedLoop hooks l sem serve 0 n reg
 
 /-- **The loopback address a scenario binds**: `127.0.0.1` and a port. -/
 def loopback (port : UInt16 := 0) : Std.Net.SocketAddress :=

@@ -2264,6 +2264,204 @@ check_sc14() {
   done
 }
 
+# context_ok <record> — SC15-O1 as a detector, so its own control can reuse it: the record is shaped
+# as the named fields, the computation the client task spawned read the installed value, a computation
+# the client did not spawn read the default, the install took effect (scope != root), and the read
+# happened on the carrier, in the child's resumed step. Every operand is read through `field` from this
+# record, so a value is never bound from a neighbouring field.
+context_ok() {
+  local rec="$1" root scope child unrelated afterPark onCarrier childTid carrier
+  record_is "$rec" root scope child unrelated childAfterPark carrierCount carrier childTid \
+    childOnCarrier trace runUs || return 1
+  root="$(field root "$rec")" || return 1
+  scope="$(field scope "$rec")" || return 1
+  child="$(field child "$rec")" || return 1
+  unrelated="$(field unrelated "$rec")" || return 1
+  afterPark="$(field childAfterPark "$rec")" || return 1
+  onCarrier="$(field childOnCarrier "$rec")" || return 1
+  childTid="$(field childTid "$rec")" || return 1
+  carrier="$(field carrier "$rec")" || return 1
+  case "$root$scope$child$unrelated" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$child" -eq "$scope" ] || return 1
+  [ "$unrelated" -eq "$root" ] || return 1
+  [ "$scope" -ne "$root" ] || return 1
+  [ "$afterPark" = "yes" ] || return 1
+  [ "$onCarrier" = "yes" ] || return 1
+  [ "$childTid" = "$carrier" ] || return 1
+}
+
+# registry_o2_ok <record> — SC15-O2 as a detector: the registry held `k` handles and all of them began,
+# every held handler is accounted for, the drain returned only after the completing handlers finished,
+# the live count fell to zero by then and nothing was left held — with the affirmative control that the
+# live high-water reached the held count. Every operand is read through `field` from this record.
+registry_o2_ok() {
+  local rec="$1" k hb bg hw cn cp cr ld ha
+  k="$(field k "$rec")" || return 1
+  hb="$(field heldBefore "$rec")" || return 1
+  bg="$(field begins "$rec")" || return 1
+  hw="$(field liveHighWater "$rec")" || return 1
+  cn="$(field cancelled "$rec")" || return 1
+  cp="$(field completions "$rec")" || return 1
+  cr="$(field completedAtDrainReturn "$rec")" || return 1
+  ld="$(field liveAtDrainReturn "$rec")" || return 1
+  ha="$(field heldAfter "$rec")" || return 1
+  case "$k$hb$bg$hw$cn$cp$cr$ld$ha" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$hb" -eq "$k" ] || return 1
+  [ "$bg" -eq "$k" ] || return 1
+  [ $((cp + cn)) -eq "$hb" ] || return 1
+  [ "$cr" -eq "$cp" ] || return 1
+  [ "$ld" -eq 0 ] || return 1
+  [ "$ha" -eq 0 ] || return 1
+  [ "$hw" -eq "$hb" ] || return 1
+  [ "$hb" -ne 0 ] || return 1
+}
+
+# registry_o3_ok <record> — SC15-O3 as a detector: a caller still awaiting a handle the drain took gets
+# the cancellation, no step of the cancelled handler ran afterwards, the cancelled handle was not left
+# behind, and the drain terminated. Every operand is read through `field` from this record.
+registry_o3_ok() {
+  local rec="$1" dr co cb ha
+  dr="$(field drainReturned "$rec")" || return 1
+  co="$(field cancelOutcome "$rec")" || return 1
+  cb="$(field cancelledEndByHandler "$rec")" || return 1
+  ha="$(field heldAfter "$rec")" || return 1
+  [ "$dr" = "yes" ] || return 1
+  [ "$co" = "error" ] || return 1
+  [ "$cb" = "no" ] || return 1
+  [ "$ha" -eq 0 ] || return 1
+}
+
+# registry_ok <record> — the whole record, as the detector the near-miss controls exercise: shaped as
+# the named fields, and both registry obligations read from their own named fields.
+registry_ok() {
+  local rec="$1"
+  record_is "$rec" k heldBefore begins liveHighWater cancelled completions completedAtDrainReturn \
+    liveAtDrainReturn heldAfter drainReturned cancelOutcome cancelledEndByHandler carrier runUs || return 1
+  registry_o2_ok "$rec" || return 1
+  registry_o3_ok "$rec" || return 1
+}
+
+# --- SC15 — the task-local context is inherited, and the registry drains ————————————————————————————————
+check_sc15() {
+  local out status ctx reg ctl round v key
+  local root scope child unrelated k hb bg hw cn cp cr ld ha dr co cb
+  local near
+  local -a records=()
+
+  # The detectors' own control, from the record syntax and the expectation alone: they must accept a
+  # well-formed context/registry pair and reject each near miss a child that did not inherit, an install
+  # that leaked to a non-descendant, a drain that returned before the handlers finished, handles left
+  # behind, or a cancelled handler that ran on, would produce.
+  context_ok 'root=0|scope=7|child=7|unrelated=0|childAfterPark=yes|carrierCount=1|carrier=100|childTid=100|childOnCarrier=yes|trace=sc15|runUs=1' ||
+    setup_error "SC15: the context detector rejected a well-formed record" \
+      "the detectors' own control, not the SC15 Then"
+  registry_ok 'k=4|heldBefore=4|begins=4|liveHighWater=4|cancelled=1|completions=3|completedAtDrainReturn=3|liveAtDrainReturn=0|heldAfter=0|drainReturned=yes|cancelOutcome=error|cancelledEndByHandler=no|carrier=100|runUs=1' ||
+    setup_error "SC15: the registry detector rejected a well-formed record" \
+      "the detectors' own control, not the SC15 Then"
+  for near in \
+    'root=0|scope=7|child=0|unrelated=0|childAfterPark=yes|carrierCount=1|carrier=100|childTid=100|childOnCarrier=yes|trace=sc15|runUs=1' \
+    'root=0|scope=7|child=7|unrelated=7|childAfterPark=yes|carrierCount=1|carrier=100|childTid=100|childOnCarrier=yes|trace=sc15|runUs=1'; do
+    if context_ok "$near"; then
+      setup_error "SC15: the context detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC15 Then"
+    fi
+  done
+  for near in \
+    'k=4|heldBefore=4|begins=4|liveHighWater=4|cancelled=1|completions=3|completedAtDrainReturn=0|liveAtDrainReturn=3|heldAfter=0|drainReturned=yes|cancelOutcome=error|cancelledEndByHandler=no|carrier=100|runUs=1' \
+    'k=4|heldBefore=4|begins=4|liveHighWater=4|cancelled=1|completions=3|completedAtDrainReturn=3|liveAtDrainReturn=0|heldAfter=1|drainReturned=yes|cancelOutcome=error|cancelledEndByHandler=no|carrier=100|runUs=1' \
+    'k=4|heldBefore=4|begins=4|liveHighWater=4|cancelled=1|completions=3|completedAtDrainReturn=3|liveAtDrainReturn=0|heldAfter=0|drainReturned=yes|cancelOutcome=error|cancelledEndByHandler=yes|carrier=100|runUs=1'; do
+    if registry_ok "$near"; then
+      setup_error "SC15: the registry detector accepted a near miss" \
+        "record: [$near]" \
+        "the detectors' own control, not the SC15 Then"
+    fi
+  done
+  printf 'SC15 control: rejected a child that did not inherit, a value that leaked to a non-descendant, a drain that returned before the handlers finished, handles left behind and a cancelled handler that ran on\n'
+
+  # Three invocations, each of which must satisfy the Then.
+  for round in 1 2 3; do
+    out="$(bounded lake exe controls --runtime-registry)"
+    status=$?
+    check_status SC15 "$status" "lake exe controls --runtime-registry"
+    require_header "$out"
+
+    mapfile -t records < <(grep '^context|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC15 Then: the context behaviour not observed exactly once" \
+        "expected exactly one context| record, saw ${#records[@]} in invocation $round"
+    ctx="${records[0]}"
+    mapfile -t records < <(grep '^registry|' <<<"$out" || true)
+    [ "${#records[@]}" -eq 1 ] ||
+      fail "SC15 Then: the registry behaviour not observed exactly once" \
+        "expected exactly one registry| record, saw ${#records[@]} in invocation $round"
+    reg="${records[0]}"
+
+    record_is "${ctx#context|}" root scope child unrelated childAfterPark carrierCount carrier \
+      childTid childOnCarrier trace runUs ||
+      fail "SC15 Then: the context behaviour not observed exactly once" \
+        "the record is not exactly root/scope/child/unrelated/childAfterPark/carrierCount/carrier/childTid/childOnCarrier/trace/runUs with nonempty values: [$ctx]"
+    record_is "${reg#registry|}" k heldBefore begins liveHighWater cancelled completions \
+      completedAtDrainReturn liveAtDrainReturn heldAfter drainReturned cancelOutcome \
+      cancelledEndByHandler carrier runUs ||
+      fail "SC15 Then: the registry behaviour not observed exactly once" \
+        "the record is not exactly k/heldBefore/begins/liveHighWater/cancelled/completions/completedAtDrainReturn/liveAtDrainReturn/heldAfter/drainReturned/cancelOutcome/cancelledEndByHandler/carrier/runUs with nonempty values: [$reg]"
+
+    # The mode's own checker readings, read as SC13's and SC14's controls are: a fixture defect if they
+    # do not hold, strictly separately from the Then.
+    ctl="$(grep '^registryctl|' <<<"$out" | head -1)"
+    [ -n "$ctl" ] ||
+      setup_error "SC15: the checker controls are missing" "no registryctl record in the invocation"
+    record_is "${ctl#registryctl|}" recordGood childNotInherited siblingLeak drainEarly heldLeft \
+      cancelledRanOn ||
+      setup_error "SC15: the checker-control record is not the expected shape" "control: [$ctl]"
+    bound_field v recordGood "$ctl" "SC15 control"
+    [ "$v" = "accepted" ] ||
+      setup_error "SC15: the checker did not accept a well-formed pair" "recordGood=$v"
+    for key in childNotInherited siblingLeak drainEarly heldLeft cancelledRanOn; do
+      bound_field v "$key" "$ctl" "SC15 control"
+      [ "$v" = "rejected" ] ||
+        setup_error "SC15: the checker did not reject its near miss" "$key=$v"
+    done
+
+    bound_field root root "$ctx" "SC15 Then"
+    bound_field scope scope "$ctx" "SC15 Then"
+    bound_field child child "$ctx" "SC15 Then"
+    bound_field unrelated unrelated "$ctx" "SC15 Then"
+    bound_field k k "$reg" "SC15 Then"
+    bound_field hb heldBefore "$reg" "SC15 Then"
+    bound_field bg begins "$reg" "SC15 Then"
+    bound_field hw liveHighWater "$reg" "SC15 Then"
+    bound_field cn cancelled "$reg" "SC15 Then"
+    bound_field cp completions "$reg" "SC15 Then"
+    bound_field cr completedAtDrainReturn "$reg" "SC15 Then"
+    bound_field ld liveAtDrainReturn "$reg" "SC15 Then"
+    bound_field ha heldAfter "$reg" "SC15 Then"
+    bound_field dr drainReturned "$reg" "SC15 Then"
+    bound_field co cancelOutcome "$reg" "SC15 Then"
+    bound_field cb cancelledEndByHandler "$reg" "SC15 Then"
+
+    # Each clause is read from its own named fields; all three are evaluated so the two that hold are
+    # observed to hold, and the first that does not is the one reported.
+    local o1bad=0 o2bad=0 o3bad=0
+    context_ok "${ctx#context|}" || o1bad=1
+    registry_o2_ok "${reg#registry|}" || o2bad=1
+    registry_o3_ok "${reg#registry|}" || o3bad=1
+    [ "$o1bad" -eq 0 ] ||
+      fail "SC15 Then: a task spawned from the client does not read the installed local" \
+        "observed: scope=$scope child=$child root=$root unrelated=$unrelated"
+    [ "$o2bad" -eq 0 ] ||
+      fail "SC15 Then: the drain returned before the outstanding handlers finished" \
+        "observed: heldBefore=$hb completions=$cp completedAtDrainReturn=$cr liveAtDrainReturn=$ld"
+    [ "$o3bad" -eq 0 ] ||
+      fail "SC15 Then: a cancelled handle hung the drain, ran on, or was left behind" \
+        "observed: drainReturned=$dr cancelOutcome=$co cancelledEndByHandler=$cb heldAfter=$ha"
+
+    printf 'SC15 ok (invocation %s): scope=%s child=%s unrelated=%s heldBefore=%s completions=%s completedAtDrainReturn=%s liveAtDrainReturn=%s heldAfter=%s cancelOutcome=%s\n' \
+      "$round" "$scope" "$child" "$unrelated" "$hb" "$cp" "$cr" "$ld" "$ha" "$co"
+  done
+}
+
 case "${1:-}" in
 SC1) check_sc1 ;;
 SC2) check_sc2 ;;
@@ -2279,8 +2477,9 @@ SC11) check_sc11 ;;
 SC12) check_sc12 ;;
 SC13) check_sc13 ;;
 SC14) check_sc14 ;;
+SC15) check_sc15 ;;
 *)
-  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13|SC14\n' >&2
+  printf 'usage: bash tests/executor-contract.sh SC1|SC2|SC3|SC4|SC5|SC6|SC7|SC8|SC9|SC10|SC11|SC12|SC13|SC14|SC15\n' >&2
   exit 2
   ;;
 esac

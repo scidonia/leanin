@@ -154,17 +154,39 @@ def Join.onReady (j : Join α) (k : α → IO Unit) : IO Unit := do
   | some v => k v
   | none   => pure ()
 
+/-- **What a computation carries ambiently, and its children inherit.** A request id, a deadline and a tracing
+context — the values a log line or a deadline check reads without every signature between them gaining a
+parameter. Nothing in the task layer or the runtime reads these fields: the runtime schedules, and a caller's log
+line or a caller's deadline check reads them.
+
+A typed record rather than a heterogeneous store keyed by name: a reader and a writer of a key agree by type
+rather than by convention, and the value is one immutable copy a child takes at its spawn site rather than a map
+behind a second lock. -/
+structure Local where
+  /-- The request this computation belongs to, or zero for none. -/
+  requestId : Nat := 0
+  /-- An absolute monotonic-nanosecond instant, or none. Nothing here reads it; W13's clock decides it. -/
+  deadline : Option Nat := none
+  /-- A tracing context: the one string a log line quotes. -/
+  trace : String := ""
+
 /-- **What a step is given**: its own cancellation token, and how to schedule an item.
 
 Both travel together and mean the same thing — the computation is what a cancellation stops and what a
 registration belongs to — so they are one parameter rather than two. The token being a *field* here is what lets a
 leaf await attribute its registration to the computation that is waiting, which is the difference between a
-registry that can be retired and one that can only grow. -/
+registry that can be retired and one that can only grow.
+
+`local` carries the ambient context too, and is what `Async.withLocal` reads: a computation's steps read it from
+the parameter they already hold, so no signature gains one. It has no default, so every `Ctx` construction site
+states it and the inheritance rule is a reviewed line rather than a silent omission. -/
 structure Ctx where
   /-- The token of the computation this step belongs to. -/
   cancel : Cancel
   /-- Schedule an item — the local route, so a chain stays on the core its parent ran on. -/
   resume : Item → BaseIO Unit
+  /-- The ambient context, inherited by a spawned child from its parent. -/
+  «local» : Local
 
 /-- **A scheduleable computation.**
 
@@ -192,6 +214,16 @@ whoever completes it schedules the continuation instead of running it here. -/
 def Async.ofIO (act : IO α) : Async α := ⟨fun k _ => do k (← act)⟩
 
 instance : MonadLift IO Async where monadLift act := Async.ofIO act
+
+/-- **Read the ambient context.** A field read of the immutable `Ctx` the step was already given — no lock, no
+lookup, and no signature between the reader and its caller gains a parameter. -/
+def Async.«local» : Async Local := ⟨fun k ctx => k ctx.«local»⟩
+
+/-- **Run a computation under a local context.** The value is installed on the `Ctx` this computation's steps run
+with; a `spawn` inside it therefore builds the child's `Ctx` from a parent that already carries it, which is how
+the child inherits the innermost enclosing value at its spawn site. -/
+def Async.withLocal (l : Local) (a : Async α) : Async α :=
+  ⟨fun k ctx => a.step k { ctx with «local» := l }⟩
 
 /-- **A handle** on a spawned computation: the cell its value lands in, and its cancellation token. -/
 structure Task (α : Type) where
@@ -228,7 +260,7 @@ that wants its children to stop with it has to cancel them. -/
 def Async.spawn (a : Async α) : Async (Task α) := ⟨fun k ctx => do
   let cell ← Join.new
   let cancel ← Cancel.new
-  let child : Ctx := { cancel := cancel, resume := fun it => ctx.resume (it.stamp cancel) }
+  let child : Ctx := { cancel := cancel, resume := fun it => ctx.resume (it.stamp cancel), «local» := ctx.«local» }
   child.resume (Item.ofAction (a.step (fun v => Join.resolve cell v) child))
   k ⟨cell, cancel⟩⟩
 

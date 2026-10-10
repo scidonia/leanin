@@ -288,6 +288,136 @@ trace.
 
 ______________________________________________________________________
 
+### SC15 — the task-local context is inherited, and the registry drains
+
+**Actor.** A Lean executable client of the task layer (`lake exe controls --runtime-registry`), driving
+`LeanIn/Task/Basic.lean`'s context operations (`Async.local`, `Async.withLocal`) and
+`LeanIn/Task/Registry.lean` (`new`, `spawn`, `size`, `drain`) from computations on one
+`Sched.Executor.new LeanIn.Task.Item 256 1`, with `Runtime.Hooks.new` for the gate completions. Nothing
+here calls a private function: every compared value is a named field of a record the executable prints
+on stdout. The `Local` value a client task installs is `{ requestId := 7, deadline := none, trace :=
+"sc15" }`; the default is `{}`.
+
+**Boundary.** `nix develop -c bash tests/executor-contract.sh SC15`, which invokes
+`lake exe controls --runtime-registry` three times and asserts on the one `context|` record, the one
+`registry|` record and the one `registryctl|` checker record each invocation prints. Every compared
+value is a named field of its own record, read by key; an absent, repeated or empty field fails the
+check rather than resolving to a neighbouring value. An invocation that does not run, prints no record,
+prints a malformed record, exits non-zero without the check's `fail` line, or is bounded by the
+watchdog is a setup error, never the `Then`.
+
+**Given.** A fresh single-carrier executor `Sched.Executor.new LeanIn.Task.Item 256 1`,
+`Runtime.Hooks.new`, and the carrier `IO.getTID` read by the mode's own thread. **Context clause.** Two
+`IO.Promise` gates the mode's own steps resolve, so the order is enforced by awaits rather than by a
+clock or a socket. Three computations are spawned from the root the mode drives with `Runtime.run`:
+`B`, spawned by the root *outside* any `withLocal`; `A`, spawned as `Async.withLocal L7 aBody`, the
+client task on which the value is installed; and `A1`, spawned by `A` inside that scope. **Registry
+clause.** `k = 4` handlers, `release` and `allParked` as `IO.Promise` gates, and a `Std.Mutex`-guarded
+log `{begins, ends, live, liveHigh, handled}`: `handler id` appends `id` to `begins`, resolves
+`allParked` when the begin count reaches `k`, awaits `release`, and appends `id` to `ends`. The four
+handles are `Registry.spawn reg (handler id)`; the mode keeps the cancelled one's handle. `D` is a
+drainer: it resolves `drainStarted`, calls `Registry.drain`, and snapshots the log in the step in which
+`drain` returned.
+
+**When.** One invocation, on one carrier, with the order enforced by awaits:
+
+1. The root reads `Async.local` (0) and spawns `B` and `A`.
+2. `A` reads `scope ← Async.local` (7), creates the two gates, spawns `A1`, and awaits `A1`'s signal.
+3. `A1`'s first step resolves the signal and parks on its gate.
+4. `A`'s continuation, woken by the signal, resolves `A1`'s gate and awaits `A1`'s handle.
+5. `A1`'s resumed step reads its own `Async.local` and its `IO.getTID`, and returns both.
+6. The root awaits the handles and reads `B`'s report (0).
+7. The root spawns the four handlers into `reg` and awaits `allParked`.
+8. `heldBefore ← Registry.size reg` (4).
+9. `Runtime.cancel hooks h3 (.error (.userError "sc15"))`, and the cancelling step appends the cancelled
+   id to `ends` — the lifetime ends where the cancellation is issued, SC14's `endConn` shape.
+10. The root spawns `D`; `D` resolves `drainStarted`, drains, and snapshots.
+11. The root's continuation, woken by `drainStarted`, resolves `release`.
+12. Handlers 0, 1, 2 resume and end; `D`'s awaits return; `D` reports its snapshot and returns.
+13. The root awaits the taken handle and records `cancelOutcome`, then reads the log a final time and
+    prints.
+
+**Then.** There is exactly one `context|` record and one `registry|` record per invocation, shaped
+exactly, in this order with nonempty values, as `context|root|scope|child|unrelated|childAfterPark|
+carrierCount|carrier|childTid|childOnCarrier|trace|runUs` and `registry|k|heldBefore|begins|
+liveHighWater|cancelled|completions|completedAtDrainReturn|liveAtDrainReturn|heldAfter|drainReturned|
+cancelOutcome|cancelledEndByHandler|carrier|runUs`. The three clauses are read from their own named
+fields:
+
+- **SC15-O1** — the value installed on the client task is read by the computation it spawned, and not
+  by a computation it did not spawn: `child == scope`, `unrelated == root`. The affirmative control, in
+  the same record, is `scope != root`, so the pair is not a comparison of two defaults; and
+  `childOnCarrier == yes` with `childTid == carrier` and `childAfterPark == yes`, so the read happened
+  on the carrier, in the child's resumed step. `carrierCount` (recorded `1`, naming why the clause's
+  second half is W8's), `trace` and `runUs` are recorded, never asserted.
+- **SC15-O2** — `Registry.drain` returns only after the outstanding handlers finish, and the live count
+  falls to zero: `heldBefore == k` and `begins == k` (the registry held `k` handles and all began),
+  `completions + cancelled == heldBefore` (every held handler is accounted for),
+  `completedAtDrainReturn == completions`, `liveAtDrainReturn == 0` and `heldAfter == 0`. The
+  affirmative control, in the same record, is `liveHighWater == heldBefore` and `heldBefore != 0`.
+- **SC15-O3** — a cancelled handle neither hangs the drain nor runs on: `cancelOutcome == error` (a
+  caller awaiting a handle the drain took gets the cancellation), `cancelledEndByHandler == no` (no
+  step of the cancelled handler ran after the cancellation; the canceller's own `end` is the control
+  that the append is reachable), `heldAfter == 0`, and `drainReturned == yes`.
+
+`cancelled` is the number of handles the mode cancelled; `completions` is the final reading of the
+handlers that reached their own end; `completedAtDrainReturn` and `liveAtDrainReturn` are `D`'s
+snapshot, taken in the step in which `drain` returned.
+
+**The detectors' own control, in the same run.** `context_ok` and `registry_ok` are the record-string
+detectors the assertion is built from. They must accept a well-formed pair written from the record
+syntax and the expectation, and reject each near miss: no inheritance (`child == root`), the value
+leaked to a non-descendant (`unrelated == scope`), the drain returned early (`completedAtDrainReturn <
+completions`, which in the natural red also raises `liveAtDrainReturn`), handles left behind
+(`heldAfter != 0`), and a cancelled handler that ran on (`cancelledEndByHandler == yes`). The
+delivered near-miss count is five — the sixth variant the record's prose names
+(`liveAtDrainReturn != 0`) moves together with `drainEarly` in the natural red, so it is the same
+rejection — and a near miss the detector accepts is a fixture defect reported as a setup error,
+separately from the `Then`. The mode's own `registryctl|` readings must hold too: `accepted` for the
+well-formed pair and `rejected` for each near miss.
+
+**The failure this scenario records on the staged tree.** The staged runtime half is the natural first
+cut: `Async.spawn`'s child `Ctx` is built with `local := {}` rather than `ctx.local`, and `Registry.drain`
+takes the handle list and clears the registry without awaiting it. Both clauses red deterministically on
+one carrier, because the wrong `drain` snapshots the log inside the step that took the list, before the
+root's continuation can release the handlers. The check reports the first failing clause — SC15-O1 — as
+its own `Then`:
+
+```
+SC15 Then: a task spawned from the client does not read the installed local
+  observed: scope=7 child=0 root=0 unrelated=0
+```
+
+and the same record carries SC15-O2's red: `heldBefore=4 begins=4 cancelled=1 completions=3
+completedAtDrainReturn=0 liveAtDrainReturn=3 heldAfter=0`, so `completedAtDrainReturn == completions` is
+false against `completions=3`. **SC15-O3 is green on the staged tree**: the cancellation resolves the
+cancelled handle's cell (`Join.resolveFirst`), so `drain`'s await takes `Async.await`'s "already there"
+path, `cancelOutcome=error`, `cancelledEndByHandler=no`, `heldAfter=0` and `drainReturned=yes`. Its value
+is the field that would otherwise be a hang: on the naive directions — awaiting a cell never resolved —
+the drain does not return, which the watchdog reports as a defect of the invocation rather than as an
+assertion. The record exercises O3's detector by a mutation of the fix (a "cancel-aware" `drain` that
+skips handles whose token is set), not by the staged tree. A red is only a red if it is a clause's own
+assertion: a missing or malformed record, a non-zero exit without a `fail` line, or a watchdog expiry is
+a setup error, not the `Then`.
+
+**Why, and what it rests on.** The value travels where the `ctx` travels, so a child inherits the
+innermost enclosing `withLocal` at its spawn site purely by the `ctx` its steps close over — the
+reader's signature gains no parameter. The second half of the acceptance clause, "not from a task on
+another carrier", is **not observable and is not asserted**: the runtime is single-carrier and the
+cross-carrier half is W8's, so `carrierCount=1` records the deferral and the clause is rendered as the
+inheritance/non-inheritance pair on one carrier. For the drain, the registry's membership is one
+`Std.Mutex`-guarded list; `drain`'s take-and-clear is a single critical section and its awaits happen
+outside it, so no `Async` is ever called under the lock. A cancelled handle cannot hang the drain because
+`Task.cancel` resolves its cell through `Join.resolveFirst`, and it cannot run on because every step of a
+cancelled computation is skipped at `Item.fire`; the presence of the canceller's `end` is what shows the
+append is reachable. No assertion is a duration and no order is a clock: the only orderings are enforced
+by the `IO.Promise` gates the mode's own steps resolve, and the three invocations must read the same
+fields. The mode also prints three measurement rows — `registrybench|`, `registryhand|` and
+`registryheld|`, the add path, the drain path and a bare-`List` hand comparison — printed and never
+asserted. `runUs` on both records, and `carrier`, are printed, never asserted.
+
+______________________________________________________________________
+
 ### SC14 — the service's own obligations: no drop, a live bound, and resolution within a deadline
 
 **Actor.** A Lean executable server (`lake exe controls --runtime-service`): an accept loop of ours

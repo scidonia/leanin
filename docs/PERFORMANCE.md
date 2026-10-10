@@ -164,6 +164,41 @@ average ~4 on 8 cores, and the lock rows moved up and down with it). At `LEAN_NU
 **323–904 ns** for ours against **220–540 ns** for the stock channel, the ratio in the same band; the invocation is
 the one in §6.
 
+### 3.2 The handle registry (W12)
+
+`nix develop -c lake exe controls --runtime-registry` prints three `registry…|` lines beside SC15's records. The
+**local context has no row**, and this is the honest statement rather than an omitted one: `Async.local` is a read
+of a field on the immutable `Ctx` a step already holds and `Async.withLocal` is a structure copy, so there is no
+operation to time and a row over one would be noise; SC15-O1 is the evidence that the local does what it must.
+The three registry rows are over n = 10 000 handles, and each is ⚪ — there is no earlier mechanism to divide by.
+
+| shape | readings | source |
+|---|---|---|
+| `registrybench\|n=10000\|addUs=…\|drainUs=…\|usPerHandle=…` — 10 000 handles registered (`Registry.spawn`/`add`, each spawn a computation that has already finished) and then drained: the add path (one `Std.Mutex` critical section + a **cons**, and the 10 000 spawns that precede it), the drain path (one take + 10 000 awaits whose cells are already resolved), and the per-handle share of the drain | addUs **14 780 / 15 039 / 14 548 µs**; drainUs **1 950 / 1 919 / 1 061 µs**; usPerHandle **195 / 191 / 106** (the mode's `benchDrainUs / n`, from its nanosecond timer, so this reads nanoseconds per handle) across three runs | `--runtime-registry` |
+| `registryhand\|n=10000\|us=…` — the same 10 000 handles awaited from a bare `List` by hand (the `serveNJoin` shape): the control that says the registry costs only the lock | **1 359 / 1 529 / 1 001 µs**, same three runs | `--runtime-registry` |
+| `registryheld\|k=4\|drainUs=…` — a drain over 4 outstanding handlers released after the drain begins: the drain's cost when it actually waits (scheduling, not a lock) | **112 / 97 / 58 µs**, same three runs | `--runtime-registry` |
+
+At one pool thread — `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-registry`, the invocation
+§3.1's precedent uses, since the registry is single-carrier code and the figure must not be read as a scaling
+claim — the same rows read addUs **13 811 / 15 172 / 13 798 µs**, drainUs **941 / 1 400 / 968 µs**,
+usPerHandle **94 / 140 / 96**, `registryhand` **863 / 1 235 / 859 µs** and `registryheld` **69 / 36 / 56 µs**.
+
+The dominant figure is `addUs`, and this milestone's change is what the row was there to expose: `Registry.add`
+appended with `++`, O(queue length) per add in a serving path, so the same 10 000 adds read **553 742 / 560 483 /
+545 200 µs** — ~0.55 s, agreeing with the ~532–586 ms this row recorded before the change — against a drain of
+about **1.0–1.3 ms**. The
+registry has no specified order — a `JoinSet` promises none, and no clause of SC15 reads it — so the cheapest
+correct shape is a cons and nothing more: the same 10 000 adds now read **14 548–15 039 µs** (the table above),
+roughly the 38× that an O(n²) append costs against an O(1) cons, and **the point of the change is that the add
+side stops growing with the backlog**. What remains in `addUs` is not the registry's alone: the path spawns each
+handle and then registers it, so it now prices 10 000 spawns plus 10 000 O(1) conses. `drainUs` still prices one
+take and 10 000 awaits on resolved cells — about a millisecond for 10 000 handles, the "already there" await cost
+and not a lock. `registryhand` is the same await count over a bare `List`, so the gap between it and
+`registrybench`'s drain is what the lock and the one take add; `registryheld` is not comparable to either, because
+its drain genuinely parks and so prices scheduling a woken continuation rather than a lock. None of the three is
+asserted, and none gates anything (§1). The registry's construction and its unbounded membership are
+[`decisions.md`](decisions.md) D16 and the module prose.
+
 ## 4. 🔴 Where we are worse
 
 Stated before anything above it, because it is the honest part of this document. Three rows carry no factor: the
@@ -293,6 +328,8 @@ record is not updated for it.
 | `nix develop -c lake exe controls --runtime-cancel` | a disconnect cancelling the work: the counter as it stood in the cancelling step and after the run returns, the work's own registrations before and after, the cancelled handle's outcome, and a second cancellation; plus the cost of the new operation — spawn-and-await against cancelling a parked task — and the registry's size before and after cancelling 200 parked awaits |
 | `nix develop -c lake exe controls --runtime-sync` | the sync primitives' cost (§3.1): lock/unlock uncontended, and contended with the permit held across a yield — the row printing `heldAcrossYield=yes\|no` from the yielding chains' own `tryLock` probe — a release that wakes 16 parked waiters, the semaphore's acquire and release, and a message through the bounded channel beside the same message count through `Std.Sync.Channel` in one run; plus SC13's `sync\|` record and its checker's `syncctl\|` readings |
 | `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-sync` | the same `syncbench\|` rows, and the invocation §3.1's `LEAN_NUM_THREADS=1` channel figures come from — the stock channel beside ours at one pool thread |
+| `nix develop -c lake exe controls --runtime-registry` | the handle registry's cost (§3.2): 10 000 handles registered and drained, the same count awaited from a bare `List` as the control, and a drain over 4 outstanding handlers released after it begins; plus SC15's `context\|` and `registry\|` records and its checker's `registryctl\|` readings |
+| `LEAN_NUM_THREADS=1 nix develop -c lake exe controls --runtime-registry` | the same `registrybench\|`/`registryhand\|`/`registryheld\|` rows at one pool thread — the invocation §3.2's one-thread figures come from, since the registry is single-carrier code and the figure is not a scaling claim |
 
 ## 7. What these numbers are not
 

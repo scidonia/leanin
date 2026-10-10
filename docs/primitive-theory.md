@@ -203,3 +203,12 @@ W3's timer leaf (`Std.Async.sleep`). No atomics (the absence above still holds),
 `#print axioms` for the new theorems names nothing beyond `propext`, `Classical.choice` and `Quot.sound`, and the
 service model itself is pure (no `IO`). The finding is again D13's: a new mechanism over already-registered
 primitives adds a design, not a primitive.
+
+**No change from the task-local context and the handle registry (W12, D16).** `LeanIn/Task/Basic.lean`'s `Local` and
+`Ctx.local` and `LeanIn/Task/Registry.lean` add no direct external operation: the context is pure structure whose
+operations are a field read and a record update, and the registry's whole mechanism is `Std.Mutex.new`/`atomically`
+— **A1**, already on the list — over pure list code. No atomics (the absence above still holds), no new syscall, and
+no `IO.Promise` reach, so `Blocking.lean`'s direct promise reach stays the only one and D7's register is unchanged.
+`#print axioms` is unchanged too, because W12 adds no theorem — the registry's and the local's invariants are stated
+and argued in D16, not proved here. The finding is again D13's: a new mechanism over already-registered primitives
+adds a design, not a primitive.

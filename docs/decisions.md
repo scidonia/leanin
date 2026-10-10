@@ -353,9 +353,14 @@ cannot starve or be starved by the ready queue. `Executor`, `Item` and `Hooks`' 
 has no configuration surface and a default width would be an unstated policy; there is no global or
 lazy pool. The queue is a `List` whose `submit` appends under the lock, so its cost is **O(queue
 length)** — a function of the backlog rather than a constant, which is why the round-trip row keeps the
-queue short. There is no bound on the backlog: bounding it with back-pressure is a separate item — W6 built the
-mechanism such an item would use, a semaphore with a capacity (D14), but back-pressuring `submit` changes its
-signature and SC12's accounting and needs its own scenario, so it is named rather than silently taken. A submit to a stopping pool **throws**
+queue short. There is no bound on the backlog: bounding it with back-pressure is its own item — a bounded
+blocking pool whose `submit` parks on a capacity, with its own scenario; W6 built the mechanism such an item
+would use, a semaphore with a capacity (D14), but back-pressuring `submit` changes its signature and SC12's
+accounting and needs its own scenario, so it is named rather than silently taken. **W12's registry is not that
+item: a `JoinSet` holds handles and does not bound membership (D16), so it is not a queue meter, and this
+backlog stays unbounded.** The trigger to take it is the first server route that submits blocking work from an
+unbounded producer, or `submit`'s O(queue length) showing in a measurement with a long queue
+(`--runtime-ops`'s submit-alone figure). A submit to a stopping pool **throws**
 rather than enqueuing a job no worker will take, which would hang its awaiter. `shutdownAndWait` drains
 the queue and then waits for every worker to exit, so a job submitted before the shutdown still runs; a
 job that never returns makes that wait unbounded, which is W13's deadline and not a promise here. A
@@ -546,6 +551,94 @@ theorems is clean.
 interleaving is fixed by construction, or find a concurrent `IO` semantics to host the refinement — then replace
 the argued correspondence with `Impl.op ⊑ Model.op` and the SC14 detector with a pairwise comparison against a
 `tests/ServiceOracle.lean`. SC14's detector shape is what is available at W14 and is not faked as more.
+
+______________________________________________________________________
+
+### D16 — The task-local context is a typed field of `Ctx`; the registry is a `JoinSet` and drains by awaiting.
+
+**What it is, and where it lives.** `LeanIn/Task/Basic.lean` carries a typed `Local` record — `requestId`,
+`deadline`, `trace` — as a third field of `Ctx` (`Ctx.local`), with `Async.local` (a field read of the immutable
+`Ctx` a step already holds, `:220`) and `Async.withLocal` (`{ ctx with local := l }` on a computation's steps,
+`:225`) as its operations. `LeanIn/Task/Registry.lean` is a `JoinSet`-shaped set of handles: one `Std.Mutex` over
+a membership `List`, with `new`, `add`, `spawn`, `size`, `joinAll` and `drain`. It is task-layer code like
+`Sync.lean`, because its members are computations and its operations are steps of computations; it holds no
+executor state and no leaf registration, so `Runtime.pending` does not count a registered handle. `Net.lean`'s
+three serving loops use it — `joinAll` in `serveNJoin`, `drain` in `serveUntilStopped`/`serveBoundedLoop` — keeping
+their public signatures, which is what makes shutdown a *drain operation* rather than a caller's `List.forM`.
+
+**The inheritance rule is one line, at the one place a child's `Ctx` is built.** `Async.spawn`'s child takes
+`local := ctx.local` (`LeanIn/Task/Basic.lean:263`), so a computation inherits the innermost enclosing `withLocal`
+value at its spawn site; `Runtime.Basic`'s two `Ctx` sites take the default, because a spawn from outside a body has
+no parent context and the driver's own computation has none. `Ctx.local` has **no default**, so the compiler visits
+every construction site and the inheritance rule is a reviewed line rather than a silent omission; `EAsync` needed no
+change, because its lift threads `ctx` through, so the error layer inherits the context the moment the one line
+lands. **Rejected: a name-keyed heterogeneous store** (`Map String Dynamic`, Tokio's `task_local!` surface) — its
+reads are unchecked casts a reader and a writer must agree on by convention; it needs its own lock for a read the
+typed field makes a field read of an immutable value; it has no structural inheritance, because a child needs a deep
+copy or a shared mutable map, and shared mutable state across computations is what D8 and D9 refuse here; and
+`task_local!` is itself a macro that gives each key its own typed cell, of which a typed record is the degenerate,
+checked case. **Rejected: a field of `Item`** — an `Item` is a step, and every step is built with the `ctx` it runs
+with, so a field would be a second copy that could disagree with the closure's. **Rejected: parameterising `Ctx` by
+the local's type** — it would ripple through `Async`, `Item`-stamping and four public signatures to buy a second
+store the reasons above reject.
+
+**Drain semantics, and the three laws.** Every registry operation is a critical section over pure list code; the
+awaits happen *outside* the lock, on a snapshot the lock has released, because running a continuation inside would
+enqueue — which takes the executor's lock — while holding this one (`Join.resolve`'s rule, restated). `drain` takes
+the whole membership and clears the registry in one critical section, then awaits each taken handle outside it. The
+registry is **unbounded by decision**: a `JoinSet` holds handles, it does not meter admissions — the connection
+limit stays the proved semaphore in `Runtime.serveBounded` (D15), so a second bound would be a second place the
+limit lives and would make `add` a parking operation, wrong for a drain path. **Consistency with W5 and W6:** a
+cancelled handle's cell is resolved by `Task.cancel` through `Join.resolveFirst` (`LeanIn/Task/Basic.lean:250`), so
+`drain`'s await on it takes `Async.await`'s "already there" path rather than parking — a drain cannot leave a caller
+awaiting a handle forever; a handle parked on a leaf is retired by `Runtime.cancel`, so a drain over a cancelled
+connection does not keep `Runtime.pending` non-zero; and the registry transfers **nothing** — no permit, no message,
+no queue slot — so W6's wake-is-a-hint law holds vacuously, stated rather than assumed. **What `drain` does not do
+is cancel:** the deadline arm of W12's "Why" sentence is `Runtime.cancel` per handle, issued by whoever holds the
+clock, and the registry's contribution is only that it then drains.
+
+**Deferred: the deadline arm, with its trigger.** "Cancel what outlives the deadline" is deferred to **W13**,
+because testing "outlives the deadline" without a harness clock is a sleep, which this repository accepts nowhere.
+The deadline that will decide it is `Local.deadline` — the reason the field is in the local at all. A
+`Registry.shutdown`/`abortAll` (an operation that cancels what it holds) is **deliberately absent**: its
+cancellation half is `Runtime.cancel`, already public, and its test needs W13's clock; adding it now would be an
+untested export, which `Net.lean` records this repository deleting rather than keeping.
+
+**Deferred: D13's blocking-pool backlog, corrected.** D13's debt is `submit`'s cost being O(queue length) and its
+backlog unbounded. W12's registry does **not** answer it and is not "a registry of that shape": a `JoinSet` is
+unbounded membership, a set of handles, not a queue meter, and bounding the pool is back-pressure on `submit` — a
+different object with its own observable. D13's row carries the correction and the trigger to take the pool item.
+
+**The model obligation, stated and deferred.** Two propositions are written down in `LeanIn/Task/Registry.lean`'s
+module doc and here. `Registry.Sound`: under the discipline that every `add` is followed by exactly one
+`drain`-take, at quiescent points `held.length + drained.length = added.length` and `drained` has no duplicates.
+`Local.Inherited`: a computation's `ctx.local` is the innermost enclosing `withLocal` value at its spawn site. They
+are **argued, not proved**, and the reasons are D14's: both are by construction and have no state to reason about —
+`held` is one `Std.Mutex`-guarded `List` whose `add` and take are single critical sections, and on one carrier (D2)
+steps do not interleave, so the arithmetic is a list lemma about an append and a take; `Async.spawn` copies
+`ctx.local` into the child and every continuation closes over the `Ctx` that built it, so `Local.Inherited` is the
+termination rule of the term, not a property of runtime state — and a model with no refinement theorem proves
+nothing about the code, while the refinement needs the missing serializability lemma (`primitive-theory.md` §4).
+**Trigger to take a model:** before `Registry` gains a bound or a `shutdown`, or before a server's liveness is
+argued from a drain deadline (W13) — then `LeanIn/Model/Registry.lean` with `Registry.Sound` and a reachability
+probe in `LeanIn/Test/Dynamics.lean`'s idiom. The executable half taken instead is SC15, which reads the drain's
+"returns only after the handlers finished" from the mode's own annotations; no model record is computed and
+`tests/ModelOracle.lean` is untouched.
+
+**The one stated limit: the liveness half of a drain is not provable.** That a `drain` *terminates* requires that
+a handler neither finishes nor is cancelled — a liveness property not derivable from A1–A7
+([`primitive-theory.md`](primitive-theory.md) §6). A handler that never returns makes the drain unbounded, exactly
+as `shutdownAndWait`'s unbounded wait is stated in `Blocking.lean`. And the local-context law is structural and
+argued, not proved: it is tested by inheritance and non-inheritance on one carrier (SC15-O1), and the other-carrier
+case is W8's.
+
+**The register and the TCB are unchanged.** The library code this milestone adds reaches no new direct external
+operation, checked by inspecting calls and import edges rather than by text search: `Local`/`Ctx` are pure
+structure, and `Registry` reaches only `Std.Mutex.new`/`atomically` (A1, D7's first row) over pure list code
+(`Registry.lean` imports `Std` and `LeanIn.Task.Basic`). No `IO.Promise`, no `IO.asTask … dedicated`, no
+`BaseIO.bindTask` in it; the SC15 mode's gates are the synchronized fakes the test modes already use, not a library
+reach. D7, [`primitive-theory.md`](primitive-theory.md) §5 and [`proof-strategy.md`](proof-strategy.md)'s
+trusted-base table are unchanged, and `#print axioms` is unchanged because W12 adds no theorem.
 
 ______________________________________________________________________
 
