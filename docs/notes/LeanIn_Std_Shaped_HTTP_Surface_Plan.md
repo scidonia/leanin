@@ -16,7 +16,7 @@ remain. The generic handler sketch was corrected: stock hooks run in `Async` whi
   and `readAllBody` helper for both hosts.
 - **Phase 2**: done — metadata conversion, `RemoteAddr`, validated heads, `417`, explicit continue policy and the
   settled `onFailure` contract; see D24 and `tests/std-handler-contract.md`.
-- **Phase 3**: partial — `ResponseBody.bytes`/`.stream` exist. SH5 checks producer cleanup exactly once after
+- **Phase 3**: done except for the explicit trailer boundary — `ResponseBody.bytes`/`.stream` exist. SH5 checks producer cleanup exactly once after
   a complete stream and after a client disconnect. SH6 checks that `HEAD` and `204` suppress the body, keep the
   `HEAD` content length, and skip a stream producer. SH7 checks that a declared length the producer under- or
   over-runs closes the connection and notifies `onFailure`. Trailers are explicitly unsupported: neither
@@ -25,8 +25,10 @@ remain. The generic handler sketch was corrected: stock hooks run in `Async` whi
   `RequestM`, `ResultM` and `StatelessHandlerM` parameterize the monad and request body; `Routing.Stock` serves
   the same route source at `ContextAsync`/`Body.Stream`. `Routing.Body` adds the request-read and response-body
   capabilities, and `Routing.BodyHandlerM`/`BodyResultM` carry a `ResponseBody` result to both hosts.
-  Shared header, matched-route tracing, session and buffered static-file pilots are tested. Multipart and a
-  deferred/streamed static-file lifetime remain.
+  Shared header, matched-route tracing, session, bounded multipart and deferred static-file pilots are tested.
+  True streaming multipart needs the LeanIO-style incremental parser adapted to `RequestBody`; handle-backed
+  static files need an explicit handle-close primitive. A shared application under both hosts remains the
+  integration gate.
 - **Phase 5**: not started.
 
 ## Objective
