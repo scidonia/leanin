@@ -1,7 +1,7 @@
 module
 
-public import Lean
-public import Lean.Parser.Term
+public meta import Lean
+public meta import Lean.Parser.Term
 public meta import LeanIn.Async.Attr
 public import LeanIn.Runtime.Net
 public import LeanIn.Runtime.Io
