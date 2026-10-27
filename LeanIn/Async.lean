@@ -82,6 +82,11 @@ private inductive Item where
   | contStmt (term : Term)                       -- internal: a hoisted continuation
   deriving Inhabited
 
+/-- The name a declaration written as `n` was declared under: `n` itself, or — in a module, outside a
+`public section` — its private form. -/
+private meta def declaredName (env : Environment) (n : Name) : Name :=
+  if env.contains n then n else mkPrivateName env n
+
 /-- Recursively unwrap `doSeqIndent`/`doSeq`/`doSeqItem`/`doNested`/`null` down to the doElems. -/
 private meta partial def doElemsOf (s : Syntax) : List Syntax :=
   match s.getKind with
@@ -296,7 +301,7 @@ private meta def classify (ctx : Ctx) (e : Syntax) : MacroM Eff :=
   | `($fn:ident $args*) =>
     if fn.getId.getString! == "run" then do
       let candidates := [ctx.ns ++ fn.getId, fn.getId]
-      match candidates.find? ctx.env.contains with
+      match (candidates.map (declaredName ctx.env)).find? ctx.env.contains with
       | none =>
         Macro.throwError s!"async: unknown machine run `{fn.getId}` — neither `{candidates[0]!}` nor `{candidates[1]!}` exists"
       | some resolved =>
@@ -325,7 +330,7 @@ private meta def classify (ctx : Ctx) (e : Syntax) : MacroM Eff :=
       -- A spawned machine: the generator emits `Foo.spawn` beside every callable `Foo.run`, so the surface
       -- exists exactly where the sibling `run` is tagged. The first argument is the executor's push.
       let candidates := [ctx.ns ++ fn.getId, fn.getId]
-      match candidates.find? ctx.env.contains with
+      match (candidates.map (declaredName ctx.env)).find? ctx.env.contains with
       | none =>
         Macro.throwError s!"async: unknown spawn `{fn.getId}` — a machine's spawn is generated beside its tagged `run`, and nothing named either candidate exists"
       | some resolved =>
@@ -925,7 +930,8 @@ elab_rules : command
       ({ done := fun v => k (.ok v) ctx, fail := fun e => k (.error e) ctx } : LeanIn.Async.Completion $res)⟩)
   Lean.Elab.Command.elabCommand publicCmd
   if let some d := doc? then
-    Lean.Elab.Command.liftTermElabM <| Lean.addDocString n.getId Syntax.missing d
+    let declared := declaredName (← Lean.getEnv) (ctx.ns ++ n.getId)
+    Lean.Elab.Command.liftTermElabM <| Lean.addDocString declared Syntax.missing d
   -- The spawner: the completion cell holds the machine's `Except`, and both channels resolve it.
   let spawnn := mkIdent ((n.getId ++ `spawn).eraseMacroScopes)
   let others := threadedInfo.dropLast
@@ -946,8 +952,10 @@ elab_rules : command
     ($(mkIdent c.getId) : $cty) $binders* :
       IO (LeanIn.Runtime.RawCell (Except IO.Error $res)) := $body)
   Lean.Elab.Command.elabCommand spawnCmd
-  modifyEnv fun env => LeanIn.Async.spawnAttr.ext.addEntry env (ctx.ns ++ (n.getId ++ `spawn))
-  modifyEnv fun env => LeanIn.Async.machineAttr.ext.addEntry env (ctx.ns ++ (n.getId ++ `run))
+  modifyEnv fun env =>
+    LeanIn.Async.spawnAttr.ext.addEntry env (declaredName env (ctx.ns ++ (n.getId ++ `spawn)))
+  modifyEnv fun env =>
+    LeanIn.Async.machineAttr.ext.addEntry env (declaredName env (ctx.ns ++ (n.getId ++ `run)))
 
 end LeanIn.Async
 

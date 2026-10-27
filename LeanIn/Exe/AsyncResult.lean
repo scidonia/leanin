@@ -1,9 +1,7 @@
 module
 
-public import LeanIn
-public import LeanIn.Async
-
-public section
+import LeanIn
+import LeanIn.Async
 
 /-!
 # A result-bearing compiled machine
@@ -43,7 +41,7 @@ async def afterTimer (u : Unit) (clock : Runtime.Clock) : Nat := do
   let slept : Unit := await (LeanIn.Runtime.Io.sleepRaw clock.schedule (5 : Std.Time.Millisecond.Offset))
   return 43
 
-def main : IO UInt32 := do
+public def main : IO UInt32 := do
   let hooks ← Runtime.Hooks.new
   let clock := Runtime.Clock.live hooks
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1
@@ -60,5 +58,3 @@ def main : IO UInt32 := do
   | _, _, _, _, _ =>
     IO.eprintln "async-result: the returns did not deliver the expected values"
     return 1
-
-end

@@ -33,6 +33,8 @@ expect_error sleep-bound-mismatch.lean 'has type Unit but is expected to have ty
 expect_error sleep-bound-dead-mismatch.lean 'has type Unit but is expected to have type Nat'
 expect_error send-bound-dead-mismatch.lean 'has type Nat → IO Unit but is expected to have type Except IO.Error Unit → IO Unit'
 expect_ok    sleep-bound-ok.lean
+expect_ok    private-machine.lean
+expect_error private-untagged-run.lean 'is not the `run` of a compiled machine'
 
 [ "$ok" = 1 ] && echo "async-diagnostics: all checks passed" || echo "async-diagnostics: FAILED" >&2
 [ "$ok" = 1 ]

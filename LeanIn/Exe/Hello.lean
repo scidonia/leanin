@@ -1,9 +1,7 @@
 module
 
-public import LeanIn
-public import LeanIn.Async
-
-public section
+import LeanIn
+import LeanIn.Async
 
 /-!
 # A compiled hello-world server
@@ -104,7 +102,7 @@ async def helloServe (l : LeanIn.Runtime.Listener) (push : LeanIn.Task.Item → 
       await (helloConn.spawn push conn push clock)
       recurse
 
-def main (args : List String) : IO UInt32 := do
+public def main (args : List String) : IO UInt32 := do
   let port := (args.head?.bind (·.toNat?)).getD 8085
   let keep := args.getD 1 "close" == "keep"
   let l ← LeanIn.Runtime.Listener.bind (LeanIn.Runtime.loopback port.toUInt16)
@@ -121,5 +119,3 @@ def main (args : List String) : IO UInt32 := do
   | .error e =>
     IO.eprintln s!"hello: {e}"
     return 1
-
-end
