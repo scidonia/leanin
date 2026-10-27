@@ -16,7 +16,10 @@
   outputs =
     inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = [ "x86_64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
 
       imports = [ inputs.treefmt-nix.flakeModule ];
 
@@ -31,16 +34,30 @@
           #
           # The 4.35 line is deliberate: `Std.WP` — the weakest-precondition framework this
           # project's proof strategy leans on — does not exist in v4.34.1 or earlier.
+          #
+          # Each system has its own release tarball, named by the suffix below.
+          leanRelease =
+            {
+              x86_64-linux = {
+                suffix = "linux";
+                hash = "sha256-colZekRUMkbJInuMrlAXZ+CVzhf21Ei5X8So3Jcmj20=";
+              };
+              aarch64-linux = {
+                suffix = "linux_aarch64";
+                hash = "sha256-yPD4o5IOg5cYsTQ+Z4H9gKPpsQJPvNcHjrMPVOgGsCg=";
+              };
+            }
+            .${pkgs.stdenv.hostPlatform.system};
           lean4 = pkgs.stdenv.mkDerivation {
             pname = "lean4";
             version = "4.35.0";
             src = pkgs.fetchurl {
-              url = "https://releases.lean-lang.org/lean4/v4.35.0/lean-4.35.0-linux.tar.zst";
-              hash = "sha256-colZekRUMkbJInuMrlAXZ+CVzhf21Ei5X8So3Jcmj20=";
+              url = "https://releases.lean-lang.org/lean4/v4.35.0/lean-4.35.0-${leanRelease.suffix}.tar.zst";
+              inherit (leanRelease) hash;
             };
             nativeBuildInputs = [ pkgs.autoPatchelfHook pkgs.zstd ];
             buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
-            sourceRoot = "lean-4.35.0-linux";
+            sourceRoot = "lean-4.35.0-${leanRelease.suffix}";
             unpackPhase = ''
               tar --zstd -xf $src
             '';
