@@ -1,5 +1,9 @@
-import LeanIn
-import LeanIn.Async
+module
+
+public import LeanIn
+public import LeanIn.Async
+
+public section
 
 /-!
 # A compiled hello-world server
@@ -117,3 +121,5 @@ def main (args : List String) : IO UInt32 := do
   | .error e =>
     IO.eprintln s!"hello: {e}"
     return 1
+
+end

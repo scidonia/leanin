@@ -1,4 +1,9 @@
-import LeanIn.Theory.Bridge
+module
+
+public import LeanIn.Theory.Bridge
+import all LeanIn.Theory.Bridge
+
+public section
 
 /-!
 # Controls for representation dependence
@@ -187,3 +192,5 @@ def bridgeControlsOne (name : String) : IO UInt32 := do
 #print axioms LeanIn.lock_claim_for_every_index
 
 end LeanIn
+
+end

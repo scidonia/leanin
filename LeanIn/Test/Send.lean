@@ -1,4 +1,8 @@
-import LeanIn.Task.Send
+module
+
+public import LeanIn.Task.Send
+
+public section
 
 /-!
 # The carrier boundary's control: what may cross it
@@ -24,3 +28,5 @@ namespace LeanIn.Test
 #check_failure (LeanIn.Sendable.mk (1 : Nat))
 
 end LeanIn.Test
+
+end

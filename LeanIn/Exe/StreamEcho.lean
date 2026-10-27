@@ -1,3 +1,5 @@
+module
+
 import Std
 
 import LeanIn
@@ -54,7 +56,7 @@ end LeanIn.Exe.StreamEcho
 
 open LeanIn.Exe.StreamEcho
 
-def main (args : List String) : IO UInt32 := do
+public def main (args : List String) : IO UInt32 := do
   let port : UInt16 :=
     match args with
     | p :: _ => (p.toNat?.getD 8790).toUInt16

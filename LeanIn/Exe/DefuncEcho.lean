@@ -1,8 +1,12 @@
-import LeanIn
-import LeanIn.Runtime.Net
-import LeanIn.Runtime.VM
-import LeanIn.Async
-import LeanIn.Test.Machines
+module
+
+public import LeanIn
+public import LeanIn.Runtime.Net
+public import LeanIn.Runtime.VM
+public import LeanIn.Async
+public import LeanIn.Test.Machines
+
+public section
 open LeanIn
 
 /-!
@@ -176,3 +180,5 @@ def main (args : List String) : IO UInt32 := do
   else
     let _ : Except IO.Error Unit ← Runtime.run e (acceptLoop e hooks l mode)
   return 0
+
+end

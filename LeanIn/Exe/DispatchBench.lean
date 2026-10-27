@@ -1,3 +1,5 @@
+module
+
 import LeanIn.Runtime.Net
 import LeanIn.Http.StdHandler
 
@@ -91,7 +93,7 @@ def bench (label : String) (n : Nat) (f : IO Nat) : IO Unit := do
   let t1 ← IO.monoNanosNow
   IO.println s!"{label}: {(t1 - t0) / n} ns/request  (checksum={acc})"
 
-def main (args : List String) : IO Unit := do
+public def main (args : List String) : IO Unit := do
   let n := (args.head?.bind (·.toNat?)).getD 100000
   for (name, req) in [("load.mjs", loadReq), ("browser ", browserReq)] do
     for _ in [0:2] do

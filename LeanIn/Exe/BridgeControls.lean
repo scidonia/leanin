@@ -1,6 +1,10 @@
-import Std
+module
 
-import LeanIn.Test.BridgeControls
+public import Std
+
+public import LeanIn.Test.BridgeControls
+
+public section
 
 /-- Entry point for the representation-dependence controls. Body lives in `LeanIn.Test.BridgeControls`.
 
@@ -10,3 +14,5 @@ def main (args : List String) : IO UInt32 :=
   match args with
   | name :: _ => LeanIn.bridgeControlsOne name
   | [] => LeanIn.bridgeControlsMain
+
+end

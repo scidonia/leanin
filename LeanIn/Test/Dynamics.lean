@@ -1,5 +1,9 @@
-import LeanIn.Theory.World
-import LeanIn.Model.Multi
+module
+
+public import LeanIn.Theory.World
+public import LeanIn.Model.Multi
+
+public section
 
 open LeanIn LeanIn.Model
 
@@ -203,3 +207,5 @@ def main : IO UInt32 := do
   return 0
 
 end LeanIn.Test
+
+end

@@ -1,3 +1,5 @@
+module
+
 import LeanIn
 
 /-!
@@ -7,7 +9,7 @@ grace, and checks that the scope ends `aborted` within a bounded time rather tha
 
 open LeanIn
 
-def main : IO UInt32 := do
+public def main : IO UInt32 := do
   let hooks ← Runtime.Hooks.new
   let clock := Runtime.Clock.live hooks
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1

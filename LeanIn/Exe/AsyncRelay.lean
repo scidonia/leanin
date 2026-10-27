@@ -1,3 +1,5 @@
+module
+
 import LeanIn
 import LeanIn.Async
 
@@ -20,7 +22,7 @@ async def relay (src : Runtime.Conn) (dst : Runtime.Conn) : Unit := do
   let closed := await (LeanIn.Runtime.Io.closeRaw dst)
   if closed then return () else throw (IO.userError "relay: the loop refused the close")
 
-def main (args : List String) : IO UInt32 := do
+public def main (args : List String) : IO UInt32 := do
   let port : UInt16 := ((args.headD "8795").toNat?.getD 8795).toUInt16
   let hooks ← Runtime.Hooks.new
   let l ← Runtime.Listener.bind (Runtime.loopback port)

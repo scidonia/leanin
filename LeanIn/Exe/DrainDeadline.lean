@@ -1,3 +1,5 @@
+module
+
 import LeanIn
 
 /-!
@@ -8,7 +10,7 @@ exactly once, and return the loop within a bounded time.
 
 open LeanIn
 
-def main : IO UInt32 := do
+public def main : IO UInt32 := do
   let hooks ← Runtime.Hooks.new
   let clock := Runtime.Clock.live hooks
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1

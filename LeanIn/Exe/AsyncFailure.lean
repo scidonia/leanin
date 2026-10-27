@@ -1,3 +1,5 @@
+module
+
 import LeanIn
 import LeanIn.Async
 
@@ -25,7 +27,7 @@ async def boundWrite (c : Runtime.Conn) (clock : Runtime.Clock) : Unit := do
   | .ok () => return ()
   | .error e => throw e
 
-def main (args : List String) : IO UInt32 := do
+public def main (args : List String) : IO UInt32 := do
   let port : UInt16 := ((args.headD "8799").toNat?.getD 8799).toUInt16
   let hooks ← Runtime.Hooks.new
   let clock := Runtime.Clock.live hooks

@@ -1,4 +1,8 @@
-import LeanIn.Runtime.Basic
+module
+
+public import LeanIn.Runtime.Basic
+
+public section
 
 /-!
 # The executor's narrowing, verified across modules
@@ -42,3 +46,5 @@ namespace LeanIn.Test
 #check_failure (fun (e : LeanIn.Sched.Executor Nat 256) => { e with metered := true })
 
 end LeanIn.Test
+
+end

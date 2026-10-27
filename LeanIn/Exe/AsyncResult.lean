@@ -1,5 +1,9 @@
-import LeanIn
-import LeanIn.Async
+module
+
+public import LeanIn
+public import LeanIn.Async
+
+public section
 
 /-!
 # A result-bearing compiled machine
@@ -56,3 +60,5 @@ def main : IO UInt32 := do
   | _, _, _, _, _ =>
     IO.eprintln "async-result: the returns did not deliver the expected values"
     return 1
+
+end

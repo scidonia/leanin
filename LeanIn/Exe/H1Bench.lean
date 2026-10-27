@@ -1,3 +1,5 @@
+module
+
 import LeanIn.Http.H1
 import Std.Http.Protocol.H1
 
@@ -53,7 +55,7 @@ def bench (label : String) (n : Nat) (f : IO Nat) : IO Unit := do
   let t1 ← IO.monoNanosNow
   IO.println s!"{label}: {(t1 - t0) / n} ns/parse  (parsed={acc})"
 
-def main (args : List String) : IO Unit := do
+public def main (args : List String) : IO Unit := do
   let n := (args.head?.bind (·.toNat?)).getD 100000
   bench "std " n stdOnce
   bench "ours" n ourOnce

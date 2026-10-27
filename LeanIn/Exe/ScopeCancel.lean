@@ -1,3 +1,5 @@
+module
+
 import LeanIn
 
 /-!
@@ -7,7 +9,7 @@ request ends `aborted`, the timer is retired immediately, and the scope's cleanu
 
 open LeanIn
 
-def main : IO UInt32 := do
+public def main : IO UInt32 := do
   let hooks ← Runtime.Hooks.new
   let clock := Runtime.Clock.live hooks
   let e ← Sched.Executor.new LeanIn.Task.Item 256 1

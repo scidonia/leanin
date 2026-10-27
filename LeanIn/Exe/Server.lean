@@ -1,3 +1,5 @@
+module
+
 import Std
 
 import LeanIn
@@ -41,7 +43,7 @@ def reportMetrics (e : Sched.Executor LeanIn.Task.Item 256) (hooks : Runtime.Hoo
     let t ← IO.monoNanosNow
     IO.println s!"metrics|requests={n}|taken={s.taken}|takenMilliPerReq={(s.taken * 1000) / n}|fired={fired}|held={s.held}|pending={pend}|nsPerReq={(t - t0) / n}"
 
-def main (args : List String) : IO UInt32 := do
+public def main (args : List String) : IO UInt32 := do
   let port : UInt16 :=
     match args with
     | p :: _ => (p.toNat?.getD 8080).toUInt16

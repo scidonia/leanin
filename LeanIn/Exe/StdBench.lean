@@ -1,3 +1,5 @@
+module
+
 import Std
 
 import LeanIn
@@ -30,7 +32,7 @@ end LeanIn.Exe.StdBench
 
 open LeanIn.Exe.StdBench
 
-def main (args : List String) : IO UInt32 := do
+public def main (args : List String) : IO UInt32 := do
   let (port, mode) := match args with
     | p :: m :: _ => ((p.toNat?.getD 8322).toUInt16, m)
     | _ => (8322, "native")

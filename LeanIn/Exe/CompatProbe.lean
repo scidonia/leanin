@@ -1,3 +1,5 @@
+module
+
 import LeanIn
 import LeanIn.Http.Compat
 
@@ -12,7 +14,7 @@ def stockEcho : Std.Http.Server.Handler Unit :=
     return { line := { status := .ok, headers }, body := full })
     (fun _ _ => pure ()) (fun _ _ => pure true)
 
-def main : IO UInt32 := do
+public def main : IO UInt32 := do
   let raw := "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n".toUTF8
   match LeanIn.Http.H1.parseHead raw 0 {} with
   | .ok head _ =>

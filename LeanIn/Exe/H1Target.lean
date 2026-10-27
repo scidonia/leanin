@@ -1,7 +1,9 @@
+module
+
 import LeanIn.Http.H1
 
 /-- `lake exe h1Target` checks the decoded path/query views on a hand-built head. -/
-def main : IO UInt32 := do
+public def main : IO UInt32 := do
   let raw := "/a%20b?x=1+y&z=%2F".toUTF8
   let h : LeanIn.Http.H1.Head :=
     { buf := raw, target := { start := 0, stop := raw.size } }

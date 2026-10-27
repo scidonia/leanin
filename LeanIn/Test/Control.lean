@@ -1,16 +1,20 @@
-import Std
-import Std.Http
-import LeanIn.Sched.Basic
-import LeanIn.Sched.Executor
-import LeanIn.Runtime.Basic
-import LeanIn.Http.Server
-import LeanIn.Runtime.Leaf
-import LeanIn.Runtime.Net
-import LeanIn.Runtime.Time
-import LeanIn.Runtime.Blocking
-import LeanIn.Test.Machines
-import LeanIn.Task.Sync
-import LeanIn.Task.Registry
+module
+
+public import Std
+public import Std.Http
+public import LeanIn.Sched.Basic
+public import LeanIn.Sched.Executor
+public import LeanIn.Runtime.Basic
+public import LeanIn.Http.Server
+public import LeanIn.Runtime.Leaf
+public import LeanIn.Runtime.Net
+public import LeanIn.Runtime.Time
+public import LeanIn.Runtime.Blocking
+public import LeanIn.Test.Machines
+public import LeanIn.Task.Sync
+public import LeanIn.Task.Registry
+
+public section
 
 /-!
 # Runtime controls for the bridge axioms
@@ -5479,3 +5483,5 @@ def main (args : List String) : IO UInt32 := do
   return code
 
 end LeanIn.Test
+
+end

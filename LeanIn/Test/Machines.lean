@@ -1,6 +1,10 @@
-import LeanIn
-import LeanIn.Async
-import LeanIn.Runtime.Net
+module
+
+public import LeanIn
+public import LeanIn.Async
+public import LeanIn.Runtime.Net
+
+public section
 
 /-!
 # Scenario machines for the time-as-effect controls
@@ -100,3 +104,5 @@ async def amSelect (c : LeanIn.Runtime.Conn) : Unit := do
     let ok := await (LeanIn.Runtime.Io.sendAllRaw c #[s!"B{w}".toUTF8 ++ got])
     let closed := await (LeanIn.Runtime.Io.closeRaw c)
     if closed then return () else throw (IO.userError "amSelect: the loop refused the close")
+
+end

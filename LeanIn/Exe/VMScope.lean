@@ -1,3 +1,5 @@
+module
+
 import LeanIn
 
 open LeanIn
@@ -29,7 +31,7 @@ def finalizerFailure : IO Nat := do
   try Runtime.VM.run comp catch _ => pure ()
   return (← seen.get)
 
-def main : IO UInt32 := do
+public def main : IO UInt32 := do
   let scope ← catchScope
   let pureCount ← finalizerCase (.pure ())
   let throwCount ← finalizerCase (.throwE (.userError "boom"))

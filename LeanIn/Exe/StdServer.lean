@@ -1,3 +1,5 @@
+module
+
 import Std.Http.Server
 import Std.Http.Data.Body
 import Std.Async
@@ -7,7 +9,7 @@ open Std.Http Std.Async
 def helloBody (head : Request.Head) : ByteArray :=
   s!"hello from std\nmethod={head.method} path={head.uri} version={head.version}\n".toUTF8
 
-def main (args : List String) : IO UInt32 := do
+public def main (args : List String) : IO UInt32 := do
   let port := (args.head?.bind (·.toNat?)).getD 8090
   let addr : Std.Net.SocketAddress := .v4 { addr := Std.Net.IPv4Addr.ofParts 127 0 0 1, port := port.toUInt16 }
   let handler := Server.Handler.ofFn fun (req : Request Body.Stream) => do

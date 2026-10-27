@@ -1,3 +1,5 @@
+module
+
 import Std
 
 import LeanIn
@@ -99,7 +101,7 @@ def dateCheck : IO UInt32 := do
   record s!"dateCheck|ok={ok}"
   return if ok then 0 else 1
 
-def main (args : List String) : IO UInt32 := do
+public def main (args : List String) : IO UInt32 := do
   if args == ["--date-check"] then return ← dateCheck
   let port : UInt16 :=
     match args with

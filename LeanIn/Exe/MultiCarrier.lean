@@ -1,8 +1,10 @@
+module
+
 import LeanIn
 
 /-- `lake exe multiCarrier` runs 64 shared-spawned tasks that sleep, on three carriers, and checks that more
 than one carrier thread ran them. -/
-def main : IO UInt32 := do
+public def main : IO UInt32 := do
   let e ← LeanIn.Sched.Executor.new LeanIn.Task.Item 256 3
   let tids ← IO.mkRef ([] : List UInt64)
   let child : LeanIn.Task.EAsync IO.Error Unit :=
