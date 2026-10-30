@@ -62,6 +62,14 @@
   count=8` answers every connection and exits). The server check uses a unique port and a finite
   batch; `waitFinished` must not park on the carriers' condition variable, or `notifyOne` can wake
   the caller instead of a worker.
+- Queue scaling: `nix develop -c bash tests/queue-scaling.sh` times the inject and the timer hand-off at
+  two depths in one process and fails if ns/op rises with depth; a copying `Array` on a shared cell is its
+  affirmative control, and exit 2 means that control was not flagged. It is a timing check, so it reads the
+  clock the scenario rule below excludes, and it keeps an empirical control's limits: it can falsify "cost is
+  independent of depth" and cannot establish it. Functional laws cannot see this: `Deque`'s held throughout
+  while every operation copied the store. Anything unbounded held in a `Std.Mutex` or a global needs a case
+  here, because a value stored in a shared cell is marked, a marked `Array` is never exclusive, and releasing the
+  cell's own reference does not change that.
 - The stock-handler adapter has a pure check: `nix develop -c bash tests/compat-handler.sh`
   (a stock handler reads the buffered body, adds a header, and the adapter maps its response).
 - The `Std.Http`-shaped handler layer (`LeanIn/Http/StdHandler.lean`, D24) has socket scenarios in

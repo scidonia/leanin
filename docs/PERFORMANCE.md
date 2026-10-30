@@ -565,7 +565,7 @@ cell, not a worker's"), so the append a burst would walk is not in this structur
 work, in `Executor.pushItems`, into the shared cell's `Deque`, whose `push` writes at the back of the live range
 and rebuilds only when the store is exhausted — **amortised O(1)** where the pool's own `List` append was
 O(length). (This harness takes the pool half of each placement, so it prices the pool's own work; the shared
-deque's push is what §4.4's `--runtime-ops` burst and the `--runtime-carriers` rows reach.) `Pool.spawn`'s row is
+deque's push is what §4.4's `--runtime-ops` burst and the `--runtime-carriers` rows reach.) (**Corrected:** that "amortised O(1)" held only for a uniquely owned store, which the shared cell's never was; see §4.9.) `Pool.spawn`'s row is
 where the old cost showed: it read **2 730 ns** against `Pool.submit`'s 830 ns when the overflow appended a
 growing list, and reads **440–792 ns** now that it only returns the overflow; `Pool.submit`, whose overflow the
 old shape reached on the same saturation, moved less, to **586–881 ns**. Both are burst rows, and the burst rows
@@ -599,6 +599,10 @@ against **191–464 ns** shared, roughly 20× either way; the recorded 6 ns / 12
 not reproduce here, and the ratio is what the row exists for. Both arms are our own ring — the same push with
 the array uniquely held — so the pair is ⚪ and prices a copy inside our own structure, not a comparison with
 another implementation.
+
+**Corrected:** "`Executor` now releases the cell's hold" removed one source of the sharing, not the copy. See §4.9:
+a cell another thread has reached copies on every write regardless, and the row's unique arm is not the state a
+running carrier's pool is in.
 
 ### 4.6 Added carriers no longer read as "no scaling"
 
@@ -696,6 +700,47 @@ carrier free, and the CPS closure chain and the mutex transaction this row price
 message because we do not block the carrier** — the same trade seen from the other side in §4.1, where a
 blocking call that does not take the pool stops everything — and the row reads as the price of that choice
 rather than a plain deficit.
+
+### 4.9 The inject's depth cliff, removed
+
+A loop that spawned 50 000 timer jobs without yielding did not finish in 60 s, reported from a downstream project.
+Measured on `8de3ff6` against `8de3ff6` plus the change that replaces the inject's store and `timerPending`
+(`Data/Deque.lean`, `Runtime/Io.lean`); 2026-10-31, macOS, 8 cores, elan `v4.35.0`, load average 3.4–4.9. Command:
+an out-of-tree probe, three interleaved rounds per row, killed at 60 s, on one carrier through `runCarriersWait`
+unless stated. `Task` is `withTimeout 30 s (sleep 1 s)`, spawned by `spawnShared`; `VM` is two 500 ms `VM.sleep`s.
+
+| Jobs | Shape | Before: spawn / total | After: spawn / total |
+|---|---|---|---|
+| 10 000 | `Task` | 473–494 ms / 2.76–2.87 s | 3.8–4.1 ms / 1.04 s |
+| 20 000 | `Task` | 1.59–1.61 s / 13.9–14.1 s | 7.7–8.2 ms / 1.08–1.09 s |
+| 50 000 | `Task` | killed, 3 of 3 | 19 ms / 1.19 s |
+| 50 000 | `Task`, `Runtime.run` | killed, 3 of 3 | 14 ms / 1.15–1.17 s |
+| 50 000 | `VM` | 9.8 s / 53.9–54.7 s | 15–16 ms / 1.11–1.14 s |
+
+**Three causes, separated by ablation** (one round each at 50 000, `Task` shape, on `8de3ff6`):
+
+- **A shared array is copied by every write.** With the placeholder idiom on a bare mutex over 20 000 slots, the
+  array's address changed on 2000 of 2000 writes once another thread had reached the cell, and 0 of 2000 before.
+  This is the mechanism §The libuv server path records for `lean_st_ref_put`/`swap`, and it is what `Deque` and
+  §4.3's "amortised" did not account for. At a depth of 40 000 a push read 155 µs and a pop 207 µs.
+- **`timerPending` is the same defect in a global.** Arming read 14 µs each at 5 000 pending and 234 µs at 80 000.
+  A single-carrier driver only drains it when its queues are empty. Replacing the inject alone left `Runtime.run`
+  at 33–35 s, and with both it read 1.15–1.2 s; `runCarriersWait` was already fixed by the inject alone, because its
+  pump drains the hand-off.
+- **`popInject` held `st` across the pop**, so pops copied on an unshared cell too (60 µs at 40 000, 52 ns with `st`
+  released). Fixing this alone left every shape killed at 60 s. It is moot with the two-list store.
+
+**The price:** the reversal is paid in one pop, under the lock. On the new store the worst single pop read 2.2 ms
+at a depth of 100 000 and 23 ms at 1 000 000, and the mean 133–138 ns. The old store's pop read a mean of 172 µs at
+20 000.
+
+**The ring is not fixed by this.** At `cap = 256` and depth 0, a push and a take each read about 720 ns on a shared
+cell (7.2 µs at `cap = 4096`), and about 300 ns unshared (3 µs). Releasing `p` before the write took the unshared
+arm to 48–89 ns independent of `cap`, one run each, and left the shared arm unchanged, so it was not kept: a running
+pool's cell is shared. How much of a request this is was not measured.
+
+**Decision:** keep. `tests/queue-scaling.sh` holds it: on the unfixed code it read `inject` 15.4× and `timers` 20.9×
+at 16× the depth, with its control at 18.3×; on the fixed code 0.99× and 1.07×, with the control at 14.2×.
 
 ### The libuv server path (W16): the socket layer without the promise bridge
 

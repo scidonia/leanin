@@ -27,8 +27,7 @@ proofs short — the split Lean's own containers use, e.g. `Std.DHashMap` (Array
 laws in a separate file).
 
 The view is `Slots.toList` at the ring's own index function, `fun i => (head + i) % cap`: the store and its
-index arithmetic are shared with `LeanIn.Data.Deque`, which indexes absolutely because it has no capacity to
-wrap around. What is the ring's alone is the capacity: `cap` is a **type parameter**, `WF` ties the store's
+index arithmetic live in `LeanIn.Data.Slots`. What is the ring's alone is the capacity: `cap` is a **type parameter**, `WF` ties the store's
 length to it, and `Bounded` is the law that its live range never exceeds it.
 
 `push` and `pop` use `Array.setIfInBounds` rather than `Array.set`: the latter demands a bound proof, and

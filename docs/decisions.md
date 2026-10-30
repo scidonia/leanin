@@ -273,6 +273,11 @@ the lock is released, so nothing outside the critical section can observe the pl
 read the pool: under `Aligned` a refusal means an empty pool, so nothing needs restoring and only the accept
 path releases the hold. A site that restored a pool it had already read could not: the in-place mutation moves
 the value it means to restore.
+
+**Correction: the placeholder is necessary and not sufficient.** A store into a cell another thread can reach
+marks the value multi-threaded, and a marked array is never exclusive, so once a pool's cell is shared each ring
+write copies the slots whatever the transaction released. Unshared, `Pool.submit` and `Pool.takeFromRing` also keep
+`p` alive across the write. The ring's copy is bounded by `cap`; the measurement is `PERFORMANCE.md` §4.9.
 **Precedent: Lean's own containers already do exactly this.** `Std.DHashMap` is an Array-of-buckets
 implementation carrying a bundled well-formedness invariant, and `Std/Data/DHashMap/Lemmas.lean`
 proves its operations against a **`List` model**. Array container, list ghost view, laws in a separate
@@ -927,15 +932,18 @@ in [`interface.md`](interface.md) §5: a caller's captured environment, because 
 a *type* and a closure's environment is not one. **D9's pointer** — this is the "revisit once the interface
 has seen use" event, and the answer is that the marker covers the task and the capability and not the capture.
 
-**The inject's store.** Not a `List` (its O(1) end is the front, so every append walks it — the burst
-cliff of [`PERFORMANCE.md`](PERFORMANCE.md) §4.3) and not `Std.Queue` (a second container with none of
-`Ring`'s proof work and a header that calls itself temporary). It is an **index-based growable deque over
-`Ring`'s store** (`Data/Slots.lean` is the shared store; `Ring` keeps `cap` a type parameter and `Bounded`
-means exactly what it meant; `Deque` is the unbounded view). Its three costs are stated rather than
-minimised — linearisation on growth, compaction of the consumed prefix, the release-the-hold rule D12 already
-follows — all O(1) amortised, so the reason is structural reuse rather than speed; a plain `Array` was
-rejected because it moves the O(n) onto the take path. The model's `inject : List α` is the specification and
-keeps its `++ [x]`.
+**The inject's store.** Two lists, `Data/Deque.lean`: a push conses onto the write side, a pop reads the read
+side, and an exhausted read side takes the write side reversed. Not a single `List` (its O(1) end is the front,
+so every append walks it — the burst cliff of [`PERFORMANCE.md`](PERFORMANCE.md) §4.3), not `Std.Queue` (a
+header that calls itself temporary, and no ghost view), and the same shape `Task/Sync.lean`'s channel keeps its
+buffer in. The model's `inject : List α` is the specification and keeps its `++ [x]`.
+
+**Superseded: an index-based growable deque over `Ring`'s store.** This decision first chose that store, for
+structural reuse, and called its costs O(1) amortised. That reasoning holds for a uniquely owned array, and the
+inject's array never is one: the cell is reachable from every carrier, so it is marked on every store and copied
+on every write, and each operation was O(depth). A backlog of 50 000 jobs took over a minute
+([`PERFORMANCE.md`](PERFORMANCE.md) §4.9). The price of the two lists is that the reversal is paid in one pop,
+under the lock, rather than spread out; its worst case is priced there too.
 
 **The inject stays unbounded, and bounding its *admission* is its own item.** The inject is also the *resume*
 path, so a capacity on it would make a producer either refuse a resume (a lost wakeup, exactly what
