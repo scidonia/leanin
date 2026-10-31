@@ -9,14 +9,12 @@ public section
 set_option linter.unusedSectionVars false
 
 /-!
-# The store the ring and the deque share
+# The ring's store
 
-Both containers keep their live range in an `Array` of slots with the index of the oldest live element:
-`Array.set` modifies in place when the array is uniquely referenced, whereas `List.set` copies a prefix, so
-the store is the whole reason either container is cheap. What the two disagree about is how an index is
-written back — the ring's store is a fixed `cap` slots and its free position wraps modulo `cap`, while the
-deque's store grows and its indices are absolute — and that is a difference in the *container*, not in the
-store.
+The ring keeps its live range in an `Array` of slots with the index of the oldest live element: `Array.set`
+modifies in place when the array is uniquely referenced, whereas `List.set` copies a prefix. The store is a fixed
+`cap` slots and its free position wraps modulo `cap`. `LeanIn.Data.Deque` used to share it and no longer does: an
+unbounded queue held in a shared cell cannot afford a store that a write copies (see that file).
 
 So the store is here: the three fields, the ghost view parameterised by the index function, the density
 predicate a view needs, and `slot_ne`, the one modular lemma that keeps `%` out of everything below it. A
@@ -28,8 +26,8 @@ namespace LeanIn
 
 /-- The store: an array of slots, the index of the oldest live element, and the live count.
 
-`head` is meaningful only through a container's index function: the ring wraps it modulo `cap`, the deque
-treats it as an absolute position in a store it may grow or compact. The store itself does not care. -/
+`head` is meaningful only through a container's index function: the ring wraps it modulo `cap`. The store itself
+does not care. -/
 structure Slots (α : Type) where
   /-- Backing store, in physical order. Slots outside the live range are `none`. -/
   slots : Array (Option α) := #[]
@@ -66,8 +64,7 @@ def Slots.setSlot (s : Slots α) (i : Nat) (v : Option α) : Slots α :=
 /-- **Distinct live indices occupy distinct slots.**
 
 Everything modular is here. `j < cap` rather than `j < size` because a push compares the *free* position
-`size` against the live indices. The ring's index function is the only caller: the deque's indices are
-absolute, so it never needs this.
+`size` against the live indices. The ring's index function is the only caller.
 
 **How the arithmetic is done.** `omega` handles `%` only after it is eliminated, so this normalises first
 (`Nat.mod_add_mod`) and then splits on whether each argument is below or above `cap`. The one non-obvious

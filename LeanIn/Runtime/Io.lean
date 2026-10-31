@@ -201,8 +201,10 @@ private structure WheelTimer where
   onCancel : IO Unit := pure ()
 
 /-- The scheduling hand-off: timers carriers asked for (`liveSchedule`) and the driver has not yet taken into
-the wheel. Carriers touch only this queue, which is taken in one pointer swap. -/
-private initialize timerPending : Std.Mutex (Array WheelTimer) ← Std.Mutex.new #[]
+the wheel, newest first. Carriers touch only this queue, which is taken in one pointer swap. A list and not an
+`Array`: this cell is global, so everything stored in it is marked, and a marked array is copied by every push —
+and a single-carrier driver only drains here once its queues are empty, so a burst of arms is a deep queue. -/
+private initialize timerPending : Std.Mutex (List WheelTimer) ← Std.Mutex.new []
 
 /-- The timing wheel, ordered on the deadline. Only the loop's *driver* touches it — the single-carrier driver
 or the pump thread, never both at once — so the lock is uncontended; it exists to keep the two from racing if
@@ -545,8 +547,8 @@ def driveOnce (ownedWorkOnly : Bool) : IO Bool := do
   if ← sweepDue then return true
   let fresh ← timerPending.atomically do
     let ps ← get
-    set (#[] : Array WheelTimer)
-    return ps
+    set ([] : List WheelTimer)
+    return ps.reverse
   wheelRef.atomically do
     modify (fun w => fresh.foldl (fun acc t =>
       match acc.get? t.deadline with
@@ -665,12 +667,11 @@ def liveCancelTimer (id : Nat) : IO Unit := do
       unless rest.isEmpty do w' := w'.insert d rest
     set w'
     return hit
-  let hit := takenPending ++ takenWheel
-  for t in hit.toList do t.onCancel
+  for t in takenPending ++ takenWheel.toList do t.onCancel
 
 def liveScheduleCancel (deadline : Nat) (cancel : Task.Cancel) (fire onCancel : IO Unit) : IO (IO Unit) := do
   let id ← timerNextId.modifyGet fun n => (n, n + 1)
-  timerPending.atomically (modify (·.push { id, deadline, cancel, fire, onCancel }))
+  timerPending.atomically (modify ({ id, deadline, cancel, fire, onCancel } :: ·))
   unless ← flagGet driverActiveRef do ensurePump
   npUvWheelWake
   return (liveCancelTimer id : IO Unit)
@@ -687,10 +688,10 @@ def abortAll : IO Unit := do
   -- on it is aborted rather than left for a deadline that cannot arrive. This holds even when no
   -- listener bound a loop table: timers are queued independently of one.
   let pending ← timerPending.atomically do
-    let ts ← get; set (#[] : Array WheelTimer); return ts
+    let ts ← get; set ([] : List WheelTimer); return ts.reverse
   let wheeled ← wheelRef.atomically do
     let w ← get; set (Std.TreeMap.empty : Std.TreeMap Nat (Array WheelTimer)); return w.toList.flatMap (fun (_, ts) => ts.toList)
-  for t in pending.toList ++ wheeled do
+  for t in pending ++ wheeled do
     t.onCancel
   match ← loopRef.get with
   | none => pure ()

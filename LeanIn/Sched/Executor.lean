@@ -204,16 +204,14 @@ structure Executor (α : Type) (cap : Nat) where
   private spare             : Std.Mutex (Pool α cap)
   /-- **What a transaction writes into a pool's cell while it holds that pool's lock.**
 
-`Array.set` copies when its array is still referenced elsewhere, and the cell's own reference to the pool
-being read is exactly that other reference — so every ring mutation under `Mutex.atomically` was copying the
-slots. Writing this value releases the cell's hold, leaving the pool the transaction read as the only owner
-of its slots, and the mutation then happens in place. Nothing outside the critical section can see it: the
-lock is held for the whole transaction, and the value the transaction computes is written back before the
-lock is released. -/
+Writing this value releases the cell's hold on the pool the transaction read, which is necessary for an in-place
+ring write and not sufficient. It helps only while the cell is unshared: once another thread can reach the cell,
+every value stored in it is marked multi-threaded, a marked array is never exclusive, and each ring write copies
+the `cap` slots regardless. That is the state a running carrier's pool is in, and the cost is bounded by `cap`,
+which is why the ring can afford it and the unbounded inject could not (`Data/Deque.lean`). Nothing outside the
+critical section can see the placeholder: the lock is held for the whole transaction, and the value the
+transaction computes is written back before the lock is released. -/
   poolPlaceholder   : Pool α cap
-  /-- The inject cell's own placeholder, for the same reason: the deque's `Array` would otherwise be copied
-  by the transaction that grows or writes it. -/
-  injectPlaceholder : InjectState α
 
 /-- **Replace the entry at index `i`**, leaving a list that is too short alone. Written out rather than taken
 from core because the per-carrier list is indexed by worker number and a partial list must not be a defect. -/
@@ -237,8 +235,7 @@ def Executor.new (α : Type) (cap : Nat) (workers : Nat) : IO (Executor α cap) 
            metered           := false
            counters          := ← Std.Mutex.new ((List.range n).map (fun _ => ({} : CarrierCounters)))
            spare             := ← Std.Mutex.new (emptyPool α cap)
-           poolPlaceholder   := emptyPool α cap
-           injectPlaceholder := { items := {}, parked := 0, total := 0, stopping := false, served := 0 } }
+           poolPlaceholder   := emptyPool α cap }
 
 /-- How many carriers this executor was built with. -/
 def Executor.workerCount (e : Executor α cap) : Nat := e.workers.size
@@ -271,7 +268,6 @@ appended here rather than written into a pool, because the list is shared. -/
 def Executor.pushItems (e : Executor α cap) (xs : List α) : BaseIO Unit :=
   e.inject.atomically do
     let st ← get
-    set e.injectPlaceholder
     set { st with items := xs.foldl (fun d x => d.push x) st.items }
     if 0 < st.parked then e.cv.notifyOne
 
@@ -283,7 +279,6 @@ def Executor.pushInjectRaw (e : Executor α cap) (x : α) : BaseIO Unit :=
 def Executor.popInject (e : Executor α cap) : IO (Option α) :=
   e.inject.atomically do
     let st ← get
-    set e.injectPlaceholder
     let r := st.items.pop
     match r.1 with
     | some x => set { st with items := r.2, served := st.served + 1 }; return (some x)

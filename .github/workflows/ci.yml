@@ -37,6 +37,8 @@ jobs:
             echo "== $s =="
             bash tests/executor-contract.sh "$s"
           done
+      - name: the queue scaling guard
+        run: bash tests/queue-scaling.sh
       - name: the threeway comparison
         run: |
           bash bench/threeway.sh 8
